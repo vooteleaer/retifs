@@ -60,6 +60,22 @@ The Pi's existing Python RNS config (AutoInterface, BackboneInterface listener, 
 - After starting `prnsd`: **LoRa RNode up and passing traffic**, backbone listener bound, discovered gateways auto-connected again.
 - AutoInterface and I2P show **Down** under Prns. Still to investigate.
 
+### Prns ↔ Prns between all three nodes (after the switch)
+All three nodes run Prns. The Pi has no direct link to the others, so paths go through public backbone gateways. 1 MiB per transfer.
+
+| From → to | Mode | Path | Time | Hash |
+|---|---|---|---|---|
+| Testbed → Pi | push | 4 hops | 6.9 s (incl. path discovery) | ✅ |
+| Dev machine → Pi | push | 4 hops (via testbed, then backbone) | 5.9 s | ✅ |
+| Pi → dev machine | push | 4 hops | 6.5 s | ✅ |
+| Pi → testbed | **fetch** (`cp -f` from a `-F -j` listener) | 4 hops | 11.3 s | ✅ |
+
+- Fetch mode is the closer model for retifs `/get`: the holder serves, and the requester pulls. It also works around the container's listen panic.
+- Throughput on these paths is about 1–1.3 Mbps, limited by the public gateways' advertised 5 Mbps rate and shared load.
+- `prnsd cp -l` works on the Pi (native Linux aarch64), which confirms that the listen panic is specific to the testbed container or its `-hw` build.
+- A received file with a duplicate name is saved as `name.1`. An empty `.rncp.*.staging` file is left behind in every case.
+- Not yet tested: whether the `-j` jail refuses paths outside the jail (`../`, absolute paths). This is relevant to retifs's own `/get` handler.
+
 ## Findings
 - **The Link and Resource protocols interoperate** between Python RNS and Prns. Prns `cp` is `rncp`-compatible: same options, and it uses `.rncp.*.staging` files.
 - **Mixed multi-hop paths work:** Python sender → third-party transport nodes → Prns receiver over 5 hops, with the Link, Resource and hash all intact.
@@ -71,6 +87,8 @@ The Pi's existing Python RNS config (AutoInterface, BackboneInterface listener, 
 - [x] Python → Prns across the network (5 hops, public backbone).
 - [ ] Multi-hop through a *Prns* transport node (the path above went through Python/third-party nodes).
 - [ ] Prns → Python direction across machines.
+- [x] Prns ↔ Prns across machines, push and fetch.
+- [ ] Fetch jail: refusal of paths outside `-j`.
 - [ ] LoRa (Hopspot / RNode): Link setup time and Resource throughput.
 - [ ] Ratchets: announce with ratchets, send from the other implementation.
 - [ ] Many small Resources (16–32 KiB, the retifs chunk size) on one Link vs one Resource per Link.
