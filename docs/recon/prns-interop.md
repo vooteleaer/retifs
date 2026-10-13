@@ -8,6 +8,7 @@ Checks whether [Prns](https://github.com/KenAKAFrosty/Prns) works as retifs's tr
 |---|---|---|
 | Dev machine (Windows 11) | `prnsd` 0.3.7 as the shared instance; Python RNS 1.4.2 tools attach to it | sender/receiver |
 | Testbed server (Linux, Docker) | `prnsd` 0.3.7 (`-hw` image) | sender |
+| Raspberry Pi (aarch64, Debian 13) | **Python `rnsd`** 1.5.2 with public backbone auto-connects (`prnsd` installed but not running) | Python reference sender |
 
 The two are linked by a TCP interface (full mode) over the LAN. Test data was random files of 1 MiB and 64 MiB, verified by SHA-256 after each transfer.
 
@@ -35,15 +36,34 @@ The two are linked by a TCP interface (full mode) over the LAN. Test data was ra
 
 \* Includes Python interpreter startup. Both ends attach to the same `prnsd`, so this tests Link and Resource protocol compatibility between the implementations, not a network path.
 
+### Python RNS → Prns across the internet (Raspberry Pi → dev machine)
+The Pi and the dev machine have no direct link. Python `rnpath` found the Prns listener **5 hops away via a public backbone gateway** (Australia), so the route crosses third-party transport nodes as well as both implementations.
+
+| File | Rate | Hash |
+|---|---|---|
+| 1 MiB | ~725 kbps (about 12 s) | ✅ |
+
+Only 1 MiB was sent, so as not to load volunteer-run community nodes with 64 MiB. The sender reports "complete" a moment before the receiver has written and renamed the file, which is expected and not a bug.
+
+### Tooling across implementations
+| Tool | Against | Result |
+|---|---|---|
+| Python `rnstatus` | `prnsd` | ⚠️ no output |
+| `prnsd status` | Python `rnsd` | ⚠️ `could not read the reply for shared-instance RPC … unexpected end of file` |
+
+The shared-instance RPC (interface stats) isn't compatible in either direction. Path table queries (`rnpath -t`) do work. Use each implementation's own status tool.
+
 ## Findings
 - **The Link and Resource protocols interoperate** between Python RNS and Prns. Prns `cp` is `rncp`-compatible: same options, and it uses `.rncp.*.staging` files.
+- **Mixed multi-hop paths work:** Python sender → third-party transport nodes → Prns receiver over 5 hops, with the Link, Resource and hash all intact.
 - **Throughput on TCP is far above what retifs needs** for chunk transfer. The ~0.5 s Link setup dominates small transfers, so retifs should batch many CIDs into one Link (`/get [cid1, cid2, …]`), as planned.
 - **Bug: `prnsd cp -l` panics in the testbed container.** The message is `recipe destination is valid and fits the store: ServesEmptyEndpointSet` (`prns-runtime/core/src/runtime/node/assembly.rs:689`). The same 0.3.7 listens fine on Windows, so the cause is likely the `-hw` build or its config. To report upstream.
 - **Minor:** an empty `.rncp.*.staging` file is left behind after a transfer.
 
 ## Still to test
-- [ ] Python → Prns across the network (Python node on a separate machine).
-- [ ] Multi-hop: through a Prns transport node.
+- [x] Python → Prns across the network (5 hops, public backbone).
+- [ ] Multi-hop through a *Prns* transport node (the path above went through Python/third-party nodes).
+- [ ] Prns → Python direction across machines.
 - [ ] LoRa (Hopspot / RNode): Link setup time and Resource throughput.
 - [ ] Ratchets: announce with ratchets, send from the other implementation.
 - [ ] Many small Resources (16–32 KiB, the retifs chunk size) on one Link vs one Resource per Link.
