@@ -28,6 +28,12 @@
 - **Difference:** public by default. "Sealing" is per file. It doesn't hide size or recipients, and it doesn't prove who sealed. No attributes, queries, history, capabilities or FUSE.
 - **Use for us:** test it on a real mesh, read `specification.md` (especially Appendix A), borrow transport/DHT ideas. Don't build directly on top of it.
 
+## Prns (github.com/KenAKAFrosty/Prns, Rust, Apache-2.0/MIT)
+- A Rust implementation of RNS. `prnsd` is a drop-in `rnsd` replacement with interop benchmarks against stock RNS.
+- Its core is `no_std` and runs from microcontrollers to servers and WASM. It has FFI bindings for many languages.
+- `IdentitySigner` exposes operations, not secrets, which suits hardware keys.
+- **Use for us:** our transport layer ([ADR-0003](adr/0003-rust-and-prns.md)).
+
 ## Others
 - **Tahoe-LAFS**: capabilities (read-cap = CID + key), very well thought through.
 - **Dolt**: a versioned DB on Prolly trees, with diff and merge solved.

@@ -4,12 +4,12 @@
 - **Names:** petnames, community namespaces (`community/…`), or both? Zooko's triangle.
 - **Discovery:** Bloom filters in announces vs a DHT (the rnfs experience) vs a hybrid.
 - **Scaling:** regional limiting of announces, hierarchy, path requests on demand.
-- **Native RNS** (Rust/C) for the backbone and the initramfs.
+- **Relationship with Prns:** upstream contributions vs fork policy, given one dominant maintainer.
 - **Pinning economics:** reciprocity vs an exchange mechanism.
 - **Spam:** LXMF stamps on announces, pinning requests, attributes.
 - **Offline read semantics:** what does `read()` do when the chunk isn't local and there's no network? Block, `EIO`, or guarantee it never happens through pinning?
 - **Conflict UX:** how to show two heads to the user.
 - **Range/geo queries with a blind index** over the network.
 - **YubiKey PIV vs OpenPGP**: depends on the firmware.
-- **Haiku hardware and YubiKey support.**
+- **Haiku hardware, YubiKey and Rust support.**
 - **How to relate to rnfs.** Contact the author?

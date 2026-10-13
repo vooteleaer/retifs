@@ -73,11 +73,12 @@ Prototypes are throwaway. They're for learning, not for locking in the format, a
 | Phase | Goal | |
 |---|---|---|
 | 0 | **Reconnaissance**: rnfs on a test mesh, reading, YubiKey firmware | ◀ now |
-| 1 | **Content layer**: Python daemon on RNS, per-chunk encryption, local HTTP gateway | |
+| 1 | **Content layer**: Rust daemon on [Prns](https://github.com/KenAKAFrosty/Prns), per-chunk encryption, local HTTP gateway | |
 | 2 | **Database**: signed attributes, Prolly-tree index, blind index, commit chain | |
 | 3 | **Identity & permissions**: capability chains, group keys, YubiKey-backed RNS identity | |
-| 4 | **Client**: FUSE mount, Haiku integration, hpkg packages | |
+| 4 | **Linux client**: FUSE mount, attributes as xattrs, query directories | |
 | 5 | **Thin client**: bootable USB stick plus YubiKey, with the system loaded from your namespace | |
+| later | **Haiku client**: native attributes and live queries in Tracker | |
 
 See the [prototype plan](docs/05-prototype-plan.md).
 
