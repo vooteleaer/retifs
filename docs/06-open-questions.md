@@ -1,7 +1,7 @@
 # Open questions
 
 - **Project name.** `retifs` is a working title.
-- **Names:** petnames, community namespaces (`estmesh/…`), or both? Zooko's triangle.
+- **Names:** petnames, community namespaces (`community/…`), or both? Zooko's triangle.
 - **Discovery:** Bloom filters in announces vs a DHT (the rnfs experience) vs a hybrid.
 - **Scaling:** regional limiting of announces, hierarchy, path requests on demand.
 - **Native RNS** (Rust/C) for the backbone and the initramfs.
@@ -12,4 +12,3 @@
 - **YubiKey PIV vs OpenPGP**: depends on the firmware.
 - **Haiku hardware and YubiKey support.**
 - **How to relate to rnfs.** Contact the author?
-- **Core team:** 2–3 people from EstMesh before the repo goes public.

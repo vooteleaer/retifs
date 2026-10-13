@@ -3,7 +3,7 @@
 Prototypes are throwaway. They're for learning, not for locking in the format. The specification comes after.
 
 ## Phase 0: reconnaissance
-- [ ] Run rnfs on 2–3 EstMesh nodes (TCP + LoRa) and measure DHT, multi-source and upload_budget.
+- [ ] Run rnfs on 2–3 mesh nodes (TCP + LoRa) and measure DHT, multi-source and upload_budget.
 - [ ] Read the rnfs `specification.md`, Giampaolo's BFS book, the Tahoe-LAFS capability doc and the Dolt Prolly-tree articles.
 - [ ] YubiKey: `ykman info` → firmware (5.7+ PIV Ed25519/X25519 vs OpenPGP).
 

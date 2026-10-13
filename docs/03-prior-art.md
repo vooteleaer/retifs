@@ -26,7 +26,7 @@
 - Names = announce + signed record, held by keepers. Pubsub left out.
 - LoRa settings: upload_budget, serve/no_serve_interfaces, quiet_hours. Remote pinning with quotas. Export/import for sneakernet.
 - **Difference:** public by default. "Sealing" is per file. It doesn't hide size or recipients, and it doesn't prove who sealed. No attributes, queries, history, capabilities or FUSE.
-- **Use for us:** test it on EstMesh, read `specification.md` (especially Appendix A), borrow transport/DHT ideas. Don't build directly on top of it.
+- **Use for us:** test it on a real mesh, read `specification.md` (especially Appendix A), borrow transport/DHT ideas. Don't build directly on top of it.
 
 ## Others
 - **Tahoe-LAFS**: capabilities (read-cap = CID + key), very well thought through.

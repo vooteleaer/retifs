@@ -72,7 +72,7 @@ Prototypes are throwaway. They're for learning, not for locking in the format, a
 
 | Phase | Goal | |
 |---|---|---|
-| 0 | **Reconnaissance**: rnfs on EstMesh nodes, reading, YubiKey firmware | ◀ now |
+| 0 | **Reconnaissance**: rnfs on a test mesh, reading, YubiKey firmware | ◀ now |
 | 1 | **Content layer**: Python daemon on RNS, per-chunk encryption, local HTTP gateway | |
 | 2 | **Database**: signed attributes, Prolly-tree index, blind index, commit chain | |
 | 3 | **Identity & permissions**: capability chains, group keys, YubiKey-backed RNS identity | |
