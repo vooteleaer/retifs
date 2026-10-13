@@ -5,6 +5,7 @@ Measures how retifs-style chunk fetching behaves on a real RNS path:
   A  new Link per chunk
   B  one Link, one request per chunk
   C  one Link, batched requests (/get [id1..idN])
+  D  one Link, pipelined single-chunk requests (N in flight)
 
 Chunks are deterministic (shake_256 of the chunk id), so the client verifies
 every byte without the server sending hashes.
@@ -84,11 +85,16 @@ class Client:
             time.sleep(0.01)
         return link
 
-    def get(self, link: RNS.Link, ids, size):
-        receipt = link.request("/get", [list(ids), size], timeout=self.timeout)
-        while receipt.get_status() in (RNS.RequestReceipt.SENT, RNS.RequestReceipt.DELIVERED,
-                                       RNS.RequestReceipt.RECEIVING):
-            time.sleep(0.005)
+    def send(self, link: RNS.Link, ids, size):
+        return link.request("/get", [list(ids), size], timeout=self.timeout)
+
+    @staticmethod
+    def pending(receipt) -> bool:
+        return receipt.get_status() in (RNS.RequestReceipt.SENT, RNS.RequestReceipt.DELIVERED,
+                                        RNS.RequestReceipt.RECEIVING)
+
+    @staticmethod
+    def verify(receipt, ids, size) -> int:
         if receipt.get_status() != RNS.RequestReceipt.READY:
             raise RuntimeError(f"request failed (status {receipt.get_status()})")
         chunks = receipt.get_response()
@@ -96,6 +102,28 @@ class Client:
             if c != chunk(i, size):
                 raise RuntimeError(f"chunk {i} corrupt")
         return len(chunks)
+
+    def get(self, link: RNS.Link, ids, size):
+        receipt = self.send(link, ids, size)
+        while self.pending(receipt):
+            time.sleep(0.005)
+        return self.verify(receipt, ids, size)
+
+    def pipelined(self, link: RNS.Link, n, size, window):
+        """One chunk per request, up to `window` requests in flight."""
+        inflight, nxt, done = [], 0, 0
+        while done < n:
+            while nxt < n and len(inflight) < window:
+                inflight.append((nxt, self.send(link, [nxt], size)))
+                nxt += 1
+            still = []
+            for i, rc in inflight:
+                if self.pending(rc):
+                    still.append((i, rc))
+                else:
+                    done += self.verify(rc, [i], size)
+            inflight = still
+            time.sleep(0.005)
 
 
 def report(name, n, size, seconds, extra=""):
@@ -112,29 +140,41 @@ def run_client(args):
 
     # A: new link per chunk
     setups = []
+    if "A" in args.skip:
+        n_a = 0
+    else:
+        n_a = n
     t0 = time.time()
-    for i in range(n):
+    for i in range(n_a):
         s = time.time()
         link = c.link()
         setups.append(time.time() - s)
         c.get(link, [i], size)
         link.teardown()
-    report("A  new Link per chunk", n, size, time.time() - t0,
-          f"(link setup median {statistics.median(setups) * 1000:.0f} ms)")
+    if n_a:
+        report("A  new Link per chunk", n, size, time.time() - t0,
+               f"(link setup median {statistics.median(setups) * 1000:.0f} ms)")
 
     # B: one link, one request per chunk
     link = c.link()
-    t0 = time.time()
-    for i in range(n):
-        c.get(link, [i], size)
-    report("B  one Link, request per chunk", n, size, time.time() - t0)
+    if "B" not in args.skip:
+        t0 = time.time()
+        for i in range(n):
+            c.get(link, [i], size)
+        report("B  one Link, request per chunk", n, size, time.time() - t0)
 
     # C: one link, batched
-    for batch in args.batches:
+    for batch in ([] if "C" in args.skip else args.batches):
         t0 = time.time()
         for start in range(0, n, batch):
             c.get(link, range(start, min(start + batch, n)), size)
         report(f"C  one Link, batch of {batch}", n, size, time.time() - t0)
+
+    # D: one link, pipelined single-chunk requests
+    for window in args.pipeline:
+        t0 = time.time()
+        c.pipelined(link, n, size, window)
+        report(f"D  one Link, {window} in flight", n, size, time.time() - t0)
     link.teardown()
     print("all chunks verified", flush=True)
 
@@ -150,6 +190,8 @@ def main():
     cl.add_argument("--n", type=int, default=64)
     cl.add_argument("--size", type=int, default=32768)
     cl.add_argument("--batches", type=int, nargs="+", default=[8, 32, 64])
+    cl.add_argument("--pipeline", type=int, nargs="+", default=[4, 16])
+    cl.add_argument("--skip", nargs="*", default=[], help="patterns to skip, e.g. A B")
     cl.add_argument("--timeout", type=float, default=60)
     args = ap.parse_args()
     run_server(args) if args.mode == "server" else run_client(args)
