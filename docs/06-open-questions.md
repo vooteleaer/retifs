@@ -8,6 +8,7 @@
 - **Pinning economics:** reciprocity vs an exchange mechanism.
 - **Spam:** LXMF stamps on announces, pinning requests, attributes.
 - **App identity on Linux:** how to bind a per-app capability to a process reliably without a sandbox (Flatpak/portal identity, executable hash, user prompt?).
+- **Removal race:** which of a member's writes count when they were made offline, concurrently with that member's removal? Causal rule needed.
 - **Conflict UX:** how to show two heads to the user.
 - **Range/geo queries with a blind index** over the network.
 - **YubiKey PIV vs OpenPGP**: depends on the firmware.

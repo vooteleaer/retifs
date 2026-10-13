@@ -48,8 +48,10 @@ Files, folders, albums, packages, versions and branches are all combinations of 
 - Changing several records under one root is an atomic commit.
 - History queries are ordinary queries against an older root.
 - Sub-namespaces are versioned independently (photo collection ≠ system configuration).
-- **Granularity:** Time Machine style (all commits for an hour, hourly for a day, daily for a month...). Unique chunks of squashed commits expire through the lease.
-- **Namespace** = destination (`retifs.ns.<name>` + identity), addressed like an RNS destination hash. Updates carry a sequence number (rollback protection) and propagate via announce.
+- **Every modification is a version** (one API call, one transaction, or one file save). Every version is kept by default. A namespace can opt into thinning, which drops only old content, never commits. See [ADR-0006](adr/0006-versioning-and-sharing.md).
+- **Multi-writer:** each writer has its own append-only chain. The namespace state is the merge of all heads, and every reader validates signatures and capabilities on merge.
+- **Sharing:** a share is a namespace, either a group namespace (all members write) or a filtered read-only projection with its own key.
+- **Namespace** = destination (`retifs.ns.<name>` + identity), addressed like an RNS destination hash. Updates carry a per-writer sequence number (rollback protection) and propagate via announce.
 - **Capabilities** (UCAN-like): `{issuer, audience, resource, action, expiry, proof}`, content-addressed. Delegation chain where each link may only narrow. Read permission = key, and write permission = signature.
 - **Revocation:** short expiry times plus signed revocation records. Revoking read access = key rotation.
 

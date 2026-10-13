@@ -291,7 +291,7 @@ let commit = ns.transaction(|tx| async move {
 }, "Create album").await?;   // -> CommitId
 ```
 
-- Every change outside an explicit transaction is its own commit. The daemon may batch quick consecutive commits (granularity is reduced later, Time Machine-style).
+- **Every modification is a version** ([ADR-0006](adr/0006-versioning-and-sharing.md)): each call outside a transaction is its own signed commit, and the daemon never batches separate modifications.
 - A transaction is atomic: everything lands in one root, or nothing does.
 
 ### 10.2 History
@@ -303,12 +303,20 @@ ns.at(root_or_commit).await?       -> NsView     // read-only Ns: get, query, re
 ns.diff(a, b).await?               -> Vec<Change>
 ns.heads().await?                  -> Vec<CommitId>   // >1 = unresolved conflict
 ns.merge(&[CommitId], resolver).await? -> CommitId
+
+// per record
+ns.versions(id).await?             -> Vec<Version>  // { commit, time, author, changed: keys/roles }
+ns.get_at(id, commit).await?       -> Record
+ns.restore(id, commit).await?      -> CommitId      // a new version with the old state
 ```
 
-`Commit { id, parents, root, author, time, message }`
+`Commit { id, parents, root, author, seq, time, message }`
 
+- Each writer (person or device) has its own append-only chain with its own `seq`. The namespace state is the merge of all writers' heads, computed by every reader, and writes without a valid capability are ignored on merge.
 - Two heads mean two devices or people changed things concurrently. Attributes merge automatically (CRDT). Concurrent content versions stay multi-valued until resolved, and `merge` records the resolution.
 - `at()` gives the whole API, read-only, against an old snapshot. History queries are ordinary queries.
+- **Retention:** every version is kept by default. `ns.set_retention(policy)` lets a namespace opt into thinning, which drops only old *content*, never commits.
+- Commits and metadata sync promptly, while the content of intermediate versions may upload lazily (shown as `OnlyHere` in `status()`).
 
 ## 11. Availability and offline
 
@@ -337,6 +345,10 @@ struct Availability {
 ## 12. Sharing and capabilities
 
 ```rust
+rt.create_group("family", &[alice, bob]).await? -> Ns   // group namespace, all members write
+ns.create_share(filter, Share {..}).await?     -> (Ns, Capability) // filtered read-only share namespace
+ns.add_member(identity, actions, filter).await?
+
 ns.share(Share {
     audience: Identity,
     filter: "album = \"Prangli 2026\"",
@@ -351,6 +363,7 @@ ns.members().await?               -> Vec<Member>  // groups
 ns.remove_member(identity).await? // rotates the group key
 ```
 
+- **A share is a namespace** ([ADR-0006](adr/0006-versioning-and-sharing.md)). A group namespace has one group key wrapped for each member. A filtered share is a projection namespace with its own key: only per-block keys are re-wrapped, and no content is copied.
 - A capability is `{issuer, audience, resource, action, expiry, proof}`, content-addressed. Each delegation can only narrow, and the daemon rejects any wider grant with `CannotWiden`. **⚠ irreversible** semantics (decision 4).
 - Read permission = key, and write permission = signature.
 - Revoking read access rotates keys, so the revoked party keeps what they already received but nothing new.

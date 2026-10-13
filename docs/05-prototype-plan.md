@@ -19,10 +19,10 @@ Prototypes are throwaway. They're for learning, not for locking in the format. T
 - [ ] Attribute records (signed), Prolly-tree index, local queries; `set` / `query` / `watch` / `transaction` / `at` in the API.
 - [ ] `keep:<device>` tag and query-based keep rules (proactive pull).
 - [ ] Blind index, remote `/query`, live query.
-- [ ] Commit chain, history queries.
+- [ ] Per-writer commit chains (one commit per modification), merge, history queries, per-record `versions`.
 
 ## Phase 3: identity and permissions
-- [ ] Capability chains, group keys.
+- [ ] Capability chains, group namespaces, filtered share namespaces, validate-on-read, key rotation on removal.
 - [ ] YubiKey-backed Prns `IdentitySigner` (upstream: fallible `sign()`, X25519 exchange through a trait).
 - [ ] Session capabilities; per-app capabilities on the local socket.
 
