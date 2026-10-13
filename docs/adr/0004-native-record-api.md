@@ -40,6 +40,8 @@ Option 3.
 - **Bulk data** is passed as file descriptors (memfd/pipe) over the socket, not copied through messages.
 - **FUSE is a client of this API.** The FUSE frontend from ADR-0002 is built on `libretifs`, not beside it.
 
+The full draft API is in [07-api.md](../07-api.md).
+
 ## Impact on the threat model
 - Improvement: an application no longer automatically sees everything the user owns. It gets only what its capability allows. A FUSE mount still exposes whatever it mounts, so mounting is a deliberate, broad grant.
 - New surface: the local socket and the per-process identification. The socket must be private to the user, and capabilities bind to the process, not just the UID.

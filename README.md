@@ -93,6 +93,7 @@ See the [prototype plan](docs/05-prototype-plan.md).
 | [Threat model](docs/04-threat-model.md) | Who we defend against (draft) |
 | [Prototype plan](docs/05-prototype-plan.md) | Prototype-first ordering |
 | [Open questions](docs/06-open-questions.md) | Unresolved topics |
+| [Native API](docs/07-api.md) | `libretifs`: records, attributes, blocks, queries, history (draft) |
 | [ADRs](docs/adr/) | Decision log |
 
 ## Contributing
