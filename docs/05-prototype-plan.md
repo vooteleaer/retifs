@@ -10,12 +10,14 @@ Prototypes are throwaway. They're for learning, not for locking in the format. T
 
 ## Phase 1: content layer
 - [ ] Rust daemon on Prns (behind our own transport trait): chunking, per-chunk encryption, manifest, `/get [cids]`, pinning.
+- [ ] Local store: ciphertext chunks by CID, pinned / cache / serving tiers ([ADR-0005](adr/0005-local-store-offline.md)).
 - [ ] `libretifs` + local socket: `create`, `put_block`, `read`, `status` ([ADR-0004](adr/0004-native-record-api.md)).
 - [ ] Local HTTP gateway (a client of `libretifs`).
 - [ ] Alpine: `/etc/apk/repositories` → gateway (apk knows nothing about RNS).
 
 ## Phase 2: database
 - [ ] Attribute records (signed), Prolly-tree index, local queries; `set` / `query` / `watch` / `transaction` / `at` in the API.
+- [ ] `keep:<device>` tag and query-based keep rules (proactive pull).
 - [ ] Blind index, remote `/query`, live query.
 - [ ] Commit chain, history queries.
 

@@ -73,6 +73,7 @@ Files, folders, albums, packages, versions and branches are all combinations of 
 - Nodes are blind, so graph-based GC is impossible.
 - **A pin is a lease:** a signed "keep these CIDs until X". If it isn't renewed, the chunks are deleted. The lease is expressed as a **list of chunks**, so structure doesn't leak.
 - Cache (LRU) ≠ pin.
+- **Local store:** metadata always fully local; content in pinned / cache / serving tiers, stored as ciphertext. `keep:<device>` tags and query-based keep rules pull chunks proactively for offline use. See [ADR-0005](adr/0005-local-store-offline.md).
 - Renewal can be delegated to a pinning service via a capability.
 - **Deletion = key destruction.**
 - Archive nodes deliberately pin valuable public content (library).

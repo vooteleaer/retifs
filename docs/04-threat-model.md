@@ -13,7 +13,7 @@ Every crypto decision is checked against this.
 | **Malicious co-author** (in a group) | everything they were granted | un-narrowed rights, forging others' signatures, rewriting history |
 | **Former member** | what they already received | new content after key rotation |
 | **Sybil / spammer** | cheap identities | unlimited storage, announces, attributes (stamps, quotas) |
-| **Lost/stolen YubiKey or stick** | nothing (a stick without the key is noise) | the identity; the device key is revoked by the root |
+| **Lost/stolen YubiKey, stick or disk** | nothing (the local store is ciphertext; without the key it's noise) | the identity; the device key is revoked by the root |
 
 ## Known leaks
 - Chunk count and size class, request timing.
