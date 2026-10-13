@@ -91,4 +91,5 @@ All three nodes run Prns. The Pi has no direct link to the others, so paths go t
 - [ ] Fetch jail: refusal of paths outside `-j`.
 - [ ] LoRa (Hopspot / RNode): Link setup time and Resource throughput.
 - [ ] Ratchets: announce with ratchets, send from the other implementation.
-- [ ] Many small Resources (16–32 KiB, the retifs chunk size) on one Link vs one Resource per Link.
+- [x] Many small chunks per Link vs a Link per chunk: see [chunk-fetch](chunk-fetch.md).
+- [ ] LoRa: parked until a second RNode is available (the Pi has one).
