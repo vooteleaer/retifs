@@ -8,7 +8,7 @@ Checks whether [Prns](https://github.com/KenAKAFrosty/Prns) works as retifs's tr
 |---|---|---|
 | Dev machine (Windows 11) | `prnsd` 0.3.7 as the shared instance; Python RNS 1.4.2 tools attach to it | sender/receiver |
 | Testbed server (Linux, Docker) | `prnsd` 0.3.7 (`-hw` image) | sender |
-| Raspberry Pi (aarch64, Debian 13) | **Python `rnsd`** 1.5.2 with public backbone auto-connects (`prnsd` installed but not running) | Python reference sender |
+| Raspberry Pi (aarch64, Debian 13) | **Python `rnsd`** 1.5.2 at test time, with public backbone auto-connects; switched to `prnsd` afterwards (see below) | Python reference sender |
 
 The dev machine and the testbed server are linked by a TCP interface (full mode) over the LAN. The Pi reaches them only through public backbone gateways. Test data was random files of 1 MiB and 64 MiB, verified by SHA-256 after each transfer.
 
@@ -52,6 +52,13 @@ Only 1 MiB was sent, so as not to load volunteer-run community nodes with 64 MiB
 | `prnsd status` | Python `rnsd` | ⚠️ `could not read the reply for shared-instance RPC … unexpected end of file` |
 
 The shared-instance RPC (interface stats) isn't compatible in either direction. Path table queries (`rnpath -t`) do work. Use each implementation's own status tool.
+
+### Switching a Python node to Prns (Raspberry Pi)
+The Pi's existing Python RNS config (AutoInterface, BackboneInterface listener, I2PInterface, RNodeInterface on a RAK4631, interface discovery with auto-connect) was used unchanged by `prnsd` 0.3.7:
+- `prnsd interfaces validate` accepted the config. The only warnings were ineffective discovery and location settings.
+- The same transport identity and storage were reused.
+- After starting `prnsd`: **LoRa RNode up and passing traffic**, backbone listener bound, discovered gateways auto-connected again.
+- AutoInterface and I2P show **Down** under Prns. Still to investigate.
 
 ## Findings
 - **The Link and Resource protocols interoperate** between Python RNS and Prns. Prns `cp` is `rncp`-compatible: same options, and it uses `.rncp.*.staging` files.
