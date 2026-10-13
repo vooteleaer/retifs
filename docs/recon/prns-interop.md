@@ -10,7 +10,7 @@ Checks whether [Prns](https://github.com/KenAKAFrosty/Prns) works as retifs's tr
 | Testbed server (Linux, Docker) | `prnsd` 0.3.7 (`-hw` image) | sender |
 | Raspberry Pi (aarch64, Debian 13) | **Python `rnsd`** 1.5.2 with public backbone auto-connects (`prnsd` installed but not running) | Python reference sender |
 
-The two are linked by a TCP interface (full mode) over the LAN. Test data was random files of 1 MiB and 64 MiB, verified by SHA-256 after each transfer.
+The dev machine and the testbed server are linked by a TCP interface (full mode) over the LAN. The Pi reaches them only through public backbone gateways. Test data was random files of 1 MiB and 64 MiB, verified by SHA-256 after each transfer.
 
 ## Results (2026-10-13)
 
