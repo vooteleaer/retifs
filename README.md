@@ -110,4 +110,4 @@ Reach the author over Reticulum (LXMF, e.g. Sideband or NomadNet):
 
 ## License
 
-TBD.
+[MIT](LICENSE)
