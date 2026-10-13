@@ -18,7 +18,7 @@ Supports 4 (local-first: the mount reads from the local cache) and 6 (the file t
 ## Decision
 Option 2.
 
-- **Daemon core** exposes a narrow, VFS-like internal API: `lookup / getattr / read / readdir / getxattr / setxattr / query / watch`. Frontends only translate. Other frontends (NFS for LAN clients, a kernel driver for boot) can be added later without touching the core.
+- **Daemon core** is reached only through the native record API ([ADR-0004](0004-native-record-api.md)). Frontends only translate `lookup / getattr / read / readdir / getxattr / setxattr` into it. Other frontends (NFS for LAN clients, a kernel driver for boot) can be added later without touching the core.
 - **Linux:** libfuse.
   - Attributes appear as `user.retifs.*` xattrs.
   - Queries appear as virtual directories, e.g. `.query/album=Prangli 2026/`.

@@ -4,7 +4,7 @@
 
 **retifs** (working title) is a distributed, always-encrypted data system built on [Reticulum](https://reticulum.network) (RNS). It combines **IPFS-style content addressing**, **BeFS-style attributes and queries** and **RNS identity and crypto**.
 
-It has no files as such. Instead it has **records** (a stable ID, attributes and encrypted data blocks) and a **database**. An ordinary file tree is just one view of that database.
+It has no files as such. Instead it has **records** (a stable ID, attributes and encrypted data blocks) and a **database**. Applications use it directly through a native API (records, attributes, queries, history; no paths), the way apps attach to a shared Reticulum instance. An ordinary file tree is just one view of that database, for legacy software.
 
 > [!NOTE]
 > **Status: concept phase.** There's no code yet. The threat model and the list of irreversible decisions come before code. This repo currently holds the design.

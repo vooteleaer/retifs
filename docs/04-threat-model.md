@@ -8,6 +8,7 @@ Every crypto decision is checked against this.
 |---|---|---|
 | **Pinning node** | encrypted chunks, their (padded) size, request timing | content, structure (which chunks belong together), attributes, who the owner is |
 | **Foreign machine** (thin client) | what the session capability allows, during the session | root or device key; any rights after the session ends |
+| **Local application** | what its per-app capability allows | the rest of the user's data; a FUSE mount is a deliberate broad grant |
 | **Network observer** | RNS traffic patterns | content, CIDs (the Link is encrypted) |
 | **Malicious co-author** (in a group) | everything they were granted | un-narrowed rights, forging others' signatures, rewriting history |
 | **Former member** | what they already received | new content after key rotation |

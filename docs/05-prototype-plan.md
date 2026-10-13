@@ -10,21 +10,22 @@ Prototypes are throwaway. They're for learning, not for locking in the format. T
 
 ## Phase 1: content layer
 - [ ] Rust daemon on Prns (behind our own transport trait): chunking, per-chunk encryption, manifest, `/get [cids]`, pinning.
-- [ ] Local HTTP gateway.
+- [ ] `libretifs` + local socket: `create`, `put_block`, `read`, `status` ([ADR-0004](adr/0004-native-record-api.md)).
+- [ ] Local HTTP gateway (a client of `libretifs`).
 - [ ] Alpine: `/etc/apk/repositories` → gateway (apk knows nothing about RNS).
 
 ## Phase 2: database
-- [ ] Attribute records (signed), Prolly-tree index, local queries.
+- [ ] Attribute records (signed), Prolly-tree index, local queries; `set` / `query` / `watch` / `transaction` / `at` in the API.
 - [ ] Blind index, remote `/query`, live query.
 - [ ] Commit chain, history queries.
 
 ## Phase 3: identity and permissions
 - [ ] Capability chains, group keys.
 - [ ] YubiKey-backed Prns `IdentitySigner` (upstream: fallible `sign()`, X25519 exchange through a trait).
-- [ ] Session capabilities.
+- [ ] Session capabilities; per-app capabilities on the local socket.
 
 ## Phase 4: Linux client
-- [ ] Linux: libfuse frontend (POSIX view, `user.retifs.*` xattrs, `.query/` dirs).
+- [ ] Linux: libfuse frontend on `libretifs` (POSIX view, `user.retifs.*` xattrs, `.query/` dirs).
 - [ ] apkovl in the user namespace.
 
 ## Phase 5: thin client
