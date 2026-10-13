@@ -7,6 +7,7 @@
 - **Native RNS** (Rust/C) for the backbone and the initramfs.
 - **Pinning economics:** reciprocity vs an exchange mechanism.
 - **Spam:** LXMF stamps on announces, pinning requests, attributes.
+- **Offline read semantics:** what does `read()` do when the chunk isn't local and there's no network? Block, `EIO`, or guarantee it never happens through pinning?
 - **Conflict UX:** how to show two heads to the user.
 - **Range/geo queries with a blind index** over the network.
 - **YubiKey PIV vs OpenPGP**: depends on the firmware.

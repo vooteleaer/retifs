@@ -23,8 +23,8 @@ Prototypes are throwaway. They're for learning, not for locking in the format. T
 - [ ] Session capabilities.
 
 ## Phase 4: client
-- [ ] FUSE mount (POSIX view).
-- [ ] Haiku: userlandfs, attributes in Tracker.
+- [ ] Linux: libfuse frontend (POSIX view, `user.retifs.*` xattrs, `.query/` dirs).
+- [ ] Haiku: userlandfs native frontend (attributes and live queries in Tracker).
 - [ ] hpkg FUSE driver reading from retifs.
 - [ ] apkovl in the user namespace.
 
