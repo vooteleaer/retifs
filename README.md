@@ -99,4 +99,14 @@ See the [prototype plan](docs/05-prototype-plan.md).
 
 Ideas are welcome in Discussions. The design direction is fixed and written down in the [vision](docs/00-vision.md). A proposal must support at least one principle and must not violate any. Big changes need a working prototype. The core is strict, while the ecosystem (applications, clients, tools) is open.
 
-License: TBD.
+## Contact
+
+Reach the author over Reticulum (LXMF, e.g. Sideband or NomadNet):
+
+```
+90bf8c417cd52103815eaf370387adb5
+```
+
+## License
+
+TBD.
