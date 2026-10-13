@@ -6,8 +6,10 @@
 pub mod chunk;
 pub mod chunker;
 pub mod cid;
+pub mod manifest;
 pub mod secret;
 
 pub use chunk::{open, seal, ChunkError, Sealed, Seed};
 pub use cid::Cid;
+pub use manifest::{FileRef, ManifestError, Store};
 pub use secret::ConvergenceSecret;

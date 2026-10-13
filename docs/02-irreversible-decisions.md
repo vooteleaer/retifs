@@ -14,5 +14,6 @@ These stay forever in every stored chunk and signature. Everything else can be f
 | 8 | **Commit object format**: per-writer chains, one commit per modification, lazy content ([ADR-0006](adr/0006-versioning-and-sharing.md)) | Restructuring history later is impossible | in progress |
 | 9 | **Chunk encryption construction**: per-chunk AEAD, padding size classes | Size leakage, no random access | proposed ([ADR-0008](adr/0008-chunk-encryption-and-cid.md)) |
 | 10 | **Blind index key derivation** | Index leakage, or keys that can't be rotated | open |
+| 11 | **Manifest node format**: fixed binary layout, sealed like chunks | Non-canonical encoding breaks convergence; format changes strand old trees | proposed ([ADR-0009](adr/0009-manifest-format.md)) |
 
 Each decision needs an ADR (`adr/`) and test vectors before any real data is stored with it. The crypto parts get an external review.
