@@ -4,15 +4,15 @@ These stay forever in every stored chunk and signature. Everything else can be f
 
 | # | Decision | Risk | Status |
 |---|---|---|---|
-| 1 | **CID format**: hash algorithm plus a version byte from the start | The IPFS CIDv0→v1 migration was painful for years | open |
+| 1 | **CID format**: hash algorithm plus a version byte from the start | The IPFS CIDv0→v1 migration was painful for years | proposed ([ADR-0008](adr/0008-chunk-encryption-and-cid.md)) |
 | 2 | **Canonical serialization**: exactly what is signed (msgpack key order, integer encoding) | SSB signed a JS engine's JSON formatting, which made other implementations nearly impossible | open |
-| 3 | **Nonces for deterministic crypto**: SIV-style, nonce derived from content | Same key and nonce with different content = silent catastrophe | open |
+| 3 | **Nonces for deterministic crypto**: SIV-style, nonce derived from content | Same key and nonce with different content = silent catastrophe | proposed ([ADR-0008](adr/0008-chunk-encryption-and-cid.md)) |
 | 4 | **Capability semantics**: narrowing, chain validation, revocation | Confused deputy | open |
 | 5 | **Namespace updates**: per-writer sequence numbers, rollback protection (multi-writer, [ADR-0006](adr/0006-versioning-and-sharing.md)) | Replaying an old signed root | in progress |
 | 6 | **Lease format**: expiry and renewal signature, and it covers a chunk list, not a manifest | A manifest-based lease leaks structure | open |
 | 7 | **Record ID vs content CID**: which attributes attach to which | Without the distinction, every change loses the tags | open |
 | 8 | **Commit object format**: per-writer chains, one commit per modification, lazy content ([ADR-0006](adr/0006-versioning-and-sharing.md)) | Restructuring history later is impossible | in progress |
-| 9 | **Chunk encryption construction**: per-chunk AEAD, padding size classes | Size leakage, no random access | open |
+| 9 | **Chunk encryption construction**: per-chunk AEAD, padding size classes | Size leakage, no random access | proposed ([ADR-0008](adr/0008-chunk-encryption-and-cid.md)) |
 | 10 | **Blind index key derivation** | Index leakage, or keys that can't be rotated | open |
 
 Each decision needs an ADR (`adr/`) and test vectors before any real data is stored with it. The crypto parts get an external review.

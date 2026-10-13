@@ -9,6 +9,7 @@ Prototypes are throwaway. They're for learning, not for locking in the format. T
 - [ ] Prns ↔ Python RNS interop over TCP and LoRa: Link, Resource, announces ([ADR-0003](adr/0003-rust-and-prns.md)). TCP done, LoRa pending: [results](recon/prns-interop.md).
 
 ## Phase 1: content layer
+- [x] `retifs-core` spike: FastCDC chunking, per-chunk encryption with size classes, CIDs, and test vectors verified against Python RNS ([ADR-0008](adr/0008-chunk-encryption-and-cid.md), proposed).
 - [ ] Rust daemon on Prns (behind our own transport trait): chunking, per-chunk encryption, manifest, `/get [cids]`, pinning.
 - [ ] Local store: slab segments per size class + redb index, pinned / cache / serving tiers ([ADR-0005](adr/0005-local-store-offline.md), [ADR-0007](adr/0007-local-store-layout.md)).
 - [ ] `libretifs` + local socket: `create`, `put_block`, `read`, `status` ([ADR-0004](adr/0004-native-record-api.md)).

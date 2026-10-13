@@ -7,7 +7,7 @@
 It has no files as such. Instead it has **records** (a stable ID, attributes and encrypted data blocks) and a **database**. Applications use it directly through a native API (records, attributes, queries, history; no paths), the way apps attach to a shared Reticulum instance. An ordinary file tree is just one view of that database, for legacy software.
 
 > [!NOTE]
-> **Status: concept phase.** There's no code yet. The threat model and the list of irreversible decisions come before code. This repo currently holds the design.
+> **Status: concept phase.** This repo is mostly design. The first prototype crate, [`retifs-core`](crates/retifs-core), covers chunking, per-chunk encryption and CIDs (ADR-0008, proposed and awaiting crypto review). It isn't for real data yet.
 
 ## The shift
 
