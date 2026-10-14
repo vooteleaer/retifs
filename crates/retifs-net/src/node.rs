@@ -43,8 +43,9 @@ where
 /// configured with `shared_instance_type = tcp`, e.g. in containers).
 pub async fn attach(handle: &PrnsNodeHandle) -> Result<String, String> {
     let transports = [
+        // Instance name only: Prns connects to the abstract name "rns/<socket_path>".
         #[cfg(target_os = "linux")]
-        SharedInstanceTransport::AbstractUnix { socket_path: "default".into() } // Prns adds the "rns/" prefix,
+        SharedInstanceTransport::AbstractUnix { socket_path: "default".into() },
         SharedInstanceTransport::Tcp,
     ];
 
