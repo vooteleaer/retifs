@@ -75,7 +75,7 @@ A draft upstream report is in [prns-issue-draft](prns-issue-draft.md). It has no
 
 ## Findings
 - **The full stack works end to end** across Windows x86_64, Linux x86_64 (with `prnsd` in Docker over TCP) and Linux aarch64 (Raspberry Pi with native `prnsd` over the abstract socket).
-- **Several requests in flight on one Prns Link can stall forever.** With 4 in flight, 3 of 45 batches never settled; 1 in flight always completed. The root cause is isolated below: it's about request size, not responses. `FetchOpts::default()` uses 1 in flight per link plus a 60 s per-request timeout with retry on other links.
+- **Several requests in flight on one Prns Link can stall forever.** With 4 in flight, 3 of 45 batches never settled; 1 in flight always completed. The root cause is isolated in the section above: it's about request size, not responses. `FetchOpts::default()` uses 1 in flight per link plus a 60 s per-request timeout with retry on other links.
 - **Bigger batches win everywhere measured.** The default is now 32, and 64 is the protocol maximum (`MAX_BATCH`, up to ~1 MiB per response).
 - **Socket naming:** Prns prefixes the abstract socket name with `rns/`, so the transport's `socket_path` is the instance name (`default`), not `rns/default`.
 - **Containerised prnsd:** a `prnsd` configured with a TCP shared instance has no abstract socket, so `attach()` tries the abstract socket first and then TCP.
