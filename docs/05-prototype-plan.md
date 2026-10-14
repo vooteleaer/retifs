@@ -12,7 +12,8 @@ Prototypes are throwaway. They're for learning, not for locking in the format. T
 - [x] `retifs-core` spike: FastCDC chunking, per-chunk encryption with size classes, CIDs, and test vectors verified against Python RNS ([ADR-0008](adr/0008-chunk-encryption-and-cid.md), proposed).
 - [x] Manifests: Merkle tree of sealed nodes, `FileRef` read-cap, random-access reads ([ADR-0009](adr/0009-manifest-format.md), proposed).
 - [x] `retifsd` + `retifs get` on Prns: `/retifs/get [cids]` from the slab store, batched breadth-first fetch by read-cap, verified across Windows/Linux/aarch64 and LAN/backbone ([first-transfer](recon/first-transfer.md)).
-- [ ] Transfer, continued: several Links per peer, multi-source fetch, cache fetched chunks locally, pinning/leases, a proper transport trait.
+- [x] Transfer, continued: transport trait (client side), several links per peer, multi-source with retry, local-first cache ([first-transfer](recon/first-transfer.md)).
+- [ ] Transfer, open: LAN throughput ceiling, occasional unsettled request with ≥4 links, pinning/leases, serving side behind the transport trait.
 - [x] Local store: slab segments per size class + redb index, tier flags, slot reuse, CID-verified reads (`crates/retifs-store`, [ADR-0007](adr/0007-local-store-layout.md)).
 - [ ] Local store, continued: LRU eviction of the cache tier, lease expiry for the serving tier, keep rules ([ADR-0005](adr/0005-local-store-offline.md)).
 - [ ] `libretifs` + local socket: `create`, `put_block`, `read`, `status` ([ADR-0004](adr/0004-native-record-api.md)).

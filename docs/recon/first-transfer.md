@@ -31,15 +31,58 @@ Path found in 9 ms and Link set up in 2 ms. For comparison, `prnsd cp` moved one
 
 That's on par with the best Python pattern on a similar path (0.55 Mbps, [chunk-fetch](chunk-fetch.md)). Only 1 MiB was sent, so as not to load community gateways.
 
+## Second round: transport trait, multiple links, multi-source, cache
+
+The fetcher now goes through a `Transport` trait (ADR-0003, client side). It spreads batches over several links (to one or more peers) via a shared work queue, retries missing or failed batches on links not yet tried, reads chunks already held in the local store, and keeps fetched chunks in the store's cache tier. It's covered by tests over an in-memory network: latency, a peer missing half the chunks, a peer failing every request, a peer returning corrupt data, and a warm cache.
+
+**Same machine, 10 MiB, batch 64, 1 in flight per link:**
+
+| Links | Time | Throughput |
+|---|---|---|
+| 1 | 0.30 s | 280 Mbps |
+| 4 | 0.19 s | 438 Mbps |
+| 8 | 0.21 s | 393 Mbps |
+
+**LAN, 1 hop, 10 MiB, batch 64:**
+
+| Links | Time | Throughput | Note |
+|---|---|---|---|
+| 1 | 1.53 s | 55 Mbps | |
+| 2 | 1.50 s | 56 Mbps | no gain |
+| 4 | 15.2 s | — | one request never settled; retried after the 15 s timeout |
+| 8 | 15.2 s | — | same |
+| 4 (separate run, `--cache`) | 1.08 s | 78 Mbps | no stall this time |
+| 4, warm cache | 0.46 s | — | all 724 chunks from the local store, **0 network bytes** |
+
+Every output was verified by SHA-256.
+
+- Across the real link, throughput stays at about 55 Mbps however many links are used, against ~212 Mbps for one large `prnsd cp` Resource on the same link. The bottleneck isn't link count. Candidates: Resource windowing per ~1 MiB response, or the TCP interface or `prnsd` relaying many medium Resources.
+- With 4 or more links, an occasional request never settles. The retry path recovers, but costs the timeout. This isn't isolated yet, and differs from the stall below (one request per link, small request bodies).
+
+## Root cause of the in-flight stall (isolated)
+`crates/retifs-net/examples/inflight_stall.rs` reproduces it locally with two nodes attached to `prnsd`. **Concurrent requests on one Prns 0.3.7 Link stall when the request body is larger than the link MDU (~431 B), so the request itself is sent as a Resource.** Only 1 of K requests settles; the rest never do. Response size doesn't matter. Small request bodies (≤ 400 B) pipeline fine, and so do concurrent requests on separate links.
+
+| Request body | 4 concurrent on 1 link |
+|---|---|
+| 1, 300, 400 B | 4/4 settled |
+| 450, 600, 1056 B | 1/4 settled, the rest timed out at 20 s |
+
+A blocking handler (5 or 20 ms) does not trigger it. Consequences for retifs:
+- Batches of up to 12 CIDs (396 B) may be pipelined on one link.
+- Larger batches use one request in flight per link (the default).
+
+A draft upstream report is in [prns-issue-draft](prns-issue-draft.md). It has not been posted.
+
 ## Findings
 - **The full stack works end to end** across Windows x86_64, Linux x86_64 (with `prnsd` in Docker over TCP) and Linux aarch64 (Raspberry Pi with native `prnsd` over the abstract socket).
-- **Several Resource responses in flight on one Prns Link can stall forever.** With 4 in flight, 3 of 45 batches never settled; 1 in flight always completed. Hence `FetchOpts::default()` uses 1 in flight plus a 60 s per-request timeout. This is a candidate upstream issue for Prns. **Workaround to try:** several Links per peer, one request in flight on each.
+- **Several requests in flight on one Prns Link can stall forever.** With 4 in flight, 3 of 45 batches never settled; 1 in flight always completed. The root cause is isolated below: it's about request size, not responses. `FetchOpts::default()` uses 1 in flight per link plus a 60 s per-request timeout with retry on other links.
 - **Bigger batches win everywhere measured.** The default is now 32, and 64 is the protocol maximum (`MAX_BATCH`, up to ~1 MiB per response).
 - **Socket naming:** Prns prefixes the abstract socket name with `rns/`, so the transport's `socket_path` is the instance name (`default`), not `rns/default`.
 - **Containerised prnsd:** a `prnsd` configured with a TCP shared instance has no abstract socket, so `attach()` tries the abstract socket first and then TCP.
 - **Store access:** the slab store's redb index is opened exclusively, so files are imported by `retifsd --put` at startup until the local API ([ADR-0004](../adr/0004-native-record-api.md)) exists.
 
 ## Next
-- Several Links per peer (parallelism without the in-flight stall), then retest the LAN at batch 64.
-- Report the stall upstream with a minimal reproduction.
-- Fetch from several peers (multi-source), and cache fetched chunks in the local slab store.
+- Find the LAN ceiling (~55 Mbps vs ~212 Mbps for `prnsd cp`), e.g. by comparing one large response with many 1 MiB responses on one link.
+- Isolate the occasional unsettled request with 4 or more links.
+- Report the request-size stall upstream (draft ready, awaiting go-ahead).
+- Test multi-source on the testbed with two real `retifsd` nodes holding different parts of a file.
