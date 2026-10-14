@@ -1,6 +1,6 @@
-# Draft upstream issue for Prns (NOT POSTED)
+# Upstream issue for Prns
 
-> Prepared 2026-10-14 for https://github.com/KenAKAFrosty/Prns. Not posted; needs the author's (Vootele's) go-ahead.
+> Posted 2026-10-14 as [KenAKAFrosty/Prns#286](https://github.com/KenAKAFrosty/Prns/issues/286). The text below is what was submitted.
 
 **Title:** Concurrent requests on one Link stall when the request body exceeds the link MDU (0.3.7)
 

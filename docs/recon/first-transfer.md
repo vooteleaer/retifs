@@ -71,7 +71,7 @@ A blocking handler (5 or 20 ms) does not trigger it. Consequences for retifs:
 - Batches of up to 12 CIDs (396 B) may be pipelined on one link.
 - Larger batches use one request in flight per link (the default).
 
-A draft upstream report is in [prns-issue-draft](prns-issue-draft.md). It has not been posted.
+Reported upstream as [KenAKAFrosty/Prns#286](https://github.com/KenAKAFrosty/Prns/issues/286) ([text](prns-issue-286.md)).
 
 ## Findings
 - **The full stack works end to end** across Windows x86_64, Linux x86_64 (with `prnsd` in Docker over TCP) and Linux aarch64 (Raspberry Pi with native `prnsd` over the abstract socket).
@@ -84,5 +84,5 @@ A draft upstream report is in [prns-issue-draft](prns-issue-draft.md). It has no
 ## Next
 - Find the LAN ceiling (~55 Mbps vs ~212 Mbps for `prnsd cp`), e.g. by comparing one large response with many 1 MiB responses on one link.
 - Isolate the occasional unsettled request with 4 or more links.
-- Report the request-size stall upstream (draft ready, awaiting go-ahead).
+- Follow [Prns#286](https://github.com/KenAKAFrosty/Prns/issues/286) (request-size stall); re-enable pipelining for large batches once fixed.
 - Test multi-source on the testbed with two real `retifsd` nodes holding different parts of a file.
