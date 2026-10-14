@@ -1,0 +1,12 @@
+[package]
+name = "retifs-net"
+version = "0.0.1"
+description = "retifs networking over Reticulum via Prns (prototype, unstable)"
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+publish = false
+
+[dependencies]
+personal-rns = { version = "=0.3.7", features = ["tokio-host", "tcp", "shared-instance"] }
+tokio = { version = "1", features = ["full"] }

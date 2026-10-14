@@ -1,6 +1,6 @@
 [workspace]
 resolver = "2"
-members = ["crates/retifs-core", "crates/retifs-store"]
+members = ["crates/retifs-core", "crates/retifs-store", "crates/retifs-net"]
 
 [workspace.package]
 edition = "2024"
