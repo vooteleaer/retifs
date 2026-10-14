@@ -70,4 +70,8 @@ Key and IV are both derived from `seed`, which is a PRF (HMAC) of the full frame
   - CBC + HMAC costs more than an AEAD and can't be parallelised for encryption.
   - Padding wastes up to half the class for small chunks (the price of not leaking size).
   - The chunker must keep chunks below 262 076 bytes.
-- **Before acceptance:** an external review of the construction and the KDF labels, and a decision on whether 1 KiB as the smallest class is right for LoRa.
+- **Measured padding overhead (2026-10-14):** a 3 MB file with the current chunker (FastCDC 4/16/60 KiB) took **4.48 MB** in the slab store, i.e. **49 % overhead**. Chunks just above a power of two land in the next class, and FastCDC spreads sizes across class boundaries.
+- **Before acceptance:**
+  - an external review of the construction and the KDF labels;
+  - a decision on whether 1 KiB as the smallest class is right for LoRa;
+  - **reducing the padding overhead**. Options: align the chunker to class boundaries (e.g. `max = class − 68` and `min ≥ class/2`, so chunks fill one class), or finer classes such as 1.5× steps (less waste, but more size information leaks). Changing chunker parameters isn't irreversible; changing the class list is.

@@ -12,7 +12,8 @@ Prototypes are throwaway. They're for learning, not for locking in the format. T
 - [x] `retifs-core` spike: FastCDC chunking, per-chunk encryption with size classes, CIDs, and test vectors verified against Python RNS ([ADR-0008](adr/0008-chunk-encryption-and-cid.md), proposed).
 - [x] Manifests: Merkle tree of sealed nodes, `FileRef` read-cap, random-access reads ([ADR-0009](adr/0009-manifest-format.md), proposed).
 - [ ] Rust daemon on Prns (behind our own transport trait): chunking, per-chunk encryption, manifest, `/get [cids]`, pinning.
-- [ ] Local store: slab segments per size class + redb index, pinned / cache / serving tiers ([ADR-0005](adr/0005-local-store-offline.md), [ADR-0007](adr/0007-local-store-layout.md)).
+- [x] Local store: slab segments per size class + redb index, tier flags, slot reuse, CID-verified reads (`crates/retifs-store`, [ADR-0007](adr/0007-local-store-layout.md)).
+- [ ] Local store, continued: LRU eviction of the cache tier, lease expiry for the serving tier, keep rules ([ADR-0005](adr/0005-local-store-offline.md)).
 - [ ] `libretifs` + local socket: `create`, `put_block`, `read`, `status` ([ADR-0004](adr/0004-native-record-api.md)).
 - [ ] Local HTTP gateway (a client of `libretifs`).
 - [ ] Alpine: `/etc/apk/repositories` → gateway (apk knows nothing about RNS).

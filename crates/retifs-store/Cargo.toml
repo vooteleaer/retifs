@@ -1,0 +1,15 @@
+[package]
+name = "retifs-store"
+version = "0.0.1"
+description = "retifs local slab store (prototype, unstable)"
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+publish = false
+
+[dependencies]
+redb = "2"
+retifs-core = { path = "../retifs-core" }
+
+[dev-dependencies]
+tempfile = "3"

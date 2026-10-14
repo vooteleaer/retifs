@@ -35,8 +35,9 @@ pub const FANOUT: usize = 64;
 
 /// Where chunks live. The real implementation is the slab store (ADR-0007).
 pub trait Store {
-    fn put(&mut self, cid: Cid, ciphertext: Vec<u8>);
-    fn get(&self, cid: &Cid) -> Option<Vec<u8>>;
+    type Error: std::error::Error;
+    fn put(&mut self, cid: Cid, ciphertext: Vec<u8>) -> Result<(), Self::Error>;
+    fn get(&self, cid: &Cid) -> Result<Option<Vec<u8>>, Self::Error>;
 }
 
 /// A file's read capability: everything needed to read it, and nothing else.
@@ -53,6 +54,7 @@ pub enum ManifestError {
     Chunk(Cid, ChunkError),
     Malformed(&'static str),
     OutOfRange,
+    Store(String),
 }
 
 impl fmt::Display for ManifestError {
@@ -62,6 +64,7 @@ impl fmt::Display for ManifestError {
             ManifestError::Chunk(c, e) => write!(f, "chunk {c}: {e}"),
             ManifestError::Malformed(why) => write!(f, "malformed manifest: {why}"),
             ManifestError::OutOfRange => f.write_str("range outside the file"),
+            ManifestError::Store(e) => write!(f, "store: {e}"),
         }
     }
 }
@@ -77,33 +80,35 @@ struct Entry {
 }
 
 /// Chunks, seals and stores `data`, and returns its read capability.
-pub fn write(store: &mut impl Store, secret: &ConvergenceSecret, data: &[u8]) -> FileRef {
+pub fn write(store: &mut impl Store, secret: &ConvergenceSecret, data: &[u8]) -> Result<FileRef, ManifestError> {
     write_with_fanout(store, secret, data, FANOUT)
 }
 
-fn write_with_fanout(store: &mut impl Store, secret: &ConvergenceSecret, data: &[u8], fanout: usize) -> FileRef {
-    let mut level: Vec<Entry> = chunker::split(data)
-        .map(|piece| {
-            let s = seal(secret, piece).expect("chunker output fits a chunk");
-            store.put(s.cid, s.ciphertext);
-            Entry { cid: s.cid, seed: s.seed, span: piece.len() as u64 }
-        })
-        .collect();
+fn write_with_fanout(
+    store: &mut impl Store,
+    secret: &ConvergenceSecret,
+    data: &[u8],
+    fanout: usize,
+) -> Result<FileRef, ManifestError> {
+    let mut level = Vec::new();
+    for piece in chunker::split(data) {
+        let s = seal(secret, piece).expect("chunker output fits a chunk");
+        store.put(s.cid, s.ciphertext).map_err(store_err)?;
+        level.push(Entry { cid: s.cid, seed: s.seed, span: piece.len() as u64 });
+    }
 
     let mut kind = KIND_LEAF;
     loop {
         let groups: Vec<&[Entry]> = if level.is_empty() { vec![&[]] } else { level.chunks(fanout).collect() };
-        let parents: Vec<Entry> = groups
-            .into_iter()
-            .map(|group| {
-                let s = seal(secret, &encode(kind, group)).expect("a node fits a chunk");
-                store.put(s.cid, s.ciphertext);
-                Entry { cid: s.cid, seed: s.seed, span: group.iter().map(|e| e.span).sum() }
-            })
-            .collect();
+        let mut parents = Vec::with_capacity(groups.len());
+        for group in groups {
+            let s = seal(secret, &encode(kind, group)).expect("a node fits a chunk");
+            store.put(s.cid, s.ciphertext).map_err(store_err)?;
+            parents.push(Entry { cid: s.cid, seed: s.seed, span: group.iter().map(|e| e.span).sum() });
+        }
         if parents.len() == 1 {
             let root = parents[0];
-            return FileRef { root: root.cid, seed: root.seed, size: root.span };
+            return Ok(FileRef { root: root.cid, seed: root.seed, size: root.span });
         }
         level = parents;
         kind = KIND_INTERNAL;
@@ -164,8 +169,12 @@ fn read_node(
 }
 
 fn fetch(store: &impl Store, cid: &Cid, seed: &Seed) -> Result<Vec<u8>, ManifestError> {
-    let ct = store.get(cid).ok_or(ManifestError::Missing(*cid))?;
+    let ct = store.get(cid).map_err(store_err)?.ok_or(ManifestError::Missing(*cid))?;
     chunk::open(cid, seed, &ct).map_err(|e| ManifestError::Chunk(*cid, e))
+}
+
+fn store_err(e: impl std::error::Error) -> ManifestError {
+    ManifestError::Store(e.to_string())
 }
 
 fn encode(kind: u8, entries: &[Entry]) -> Vec<u8> {
@@ -234,12 +243,14 @@ mod tests {
     }
 
     impl Store for CountingStore {
-        fn put(&mut self, cid: Cid, ciphertext: Vec<u8>) {
+        type Error = std::convert::Infallible;
+        fn put(&mut self, cid: Cid, ciphertext: Vec<u8>) -> Result<(), Self::Error> {
             self.chunks.insert(cid, ciphertext);
+            Ok(())
         }
-        fn get(&self, cid: &Cid) -> Option<Vec<u8>> {
+        fn get(&self, cid: &Cid) -> Result<Option<Vec<u8>>, Self::Error> {
             self.gets.set(self.gets.get() + 1);
-            self.chunks.get(cid).cloned()
+            Ok(self.chunks.get(cid).cloned())
         }
     }
 
@@ -252,7 +263,7 @@ mod tests {
         // Fanout 2 forces a deep tree from a small file.
         let data = noise(600_000, 42);
         let mut store = CountingStore::default();
-        let f = write_with_fanout(&mut store, &ConvergenceSecret::personal([1; 32]), &data, 2);
+        let f = write_with_fanout(&mut store, &ConvergenceSecret::personal([1; 32]), &data, 2).unwrap();
         assert_eq!(read_all(&store, &f).unwrap(), data);
         for (a, b) in [(0, 1), (12_345, 99_999), (299_000, 300_001), (599_999, 600_000)] {
             assert_eq!(read_range(&store, &f, a..b).unwrap(), &data[a as usize..b as usize]);
@@ -263,7 +274,7 @@ mod tests {
     fn one_byte_read_touches_one_path() {
         let data = noise(600_000, 7);
         let mut store = CountingStore::default();
-        let f = write_with_fanout(&mut store, &ConvergenceSecret::personal([2; 32]), &data, 2);
+        let f = write_with_fanout(&mut store, &ConvergenceSecret::personal([2; 32]), &data, 2).unwrap();
         let chunks = chunker::split(&data).count();
         let depth = (chunks as f64).log2().ceil() as usize + 1; // node levels incl. leaves
         store.gets.set(0);
@@ -275,7 +286,7 @@ mod tests {
     fn rejects_inconsistent_spans() {
         let data = noise(100_000, 3);
         let mut store = CountingStore::default();
-        let mut f = write(&mut store, &ConvergenceSecret::public(), &data);
+        let mut f = write(&mut store, &ConvergenceSecret::public(), &data).unwrap();
         f.size += 1;
         assert_eq!(read_range(&store, &f, 0..1).unwrap_err(),
                    ManifestError::Malformed("spans don't add up to the parent's span"));

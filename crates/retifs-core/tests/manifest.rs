@@ -9,11 +9,13 @@ use retifs_core::{
 struct MemStore(HashMap<Cid, Vec<u8>>);
 
 impl Store for MemStore {
-    fn put(&mut self, cid: Cid, ciphertext: Vec<u8>) {
+    type Error = std::convert::Infallible;
+    fn put(&mut self, cid: Cid, ciphertext: Vec<u8>) -> Result<(), Self::Error> {
         self.0.insert(cid, ciphertext);
+        Ok(())
     }
-    fn get(&self, cid: &Cid) -> Option<Vec<u8>> {
-        self.0.get(cid).cloned()
+    fn get(&self, cid: &Cid) -> Result<Option<Vec<u8>>, Self::Error> {
+        Ok(self.0.get(cid).cloned())
     }
 }
 
@@ -34,7 +36,7 @@ fn roundtrip_sizes() {
     for len in [0, 1, 4095, 16_384, 200_000, 3_000_000] {
         let data = noise(len, len as u64 + 1);
         let mut store = MemStore::default();
-        let f = write(&mut store, &secret, &data);
+        let f = write(&mut store, &secret, &data).unwrap();
         assert_eq!(f.size, len as u64);
         assert_eq!(read_all(&store, &f).unwrap(), data, "len {len}");
     }
@@ -44,7 +46,7 @@ fn roundtrip_sizes() {
 fn random_access_ranges() {
     let data = noise(3_000_000, 11);
     let mut store = MemStore::default();
-    let f = write(&mut store, &ConvergenceSecret::public(), &data);
+    let f = write(&mut store, &ConvergenceSecret::public(), &data).unwrap();
     let mut s = 99u64;
     for _ in 0..50 {
         s = s.wrapping_mul(6364136223846793005).wrapping_add(1);
@@ -59,11 +61,11 @@ fn random_access_ranges() {
 fn public_files_converge_personal_files_dont() {
     let data = noise(500_000, 21);
     let (mut s1, mut s2) = (MemStore::default(), MemStore::default());
-    let a = write(&mut s1, &ConvergenceSecret::public(), &data);
-    let b = write(&mut s2, &ConvergenceSecret::public(), &data);
+    let a = write(&mut s1, &ConvergenceSecret::public(), &data).unwrap();
+    let b = write(&mut s2, &ConvergenceSecret::public(), &data).unwrap();
     assert_eq!(a, b, "same public file, same read-cap, from independent writers");
 
-    let c = write(&mut s1, &ConvergenceSecret::personal([1; 32]), &data);
+    let c = write(&mut s1, &ConvergenceSecret::personal([1; 32]), &data).unwrap();
     assert_ne!(a.root, c.root);
 }
 
@@ -71,7 +73,7 @@ fn public_files_converge_personal_files_dont() {
 fn missing_and_tampered_chunks_are_reported() {
     let data = noise(300_000, 8);
     let mut store = MemStore::default();
-    let f = write(&mut store, &ConvergenceSecret::public(), &data);
+    let f = write(&mut store, &ConvergenceSecret::public(), &data).unwrap();
 
     let victim = *store.0.keys().find(|c| **c != f.root).unwrap();
     let mut tampered = MemStore(store.0.clone());
@@ -86,7 +88,7 @@ fn missing_and_tampered_chunks_are_reported() {
 fn storage_sees_only_class_sized_blobs() {
     let data = noise(1_000_000, 13);
     let mut store = MemStore::default();
-    write(&mut store, &ConvergenceSecret::public(), &data);
+    write(&mut store, &ConvergenceSecret::public(), &data).unwrap();
     for ct in store.0.values() {
         assert!(ct.len().is_power_of_two() && (1024..=262_144).contains(&ct.len()));
     }
