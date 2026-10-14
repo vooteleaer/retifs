@@ -27,7 +27,7 @@ That's already above the Python client's LAN peak (44–111 Mbps across patterns
 - **Stack size on Windows.** Prns node futures overflow the default 1 MB main-thread stack. Run the runtime on a thread with a larger stack (64 MB here, plus 16 MB for worker threads). Linux's 8 MB default may be enough, but don't rely on it.
 - **0.3.7 has no `respond_resource`.** It isn't needed, since `respond` already handles it. There's also a hidden `respond_open_bytes(File, len)` that streams from an open file, which might let `/get` serve slab slots without copying.
 
-## Next (done 2026-10-14, see [first-transfer](first-transfer.md))
-- `retifs-net`: a transport trait (announce, link, request, serve) with a Prns implementation behind it.
-- `retifsd`: serve `/get [cid…]` from the slab store via `app_state`.
-- `retifs get`: fetch a `FileRef` with batches in flight, per [chunk-fetch](chunk-fetch.md).
+## Next
+- [ ] `retifs-net`: a transport trait (announce, link, request, serve) with a Prns implementation behind it ([ADR-0003](../adr/0003-rust-and-prns.md)). **Not done yet:** the prototype calls Prns directly.
+- [x] `retifsd`: serve `/get [cid…]` from the slab store via `app_state` ([first-transfer](first-transfer.md)).
+- [x] `retifs get`: fetch a `FileRef` with batched requests ([first-transfer](first-transfer.md)).
