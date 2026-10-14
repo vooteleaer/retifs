@@ -31,7 +31,7 @@ An attacker who knows CIDs (because it created distinctive chunks and got people
 6. **Linkability.** A long-lived `retifs.node` destination makes a node trackable. Use per-group or per-namespace serving destinations and ephemeral identities for fetching where possible.
 7. **Probing is expensive.** Rate limits and stamps on `/have` and `/get` from non-own peers.
 
-**Prototype status (2026-10-14):** `retifsd` still answers `/retifs/get` for anyone (`AllowAll`) without proofs, and doesn't separate the cache tier. Fixing that comes before any non-test use.
+**Prototype status (2026-10-14):** rules 1–3 are implemented. `/retifs/get` requests carry a token id and an anonymous proof bound to the link; `retifsd` serves only chunks registered under that token (its own writes) or published (`retifs put --publish`), and never fetched or cached chunks. Refusals look like "don't have", with the same lookups on every path. Tested across three daemons: a forged read-cap that knows the root CID gets nothing, and a node holding a file only in its cache refuses even a correct read-cap. Rate limits, stamps and per-group destinations are not done yet.
 
 ## Open
 - Compromised bootstrap (needs Secure Boot / measured boot).

@@ -19,6 +19,10 @@ pub trait Transport: Clone + Send + 'static {
     /// Finds a path to `peer` and opens a link.
     fn connect(&self, peer: Self::Peer) -> impl Future<Output = Result<Self::Link, String>> + Send;
 
+    /// A value both ends of `link` know and no other link shares (the RNS link
+    /// ID). Proofs of access are bound to it so they can't be replayed elsewhere.
+    fn link_nonce(&self, link: Self::Link) -> Vec<u8>;
+
     /// Sends a request to `endpoint` on `link` and waits for the response.
     fn request(
         &self,
@@ -65,6 +69,10 @@ impl PrnsTransport {
 impl Transport for PrnsTransport {
     type Peer = DestinationHash;
     type Link = LinkId;
+
+    fn link_nonce(&self, link: LinkId) -> Vec<u8> {
+        link.as_bytes().to_vec()
+    }
 
     fn connect(&self, peer: DestinationHash) -> impl Future<Output = Result<LinkId, String>> + Send {
         let this = self.clone();

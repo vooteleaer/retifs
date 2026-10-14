@@ -20,7 +20,12 @@ use std::{
 };
 
 use redb::{Database, ReadableTable, ReadableTableMetadata, TableDefinition};
-use retifs_core::{chunk::CLASSES, Cid, Store};
+use retifs_core::{
+    access::{PUBLIC_ID, TOKEN_ID_LEN},
+    chunk::CLASSES,
+    cid::CID_LEN,
+    Cid, ServeToken, Store,
+};
 
 /// CID → (class index, segment, slot, tier flags)
 const INDEX: TableDefinition<&[u8], (u8, u32, u32, u8)> = TableDefinition::new("index");
@@ -28,6 +33,11 @@ const INDEX: TableDefinition<&[u8], (u8, u32, u32, u8)> = TableDefinition::new("
 const FREE: TableDefinition<(u8, u32, u32), ()> = TableDefinition::new("free");
 /// Next never-used slot number per class index
 const NEXT: TableDefinition<u8, u64> = TableDefinition::new("next");
+/// Serving index: token_id ‖ CID → (). Only chunks registered here are served
+/// to others; fetched/cached chunks never are (holder privacy, ADR-0010).
+const SERVE: TableDefinition<&[u8], ()> = TableDefinition::new("serve");
+/// token_id → serve token, for verifying proofs.
+const TOKENS: TableDefinition<&[u8], &[u8]> = TableDefinition::new("tokens");
 
 pub const SLOTS_PER_SEGMENT: u64 = 256;
 
@@ -90,6 +100,8 @@ impl SlabStore {
         w.open_table(INDEX)?;
         w.open_table(FREE)?;
         w.open_table(NEXT)?;
+        w.open_table(SERVE)?;
+        w.open_table(TOKENS)?;
         w.commit()?;
         Ok(SlabStore { root, db, sync: true })
     }
@@ -189,6 +201,46 @@ impl SlabStore {
         Ok(found)
     }
 
+    /// Serves `cids` to anyone who proves possession of `token` (a file's read-cap).
+    pub fn register_serving(&self, token: &ServeToken, cids: &[Cid]) -> Result<(), StoreError> {
+        let id = token.id();
+        let w = self.db.begin_write()?;
+        {
+            w.open_table(TOKENS)?.insert(id.as_slice(), token.0.as_slice())?;
+            let mut serve = w.open_table(SERVE)?;
+            for cid in cids {
+                serve.insert(serve_key(&id, cid).as_slice(), ())?;
+            }
+        }
+        w.commit()?;
+        Ok(())
+    }
+
+    /// Serves `cids` to anyone, without proof (deliberate publishing, like a micron page).
+    pub fn publish(&self, cids: &[Cid]) -> Result<(), StoreError> {
+        let w = self.db.begin_write()?;
+        {
+            let mut serve = w.open_table(SERVE)?;
+            for cid in cids {
+                serve.insert(serve_key(&PUBLIC_ID, cid).as_slice(), ())?;
+            }
+        }
+        w.commit()?;
+        Ok(())
+    }
+
+    pub fn serve_token(&self, token_id: &[u8; TOKEN_ID_LEN]) -> Result<Option<ServeToken>, StoreError> {
+        let r = self.db.begin_read()?;
+        let tokens = r.open_table(TOKENS)?;
+        Ok(tokens.get(token_id.as_slice())?.and_then(|g| g.value().try_into().ok()).map(ServeToken))
+    }
+
+    /// Whether `cid` is registered for serving under `token_id` (or published, for [`PUBLIC_ID`]).
+    pub fn is_served(&self, token_id: &[u8; TOKEN_ID_LEN], cid: &Cid) -> Result<bool, StoreError> {
+        let r = self.db.begin_read()?;
+        Ok(r.open_table(SERVE)?.get(serve_key(token_id, cid).as_slice())?.is_some())
+    }
+
     pub fn len(&self) -> Result<u64, StoreError> {
         let r = self.db.begin_read()?;
         Ok(r.open_table(INDEX)?.len()?)
@@ -229,6 +281,13 @@ impl Store for SlabStore {
     fn get(&self, cid: &Cid) -> Result<Option<Vec<u8>>, StoreError> {
         self.fetch(cid)
     }
+}
+
+fn serve_key(token_id: &[u8; TOKEN_ID_LEN], cid: &Cid) -> [u8; TOKEN_ID_LEN + CID_LEN] {
+    let mut key = [0u8; TOKEN_ID_LEN + CID_LEN];
+    key[..TOKEN_ID_LEN].copy_from_slice(token_id);
+    key[TOKEN_ID_LEN..].copy_from_slice(cid.as_bytes());
+    key
 }
 
 fn class_index(len: usize) -> Result<u8, StoreError> {

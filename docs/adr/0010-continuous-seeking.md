@@ -103,3 +103,12 @@ See the [threat model](../04-threat-model.md).
   - Persistent state per want and per peer.
   - Announce payload changes (generation counter).
   - Lease and receipt formats must be fixed carefully (decision 6).
+
+## Implementation status (2026-10-14)
+- **"Who may ask", first slice:**
+  - Serve token derived from the read-cap (`retifs_core::access`): `token = HKDF(root seed, "retifs/v1/serve")`, `proof = HMAC(token, "retifs/v1/get" ‖ link_id ‖ CIDs)[0..16]`.
+  - `/retifs/get` v1 request: `token_id ‖ proof ‖ CIDs`.
+  - `retifsd` keeps a serving index (token, CID) for its own writes, plus published CIDs under an all-zero id. Fetched and cached chunks are never in it.
+  - Covered by unit tests, in-memory fetch tests (wrong token: nothing served), and a three-daemon run on one machine (owner serves, forged read-cap and cache-only holder get nothing).
+- **Not yet:** want-list, `have`, holder map, leases, receipts, rate limits and stamps.
+

@@ -46,6 +46,30 @@ pub trait Store {
     fn get(&self, cid: &Cid) -> Result<Option<Vec<u8>>, Self::Error>;
 }
 
+/// Wraps a store and records every CID written through it (to register what a
+/// node serves for a file, e.g. under its serve token).
+pub struct Recording<'a, S: Store> {
+    pub inner: &'a mut S,
+    pub cids: Vec<Cid>,
+}
+
+impl<'a, S: Store> Recording<'a, S> {
+    pub fn new(inner: &'a mut S) -> Self {
+        Recording { inner, cids: Vec::new() }
+    }
+}
+
+impl<S: Store> Store for Recording<'_, S> {
+    type Error = S::Error;
+    fn put(&mut self, cid: Cid, ciphertext: Vec<u8>) -> Result<(), S::Error> {
+        self.cids.push(cid);
+        self.inner.put(cid, ciphertext)
+    }
+    fn get(&self, cid: &Cid) -> Result<Option<Vec<u8>>, S::Error> {
+        self.inner.get(cid)
+    }
+}
+
 /// A file's read capability: everything needed to read it, and nothing else.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub struct FileRef {

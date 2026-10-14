@@ -124,3 +124,23 @@ fn files_roundtrip_through_the_slab_store() {
     eprintln!("{} chunks, {} data bytes, {} on disk ({:.0}% overhead)",
               st.len().unwrap(), data.len(), on_disk, (on_disk as f64 / data.len() as f64 - 1.0) * 100.0);
 }
+
+#[test]
+fn serving_index_is_per_token_and_publish_is_separate() {
+    use retifs_core::{access::PUBLIC_ID, ServeToken};
+    let dir = tempfile::tempdir().unwrap();
+    let st = SlabStore::open(dir.path()).unwrap();
+    let file = manifest::write(&mut retifs_store::PinnedTier(&st), &ConvergenceSecret::personal([1; 32]), &noise(50_000, 5)).unwrap();
+    let token = ServeToken::for_file(&file);
+    let other = ServeToken::for_file(&retifs_core::FileRef { seed: retifs_core::Seed([9; 32]), ..file });
+
+    assert!(!st.is_served(&token.id(), &file.root).unwrap(), "nothing is served until registered");
+    st.register_serving(&token, &[file.root]).unwrap();
+    assert!(st.is_served(&token.id(), &file.root).unwrap());
+    assert!(!st.is_served(&other.id(), &file.root).unwrap(), "another token doesn't open it");
+    assert!(!st.is_served(&PUBLIC_ID, &file.root).unwrap(), "not public unless published");
+    assert_eq!(st.serve_token(&token.id()).unwrap(), Some(token.clone()));
+
+    st.publish(&[file.root]).unwrap();
+    assert!(st.is_served(&PUBLIC_ID, &file.root).unwrap());
+}

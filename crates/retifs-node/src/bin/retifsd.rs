@@ -15,8 +15,9 @@ use std::{path::PathBuf, sync::Arc, time::{Duration, Instant}};
 use libretifs::{read_frame, write_frame, Envelope, GetStats, Request, Response, Status, PROTOCOL_VERSION};
 use personal_rns::prelude::*;
 use retifs_core::{
-    manifest::{self, decode_node, NodeEntry},
-    open, ConvergenceSecret, FileRef,
+    access::PUBLIC_ID,
+    manifest::{self, decode_node, NodeEntry, Recording},
+    open, ConvergenceSecret, FileRef, ServeToken,
 };
 use retifs_net::{
     fetch::{fetch_file, FetchOpts},
@@ -32,12 +33,32 @@ impl RequestEndpoint<Arc<SlabStore>> for Get {
     const ENDPOINT_ID: &'static str = GET_ENDPOINT;
     const POLICY: RequestEndpointPolicy = RequestEndpointPolicy::AllowAll;
 
+    /// Anonymous requesters prove possession of the file's read-cap (serve
+    /// token bound to this link); published chunks need no proof. Anything
+    /// else gets the same answer as "don't have" (holder privacy, ADR-0010).
     async fn handle(mut context: RequestContext<'_, Arc<SlabStore>>) -> Result<(), Decline> {
-        let Ok(cids) = decode_request(context.data) else {
+        let Ok(req) = decode_request(context.data) else {
             return Err(Decline::Ignore);
         };
-        // Ciphertext only; a corrupt local copy is reported as missing.
-        let items: Vec<Option<Vec<u8>>> = cids.iter().map(|c| context.state.fetch(c).ok().flatten()).collect();
+        let store = context.state;
+        let nonce = context.respond_token().link_id.as_bytes().to_vec();
+        let authorized = if req.token_id == PUBLIC_ID {
+            true // published content only: is_served() below checks PUBLIC_ID entries
+        } else {
+            match store.serve_token(&req.token_id) {
+                Ok(Some(token)) => token.verify(&nonce, &req.cids, &req.proof),
+                _ => false,
+            }
+        };
+        // Same lookups on every path, so a refusal doesn't stand out by timing.
+        let items: Vec<Option<Vec<u8>>> = req
+            .cids
+            .iter()
+            .map(|c| {
+                let served = store.is_served(&req.token_id, c).unwrap_or(false);
+                if authorized && served { store.fetch(c).ok().flatten() } else { None }
+            })
+            .collect();
         context.respond(encode_response(&items))
     }
 }
@@ -89,7 +110,7 @@ fn main() {
     };
     for path in &args.put {
         let data = std::fs::read(path).unwrap_or_else(|e| panic!("{}: {e}", path.display()));
-        let file = manifest::write(&mut PinnedTier(&store), &secret(args.public), &data).expect("store file");
+        let file = store_file(&store, &data, args.public, false, manifest::WriteOpts::default()).expect("store file");
         println!("put {}  {}", path.display(), file);
     }
     let identity = load_or_create_identity(&args.store.join("node_identity")).expect("node identity");
@@ -208,15 +229,14 @@ async fn handle(d: &Daemon, req: Request) -> Result<Response, String> {
     match req {
         Request::Ping => Ok(Response::Pong { node: d.node_hex.clone(), chunks: d.store.len().map_err(|e| e.to_string())? }),
 
-        Request::Put { data, public, compress } => {
+        Request::Put { data, public, compress, publish } => {
             let store = d.store.clone();
             let opts = manifest::WriteOpts {
                 compression: if compress { retifs_core::Compression::Zstd } else { retifs_core::Compression::Off },
             };
-            let file = tokio::task::spawn_blocking(move || manifest::write_opts(&mut PinnedTier(&store), &secret(public), &data, opts))
+            let file = tokio::task::spawn_blocking(move || store_file(&store, &data, public, publish, opts))
                 .await
-                .map_err(|e| e.to_string())?
-                .map_err(|e| e.to_string())?;
+                .map_err(|e| e.to_string())??;
             Ok(Response::Put { cap: file.to_string() })
         }
 
@@ -264,6 +284,20 @@ async fn handle(d: &Daemon, req: Request) -> Result<Response, String> {
             Ok(Response::Status(local_status(&d.store, &cap)))
         }
     }
+}
+
+/// Writes `data` as pinned own data and registers it for serving: to holders
+/// of its read-cap (serve token), and to anyone if `publish`.
+fn store_file(store: &SlabStore, data: &[u8], public: bool, publish: bool, opts: manifest::WriteOpts) -> Result<FileRef, String> {
+    let mut pinned = PinnedTier(store);
+    let mut rec = Recording::new(&mut pinned);
+    let file = manifest::write_opts(&mut rec, &secret(public), data, opts).map_err(|e| e.to_string())?;
+    let cids = rec.cids;
+    store.register_serving(&ServeToken::for_file(&file), &cids).map_err(|e| e.to_string())?;
+    if publish {
+        store.publish(&cids).map_err(|e| e.to_string())?;
+    }
+    Ok(file)
 }
 
 /// Walks the manifest using only the local store.

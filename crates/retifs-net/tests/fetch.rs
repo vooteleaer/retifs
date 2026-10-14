@@ -11,7 +11,7 @@ use std::{
     time::Duration,
 };
 
-use retifs_core::{manifest, Cid, ConvergenceSecret, FileRef, Store};
+use retifs_core::{manifest, Cid, ConvergenceSecret, FileRef, ServeToken, Store};
 use retifs_net::{
     fetch::{fetch_file, FetchError, FetchOpts, NoCache},
     protocol::{decode_request, encode_response},
@@ -44,6 +44,8 @@ struct Peer {
     behaviour: Behaviour,
     delay: Duration,
     requests: AtomicUsize,
+    /// If set, serve only to requests carrying a valid proof for this token.
+    token: Option<ServeToken>,
 }
 
 #[derive(Clone)]
@@ -58,6 +60,10 @@ impl Transport for MemTransport {
         async move { Ok(peer) }
     }
 
+    fn link_nonce(&self, link: usize) -> Vec<u8> {
+        format!("link-{link}").into_bytes()
+    }
+
     fn request(&self, link: usize, _endpoint: &'static str, body: Vec<u8>) -> impl Future<Output = Result<Vec<u8>, String>> + Send {
         let peers = self.0.clone();
         async move {
@@ -67,8 +73,15 @@ impl Transport for MemTransport {
             if peer.behaviour == Behaviour::FailAll {
                 return Err("link broke".into());
             }
-            let cids = decode_request(&body).map_err(|e| e.to_string())?;
-            let items: Vec<Option<Vec<u8>>> = cids
+            let req = decode_request(&body).map_err(|e| e.to_string())?;
+            let authorized = match &peer.token {
+                None => true,
+                Some(t) => req.token_id == t.id() && t.verify(format!("link-{link}").as_bytes(), &req.cids, &req.proof),
+            };
+            if !authorized {
+                return Ok(encode_response(&vec![None; req.cids.len()]));
+            }
+            let items: Vec<Option<Vec<u8>>> = req.cids
                 .iter()
                 .map(|c| {
                     peer.chunks.get(c).cloned().map(|mut ct| {
@@ -103,7 +116,7 @@ fn file(len: usize) -> (Vec<u8>, FileRef, MemStore) {
 }
 
 fn peer(chunks: HashMap<Cid, Vec<u8>>, behaviour: Behaviour, delay_ms: u64) -> Peer {
-    Peer { chunks, behaviour, delay: Duration::from_millis(delay_ms), requests: AtomicUsize::new(0) }
+    Peer { chunks, behaviour, delay: Duration::from_millis(delay_ms), requests: AtomicUsize::new(0), token: None }
 }
 
 fn opts() -> FetchOpts {
@@ -188,4 +201,23 @@ async fn local_cache_is_used_first_and_filled() {
     assert_eq!(warm.requests, 0, "everything came from the local store");
     assert_eq!(net.0[0].requests.load(Ordering::Relaxed), sent);
     assert!(warm.cache_hits > 0);
+}
+
+#[tokio::test]
+async fn peers_serve_only_with_a_valid_proof() {
+    let (data, f, store) = file(300_000);
+    let right = ServeToken::for_file(&f);
+    let wrong = ServeToken::for_file(&FileRef { seed: retifs_core::Seed([0xEE; 32]), ..f });
+
+    let mut strict = peer(store.0.clone(), Behaviour::Good, 1);
+    strict.token = Some(right);
+    let net = MemTransport(Arc::new(vec![strict]));
+    let (out, _) = fetch_file(&net, &[0], &f, opts(), &mut NoCache).await.unwrap();
+    assert_eq!(out, data, "the read-cap holder proves possession and is served");
+
+    let mut other = peer(store.0, Behaviour::Good, 1);
+    other.token = Some(wrong);
+    let net = MemTransport(Arc::new(vec![other]));
+    let err = fetch_file(&net, &[0], &f, opts(), &mut NoCache).await.unwrap_err();
+    assert!(matches!(err, FetchError::Unavailable { .. }), "a node serving another file's token looks like it has nothing: {err}");
 }

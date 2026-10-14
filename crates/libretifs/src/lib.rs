@@ -44,6 +44,10 @@ pub enum Request {
         /// Compress data chunks before encryption (reveals compressibility via size class).
         #[serde(default)]
         compress: bool,
+        /// Serve to anyone without proof (like hosting a micron page). Otherwise only
+        /// holders of the read-cap can fetch it from this node.
+        #[serde(default)]
+        publish: bool,
     },
     /// Read the file behind `cap`: local store first, then the given nodes.
     Get {
@@ -241,8 +245,8 @@ impl Client {
         }
     }
 
-    pub async fn put(&mut self, data: Vec<u8>, public: bool, compress: bool) -> Result<String, ClientError> {
-        match self.call(Request::Put { data, public, compress }).await? {
+    pub async fn put(&mut self, data: Vec<u8>, public: bool, compress: bool, publish: bool) -> Result<String, ClientError> {
+        match self.call(Request::Put { data, public, compress, publish }).await? {
             Response::Put { cap } => Ok(cap),
             _ => Err(ClientError::Unexpected),
         }
