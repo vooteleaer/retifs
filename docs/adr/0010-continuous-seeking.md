@@ -47,7 +47,7 @@ There may be hundreds of copies of a chunk online. The daemon keeps a living **h
   - signed receipts (a promise to keep until T);
   - `/retifs/have` answers (good but going stale);
   - holder hints in read-caps;
-  - announce summaries (store generation, possibly a Bloom filter of held chunks);
+  - store generation counters (from authorized peers only; **no public Bloom filters of holdings**, see below);
   - gossip from own nodes (opt-in).
 - **Uses:**
   - **Pick the best source:** hops, RTT, link MTU, measured throughput, failure rate; LoRa last for bulk.
@@ -60,6 +60,14 @@ There may be hundreds of copies of a chunk online. The daemon keeps a living **h
   - **Aged:** entries decay and are refreshed when a holder's store generation changes.
 - **Stale entries are harmless:** every chunk is verified against its CID on arrival, so a wrong holder only costs one wasted request.
 - **Privacy:** the map is local. Sharing it reveals who holds what, so gossip is opt-in and limited to own nodes by default.
+
+### Who may ask (holder privacy)
+Answering `have` or `get` reveals what a node holds. An attacker who knows CIDs (honeypot chunks it created, or CIDs computed from a known public file) could otherwise map who read what. So, as in the [threat model](../04-threat-model.md#holder-privacy-tracking-and-honeypot-attacks):
+- **Serving requires authorization:** own nodes, lease owners (for their lease's chunks), and capability holders for a namespace. Requesters identify on the link. Everyone else gets "don't have", indistinguishable in content and timing.
+- **The cache tier is never served** except to own nodes. Seeding public content to strangers is opt-in per content class.
+- **Non-public requests carry proof of read access** (knowledge of the seed, over a nonce).
+- **No public holdings summaries** in announces. Generation counters go to authorized peers only.
+- **Rate limits and stamps** for requests from non-own peers.
 
 ### Holder hints
 A read-cap may carry hints: `retifs:1:<root>:<seed>:<size>@<node>,<node>`. Hints say where to ask; integrity always comes from the CID.
@@ -81,6 +89,7 @@ A read-cap may carry hints: `retifs:1:<root>:<seed>:<size>@<node>,<node>`. Hints
 
 ## Impact on the threat model
 See the [threat model](../04-threat-model.md).
+- **Answering reveals holdings (tracking/honeypot attack).** Mitigated by authorization, a never-served cache, proof of read access and no public summaries (see "Who may ask").
 - Asking reveals interest in CIDs; prefixes leak slightly less. Asking only trusted candidates by default limits it.
 - A lease reveals which chunks belong together to the holder (not content or structure). Mitigations: split leases, cover chunks, per-lease derived signing keys ([ADR-0011](0011-redundancy-by-default.md)).
 - A malicious holder can withhold data. Multi-source, proofs and repair (ADR-0011) limit the damage.
