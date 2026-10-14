@@ -44,7 +44,7 @@ where
 pub async fn attach(handle: &PrnsNodeHandle) -> Result<String, String> {
     let transports = [
         #[cfg(target_os = "linux")]
-        SharedInstanceTransport::AbstractUnix { socket_path: "rns/default".into() },
+        SharedInstanceTransport::AbstractUnix { socket_path: "default".into() } // Prns adds the "rns/" prefix,
         SharedInstanceTransport::Tcp,
     ];
 
