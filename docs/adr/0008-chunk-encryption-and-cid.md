@@ -22,7 +22,7 @@ Option 3. Version 1 of the construction:
 
 ### Size classes and framing
 - The **ciphertext size** is one of `2^k` bytes, `k = 10..18` (1 KiB … 256 KiB). These are also the slab sizes of the local store ([ADR-0007](0007-local-store-layout.md)).
-- `frame = u32_be(len(data)) ‖ data ‖ 0x00 … ` with zero fill to `class − 64` bytes, using the smallest class that fits. The maximum data per chunk is 262 076 bytes.
+- `frame = encoding (u8) ‖ u32_be(len(payload)) ‖ payload ‖ 0x00 …` with zero fill to `class − 64` bytes, using the smallest class that fits. Encoding 0 = raw (payload is the data), 1 = zstd (payload is the compressed data; [ADR-0013](0013-slow-links.md)). The maximum payload per chunk is 262 075 bytes.
 - The Token then adds IV (16), a full PKCS7 block (16, since `class − 64` is a multiple of 16) and the HMAC (32), so `len(ciphertext) = class` exactly.
 
 ### Keys and IV
@@ -45,7 +45,7 @@ This is exactly an RNS Token with key `okm[0:64]` and a derived IV. RNS's `Token
 - **The reader needs only `seed`** (32 bytes) per chunk. The manifest stores `(cid, seed)`, and a read-cap for the content is the manifest's own `(cid, seed)`.
 
 ### Chunker (writer policy v1, not format)
-FastCDC 2020 with **min 8 KiB, avg 12 KiB, max 16 KiB − 68 bytes**. Every content chunk except a file's last seals into exactly the **16 KiB class**:
+FastCDC 2020 with **min 8 KiB, avg 12 KiB, max 16 KiB − 69 bytes**. Every content chunk except a file's last seals into exactly the **16 KiB class**:
 - about 10 % padding overhead;
 - chunk sizes reveal nothing about content;
 - the size suits LoRa.
@@ -93,7 +93,8 @@ Key and IV are both derived from `seed`, which is a PRF (HMAC) of the full frame
 
   FastCDC resynchronises at the next natural cut, so even with many forced cuts, dedup after edits stays close to the current config.
 
-- **Also blocking (from [ADR-0011](0011-redundancy-by-default.md) and [ADR-0013](0013-slow-links.md)):** full replicas vs erasure coding, and a **compression flag** in the frame (compress before encrypt).
+- **Compression flag: added (2026-10-14).** The frame carries an encoding byte; compression is opt-in per write (`Compression::Zstd`, level 3) because a compressed chunk's size class reveals compressibility. zstd output can differ between zstd versions, so compressed public content converges only between writers with the same output. Vectors include a zstd case, which Python's stdlib zstd decompresses.
+- **Also blocking (from [ADR-0011](0011-redundancy-by-default.md)):** full replicas vs erasure coding.
 - **Before acceptance:**
   - an external review of the construction and the KDF labels;
   - a decision on whether 1 KiB as the smallest class is right for LoRa;

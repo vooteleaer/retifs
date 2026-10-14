@@ -13,6 +13,8 @@ import struct
 import sys
 from pathlib import Path
 
+from compression import zstd  # Python 3.14+
+
 from RNS.Cryptography import HMAC, PKCS7
 from RNS.Cryptography.AES import AES_256_CBC
 from RNS.Cryptography.HKDF import hkdf
@@ -32,8 +34,18 @@ def convergence_secret(scheme, given):
     raise ValueError(t)
 
 
-def seal(secret, data, cls):
-    frame = struct.pack(">I", len(data)) + data
+def payload_for(data, compression, vector_frame_payload):
+    """Raw data, or the writer's zstd output. zstd output may differ between zstd
+    versions, so for compressed vectors we take the payload from the vector and
+    check that it decompresses to the data."""
+    if compression == "off":
+        return 0, data
+    assert zstd.decompress(vector_frame_payload) == data, "zstd payload must decompress to the data"
+    return 1, vector_frame_payload
+
+
+def seal(secret, data, cls, encoding=0):
+    frame = bytes([encoding]) + struct.pack(">I", len(data)) + data
     frame += b"\x00" * (cls - 64 - len(frame))
     seed = HMAC.new(secret, frame).digest()
     okm = hkdf(80, seed, b"retifs/v1/chunk", b"")
@@ -51,8 +63,17 @@ def main():
         given = bytes.fromhex(c["convergence_secret"])
         secret = convergence_secret(c["scheme"], given)
         data = bytes.fromhex(c["data"])
-        frame, seed, okm, chunk = seal(secret, data, c["class"])
         vec_ct = bytes.fromhex(c["ciphertext"])
+        compression = c.get("compression", "off")
+        vector_payload = b""
+        if compression != "off":
+            # Recover the payload from the vector by decrypting with RNS Token.
+            okm_v = hkdf(80, bytes.fromhex(c["seed"]), b"retifs/v1/chunk", b"")
+            vframe = Token(okm_v[:64]).decrypt(vec_ct)
+            (plen,) = struct.unpack(">I", vframe[1:5])
+            vector_payload = vframe[5:5 + plen]
+        encoding, payload = payload_for(data, compression, vector_payload)
+        frame, seed, okm, chunk = seal(secret, payload, c["class"], encoding)
         checks = {
             "secret": secret == given,
             "class": len(chunk) == c["class"] == len(vec_ct),

@@ -4,27 +4,33 @@
 //! convergence secret), so storage nodes can't tell them apart.
 //!
 //! ```text
-//! node      = version (0x01) ‖ kind (0 leaf, 1 internal) ‖ u16_be count ‖ entries
-//! leaf      = cid (33) ‖ seed (32) ‖ u32_be data length          69 bytes
-//! internal  = cid (33) ‖ seed (32) ‖ u64_be span (bytes below)   73 bytes
+//! node      = version (0x01) ‖ kind ‖ u16_be n ‖ body
+//!   kind 0  leaf:      n entries of cid (33) ‖ seed (32) ‖ u32_be data length   (69 B each)
+//!   kind 1  internal:  n entries of cid (33) ‖ seed (32) ‖ u64_be span          (73 B each)
+//!   kind 2  inline:    n bytes of file data (only as the root, n ≤ INLINE_MAX)
 //! ```
+//! Inline roots make a tiny file one blob and one fetch instead of two (ADR-0013).
 //! A fixed binary layout is canonical by construction: equal trees give equal
 //! bytes, and so equal CIDs.
 
 use std::{fmt, ops::Range, str::FromStr};
 
 use crate::{
-    chunk::{self, ChunkError, Seed, MAX_DATA},
+    chunk::{self, ChunkError, Compression, Seed, FRAME_HEADER, MAX_DATA, OVERHEAD},
     chunker,
     cid::{Cid, CID_LEN},
     secret::ConvergenceSecret,
-    seal,
+    seal, seal_with,
 };
 
 const VERSION: u8 = 0x01;
 const KIND_LEAF: u8 = 0;
 const KIND_INTERNAL: u8 = 1;
+const KIND_INLINE: u8 = 2;
 const HEADER: usize = 4;
+
+/// Largest file stored inline in its root node: the node then fits the 1 KiB class.
+pub const INLINE_MAX: usize = 1024 - OVERHEAD - FRAME_HEADER - HEADER;
 const LEAF_ENTRY: usize = CID_LEN + 32 + 4;
 const INTERNAL_ENTRY: usize = CID_LEN + 32 + 8;
 
@@ -79,6 +85,8 @@ impl FromStr for FileRef {
 pub struct Node {
     pub leaf: bool,
     pub entries: Vec<NodeEntry>,
+    /// The whole file, for an inline root (then `leaf` is true and `entries` is empty).
+    pub inline: Option<Vec<u8>>,
 }
 
 /// A child of a node: a data chunk (in a leaf) or another node (internal).
@@ -93,14 +101,24 @@ pub struct NodeEntry {
 /// Decodes and validates an opened manifest node. `expected_span` is the
 /// span its parent claimed (the file size for the root).
 pub fn decode_node(plaintext: &[u8], expected_span: u64) -> Result<Node, ManifestError> {
-    let (kind, entries) = decode(plaintext)?;
-    if entries.iter().map(|e| e.span).sum::<u64>() != expected_span {
-        return Err(ManifestError::Malformed("spans don't add up to the parent's span"));
+    match decode(plaintext)? {
+        Decoded::Inline(data) => {
+            if data.len() as u64 != expected_span {
+                return Err(ManifestError::Malformed("inline data length differs from the file size"));
+            }
+            Ok(Node { leaf: true, entries: Vec::new(), inline: Some(data) })
+        }
+        Decoded::Entries(kind, entries) => {
+            if entries.iter().map(|e| e.span).sum::<u64>() != expected_span {
+                return Err(ManifestError::Malformed("spans don't add up to the parent's span"));
+            }
+            Ok(Node {
+                leaf: kind == KIND_LEAF,
+                entries: entries.into_iter().map(|e| NodeEntry { cid: e.cid, seed: e.seed, span: e.span }).collect(),
+                inline: None,
+            })
+        }
     }
-    Ok(Node {
-        leaf: kind == KIND_LEAF,
-        entries: entries.into_iter().map(|e| NodeEntry { cid: e.cid, seed: e.seed, span: e.span }).collect(),
-    })
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -134,9 +152,26 @@ struct Entry {
     span: u64,
 }
 
+/// Options for [`write_opts`].
+#[derive(Debug, Clone, Copy, Default)]
+pub struct WriteOpts {
+    /// Compress data chunks before encryption (off by default: a compressed
+    /// chunk's size class reveals compressibility). Manifest nodes are never compressed.
+    pub compression: Compression,
+}
+
 /// Chunks, seals and stores `data`, and returns its read capability.
 pub fn write(store: &mut impl Store, secret: &ConvergenceSecret, data: &[u8]) -> Result<FileRef, ManifestError> {
-    write_with_fanout(store, secret, data, FANOUT)
+    write_opts(store, secret, data, WriteOpts::default())
+}
+
+pub fn write_opts(
+    store: &mut impl Store,
+    secret: &ConvergenceSecret,
+    data: &[u8],
+    opts: WriteOpts,
+) -> Result<FileRef, ManifestError> {
+    write_with_fanout(store, secret, data, FANOUT, opts)
 }
 
 fn write_with_fanout(
@@ -144,17 +179,27 @@ fn write_with_fanout(
     secret: &ConvergenceSecret,
     data: &[u8],
     fanout: usize,
+    opts: WriteOpts,
 ) -> Result<FileRef, ManifestError> {
+    if data.len() <= INLINE_MAX {
+        let mut node = vec![VERSION, KIND_INLINE];
+        node.extend_from_slice(&(data.len() as u16).to_be_bytes());
+        node.extend_from_slice(data);
+        let s = seal(secret, &node).expect("an inline node fits the 1 KiB class");
+        store.put(s.cid, s.ciphertext).map_err(store_err)?;
+        return Ok(FileRef { root: s.cid, seed: s.seed, size: data.len() as u64 });
+    }
+
     let mut level = Vec::new();
     for piece in chunker::split(data) {
-        let s = seal(secret, piece).expect("chunker output fits a chunk");
+        let s = seal_with(secret, piece, opts.compression).expect("chunker output fits a chunk");
         store.put(s.cid, s.ciphertext).map_err(store_err)?;
         level.push(Entry { cid: s.cid, seed: s.seed, span: piece.len() as u64 });
     }
 
     let mut kind = KIND_LEAF;
     loop {
-        let groups: Vec<&[Entry]> = if level.is_empty() { vec![&[]] } else { level.chunks(fanout).collect() };
+        let groups: Vec<&[Entry]> = level.chunks(fanout).collect();
         let mut parents = Vec::with_capacity(groups.len());
         for group in groups {
             let s = seal(secret, &encode(kind, group)).expect("a node fits a chunk");
@@ -195,7 +240,16 @@ fn read_node(
     want: &Range<u64>,
     out: &mut Vec<u8>,
 ) -> Result<(), ManifestError> {
-    let (kind, entries) = decode(&fetch(store, &cid, &seed)?)?;
+    let (kind, entries) = match decode(&fetch(store, &cid, &seed)?)? {
+        Decoded::Inline(data) => {
+            if data.len() as u64 != expected_span || base != 0 {
+                return Err(ManifestError::Malformed("inline node outside the root, or wrong length"));
+            }
+            out.extend_from_slice(&data[want.start as usize..want.end as usize]);
+            return Ok(());
+        }
+        Decoded::Entries(kind, entries) => (kind, entries),
+    };
     if entries.iter().map(|e| e.span).sum::<u64>() != expected_span {
         return Err(ManifestError::Malformed("spans don't add up to the parent's span"));
     }
@@ -251,11 +305,23 @@ fn encode(kind: u8, entries: &[Entry]) -> Vec<u8> {
     out
 }
 
-fn decode(node: &[u8]) -> Result<(u8, Vec<Entry>), ManifestError> {
+enum Decoded {
+    Entries(u8, Vec<Entry>),
+    Inline(Vec<u8>),
+}
+
+fn decode(node: &[u8]) -> Result<Decoded, ManifestError> {
     let (header, body) = node.split_first_chunk::<HEADER>().ok_or(ManifestError::Malformed("short node"))?;
     let [version, kind, c0, c1] = *header;
     if version != VERSION {
         return Err(ManifestError::Malformed("unknown node version"));
+    }
+    if kind == KIND_INLINE {
+        let len = u16::from_be_bytes([c0, c1]) as usize;
+        if body.len() != len || len > INLINE_MAX {
+            return Err(ManifestError::Malformed("inline node length mismatch"));
+        }
+        return Ok(Decoded::Inline(body.to_vec()));
     }
     let width = match kind {
         KIND_LEAF => LEAF_ENTRY,
@@ -283,7 +349,7 @@ fn decode(node: &[u8]) -> Result<(u8, Vec<Entry>), ManifestError> {
             Ok(Entry { cid, seed, span })
         })
         .collect::<Result<Vec<_>, _>>()
-        .map(|entries| (kind, entries))
+        .map(|entries| Decoded::Entries(kind, entries))
 }
 
 #[cfg(test)]
@@ -318,7 +384,7 @@ mod tests {
         // Fanout 2 forces a deep tree from a small file.
         let data = noise(600_000, 42);
         let mut store = CountingStore::default();
-        let f = write_with_fanout(&mut store, &ConvergenceSecret::personal([1; 32]), &data, 2).unwrap();
+        let f = write_with_fanout(&mut store, &ConvergenceSecret::personal([1; 32]), &data, 2, WriteOpts::default()).unwrap();
         assert_eq!(read_all(&store, &f).unwrap(), data);
         for (a, b) in [(0, 1), (12_345, 99_999), (299_000, 300_001), (599_999, 600_000)] {
             assert_eq!(read_range(&store, &f, a..b).unwrap(), &data[a as usize..b as usize]);
@@ -329,7 +395,7 @@ mod tests {
     fn one_byte_read_touches_one_path() {
         let data = noise(600_000, 7);
         let mut store = CountingStore::default();
-        let f = write_with_fanout(&mut store, &ConvergenceSecret::personal([2; 32]), &data, 2).unwrap();
+        let f = write_with_fanout(&mut store, &ConvergenceSecret::personal([2; 32]), &data, 2, WriteOpts::default()).unwrap();
         let chunks = chunker::split(&data).count();
         let depth = (chunks as f64).log2().ceil() as usize + 1; // node levels incl. leaves
         store.gets.set(0);

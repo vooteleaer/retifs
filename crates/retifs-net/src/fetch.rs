@@ -118,6 +118,13 @@ pub async fn fetch_file<T: Transport>(
         let mut leaves = None;
         for (entry, plaintext) in level.iter().zip(opened) {
             let node = decode_node(&plaintext, entry.span).map_err(FetchError::Manifest)?;
+            if let Some(data) = node.inline {
+                // A tiny file lives entirely in its root node (ADR-0013).
+                if stats.tree_levels != 1 || level.len() != 1 {
+                    return Err(FetchError::Manifest(ManifestError::Malformed("inline node outside the root")));
+                }
+                return Ok((data, stats));
+            }
             if leaves.is_some_and(|l| l != node.leaf) {
                 return Err(FetchError::Manifest(ManifestError::Malformed("mixed node kinds on one level")));
             }

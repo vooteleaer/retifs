@@ -1,7 +1,7 @@
 //! retifs CLI (prototype): a thin client of the local retifsd (libretifs).
 //!
 //!     retifs [--store DIR] ping
-//!     retifs [--store DIR] put FILE [--public]
+//!     retifs [--store DIR] put FILE [--public] [--compress]
 //!     retifs [--store DIR] get READ-CAP [--from NODE]... [-o OUT] [--links N] [--batch N]
 //!     retifs [--store DIR] status READ-CAP
 //!
@@ -15,7 +15,7 @@ use libretifs::{default_store_dir, Client};
 fn usage() -> ! {
     eprintln!(
         "retifs [--store DIR] ping\n\
-         retifs [--store DIR] put FILE [--public]\n\
+         retifs [--store DIR] put FILE [--public] [--compress]\n\
          retifs [--store DIR] get READ-CAP [--from NODE]... [-o OUT] [--links N] [--batch N]\n\
          retifs [--store DIR] status READ-CAP"
     );
@@ -41,9 +41,11 @@ async fn main() {
         }
         "put" => {
             let path: PathBuf = it.next().unwrap_or_else(|| usage()).into();
-            let public = it.any(|a| a == "--public");
+            let flags: Vec<String> = it.collect();
+            let public = flags.iter().any(|a| a == "--public");
+            let compress = flags.iter().any(|a| a == "--compress");
             let data = std::fs::read(&path).unwrap_or_else(|e| fail(format!("{}: {e}", path.display())));
-            let cap = client.put(data, public).await.unwrap_or_else(|e| fail(e));
+            let cap = client.put(data, public, compress).await.unwrap_or_else(|e| fail(e));
             println!("{cap}");
         }
         "get" => {

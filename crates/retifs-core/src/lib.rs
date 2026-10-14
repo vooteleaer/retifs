@@ -9,7 +9,7 @@ pub mod cid;
 pub mod manifest;
 pub mod secret;
 
-pub use chunk::{open, seal, ChunkError, Sealed, Seed};
+pub use chunk::{open, seal, seal_with, ChunkError, Compression, Sealed, Seed};
 pub use cid::Cid;
 pub use manifest::{FileRef, ManifestError, Store};
 pub use secret::ConvergenceSecret;

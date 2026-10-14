@@ -2,7 +2,7 @@
 
 - **Status:** proposed
 - **Date:** 2026-10-14
-- **Irreversible:** partly. Inline tiny files (manifest format, [ADR-0009](0009-manifest-format.md)) and a compression flag in the chunk frame ([ADR-0008](0008-chunk-encryption-and-cid.md)) are format decisions and **block acceptance of ADR-0008/0009**. The rest is policy.
+- **Irreversible:** partly. Inline tiny files (manifest format, [ADR-0009](0009-manifest-format.md)) and a compression flag in the chunk frame ([ADR-0008](0008-chunk-encryption-and-cid.md)) are format decisions; both are now in the draft format (2026-10-14). The rest is policy.
 
 ## Context
 On LoRa (e.g. SF7, 125 kHz, EU 869.5 MHz with a 10 % duty cycle), a node gets a few kbps on air and, within the duty cycle, on the order of **0.5 MB per hour** at best. Link MTU is small (~4 KB negotiated over mixed paths, ~500 B packets on the radio), RTTs are seconds, and announces cost shared airtime. One 16 KiB chunk is about 40 RNS packets and roughly a minute of airtime. Seeking, replication, spare filling and diffusion ([ADR-0010](0010-continuous-seeking.md)–[ADR-0012](0012-disk-budget.md)) would swamp such links if left unchecked.
@@ -26,14 +26,14 @@ Priority order:
 
 Respect RNS airtime limits and announce-rate targets, and never saturate a shared channel.
 
-### Inline tiny files (format, blocks ADR-0009)
-Files below ~400 B are stored inside the root manifest node, so reading one is a single packet-sized fetch instead of two (root node, then chunk). This needs a new node kind, or an inline variant of the leaf node, in the manifest format.
+### Inline tiny files (format: added)
+Files of at most 951 bytes are stored inside the root manifest node (node kind 2, [ADR-0009](0009-manifest-format.md)), so reading one is one fetch of one 1 KiB blob instead of two (root node, then chunk). A 1 KiB blob still needs a small Resource on LoRa (about 3 packets), since 1 KiB plus Token overhead exceeds one link packet.
 
-### Compression before encryption (format, blocks ADR-0008)
+### Compression before encryption (format: added)
 - **Why:** ciphertext doesn't compress, so RNS Resource compression gains nothing for retifs chunks. Text and metadata compress 3–5×.
-- **What:** the chunk frame gets a compression flag (e.g. none or zstd) inside the encrypted frame.
+- **What:** the chunk frame has an encoding byte (0 raw, 1 zstd) inside the encrypted frame ([ADR-0008](0008-chunk-encryption-and-cid.md)). Writers opt in per file (`retifs put --compress`); manifest nodes are never compressed.
 - **Risk:** compressed size can leak content (CRIME-style) when attacker-controlled data is mixed with secrets in one chunk. For whole files that's minor, and the padding classes hide most of the size. Mixed-content chunks can opt out.
-- **Encoding:** the flag must be part of the frame encoding from the start, so it's decided before ADR-0008 is accepted.
+- **Measured:** a repetitive 16 000-byte text chunk shrank from the 16 KiB class to at most 2 KiB; a 500 KB log file took under a quarter of the uncompressed storage (tests in `retifs-core`).
 
 ### Link-adaptive content
 - Prefer thumbnails and low-resolution variants (separate blocks per resolution, progressive JPEG XL), and Opus 6–12 kbps or Codec2 for audio ([architecture](../01-architecture.md)).

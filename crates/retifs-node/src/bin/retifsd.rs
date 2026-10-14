@@ -208,9 +208,12 @@ async fn handle(d: &Daemon, req: Request) -> Result<Response, String> {
     match req {
         Request::Ping => Ok(Response::Pong { node: d.node_hex.clone(), chunks: d.store.len().map_err(|e| e.to_string())? }),
 
-        Request::Put { data, public } => {
+        Request::Put { data, public, compress } => {
             let store = d.store.clone();
-            let file = tokio::task::spawn_blocking(move || manifest::write(&mut PinnedTier(&store), &secret(public), &data))
+            let opts = manifest::WriteOpts {
+                compression: if compress { retifs_core::Compression::Zstd } else { retifs_core::Compression::Off },
+            };
+            let file = tokio::task::spawn_blocking(move || manifest::write_opts(&mut PinnedTier(&store), &secret(public), &data, opts))
                 .await
                 .map_err(|e| e.to_string())?
                 .map_err(|e| e.to_string())?;

@@ -2,7 +2,7 @@ use std::collections::HashSet;
 
 use retifs_core::{
     chunk::{class_for, CLASSES, MAX_DATA},
-    chunker, open, seal, Cid, ChunkError, ConvergenceSecret, Seed,
+    chunker, open, seal, seal_with, Cid, ChunkError, Compression, ConvergenceSecret, Seed,
 };
 
 fn pattern(len: usize, salt: u8) -> Vec<u8> {
@@ -25,7 +25,7 @@ fn noise(len: usize, mut s: u64) -> Vec<u8> {
 fn roundtrip_at_every_class_boundary() {
     let secret = ConvergenceSecret::public();
     for &class in &CLASSES {
-        let max = class - 64 - 4;
+        let max = class - 64 - 5;
         for len in [max.saturating_sub(1), max] {
             let data = pattern(len, 7);
             let s = seal(&secret, &data).unwrap();
@@ -115,9 +115,31 @@ fn matches_committed_test_vectors() {
         let name = case["name"].as_str().unwrap();
         let hexf = |k: &str| hex::decode(case[k].as_str().unwrap()).unwrap();
         let secret = ConvergenceSecret::personal(hexf("convergence_secret").try_into().unwrap());
-        let s = seal(&secret, &hexf("data")).unwrap();
+        let compression = if case["compression"] == "zstd" { Compression::Zstd } else { Compression::Off };
+        let s = seal_with(&secret, &hexf("data"), compression).unwrap();
         assert_eq!(s.seed.0.to_vec(), hexf("seed"), "{name}: seed");
         assert_eq!(s.cid.to_string(), case["cid"].as_str().unwrap(), "{name}: cid");
         assert_eq!(s.ciphertext, hexf("ciphertext"), "{name}: ciphertext");
     }
+}
+
+#[test]
+fn compression_shrinks_compressible_data_and_roundtrips() {
+    let secret = ConvergenceSecret::public();
+    let text: Vec<u8> = b"retifs keeps your data encrypted, redundant and yours. ".iter().cycle().take(16_000).copied().collect();
+    let raw = seal(&secret, &text).unwrap();
+    let z = seal_with(&secret, &text, Compression::Zstd).unwrap();
+    assert_eq!(raw.ciphertext.len(), 16_384);
+    assert!(z.ciphertext.len() <= 2048, "compressed into a small class: {}", z.ciphertext.len());
+    assert_ne!(raw.cid, z.cid);
+    assert_eq!(open(&z.cid, &z.seed, &z.ciphertext).unwrap(), text);
+}
+
+#[test]
+fn incompressible_data_stays_raw() {
+    let secret = ConvergenceSecret::public();
+    let data = noise(12_000, 99);
+    let raw = seal(&secret, &data).unwrap();
+    let z = seal_with(&secret, &data, Compression::Zstd).unwrap();
+    assert_eq!(raw.cid, z.cid, "no gain, so the writer keeps it raw (same chunk)");
 }

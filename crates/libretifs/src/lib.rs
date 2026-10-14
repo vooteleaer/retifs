@@ -41,6 +41,9 @@ pub enum Request {
         data: Vec<u8>,
         /// Convergent public scheme (network-wide dedup) instead of a fresh personal secret.
         public: bool,
+        /// Compress data chunks before encryption (reveals compressibility via size class).
+        #[serde(default)]
+        compress: bool,
     },
     /// Read the file behind `cap`: local store first, then the given nodes.
     Get {
@@ -238,8 +241,8 @@ impl Client {
         }
     }
 
-    pub async fn put(&mut self, data: Vec<u8>, public: bool) -> Result<String, ClientError> {
-        match self.call(Request::Put { data, public }).await? {
+    pub async fn put(&mut self, data: Vec<u8>, public: bool, compress: bool) -> Result<String, ClientError> {
+        match self.call(Request::Put { data, public, compress }).await? {
             Response::Put { cap } => Ok(cap),
             _ => Err(ClientError::Unexpected),
         }

@@ -103,3 +103,39 @@ fn read_cap_text_roundtrip() {
     assert_eq!(text.parse::<retifs_core::FileRef>().unwrap(), f);
     assert!("retifs:2:00:00:1".parse::<retifs_core::FileRef>().is_err());
 }
+
+#[test]
+fn tiny_files_are_inline_in_one_blob() {
+    use retifs_core::manifest::INLINE_MAX;
+    let secret = ConvergenceSecret::personal([3; 32]);
+    for len in [0, 1, 400, INLINE_MAX] {
+        let data = noise(len, len as u64 + 9);
+        let mut store = MemStore::default();
+        let f = write(&mut store, &secret, &data).unwrap();
+        assert_eq!(store.0.len(), 1, "len {len}: exactly one blob");
+        assert_eq!(store.0[&f.root].len(), 1024, "len {len}: 1 KiB class");
+        assert_eq!(read_all(&store, &f).unwrap(), data);
+        if len > 10 {
+            assert_eq!(read_range(&store, &f, 3..10).unwrap(), &data[3..10]);
+        }
+    }
+    let mut store = MemStore::default();
+    let f = write(&mut store, &secret, &noise(INLINE_MAX + 1, 1)).unwrap();
+    assert_eq!(store.0.len(), 2, "one byte more: root node + chunk");
+    assert_eq!(read_all(&store, &f).unwrap(), noise(INLINE_MAX + 1, 1));
+}
+
+#[test]
+fn compressed_files_roundtrip_and_take_less_space() {
+    use retifs_core::{manifest::{write_opts, WriteOpts}, Compression};
+    let text: Vec<u8> = b"line of a log file: sensor 7 reports 21.5 C at 12:00\n".iter().cycle().take(500_000).copied().collect();
+    let secret = ConvergenceSecret::personal([4; 32]);
+    let (mut raw, mut z) = (MemStore::default(), MemStore::default());
+    let f_raw = write(&mut raw, &secret, &text).unwrap();
+    let f_z = write_opts(&mut z, &secret, &text, WriteOpts { compression: Compression::Zstd }).unwrap();
+    assert_eq!(read_all(&z, &f_z).unwrap(), text);
+    assert_eq!(read_range(&z, &f_z, 123_456..200_000).unwrap(), &text[123_456..200_000]);
+    let bytes = |s: &MemStore| s.0.values().map(Vec::len).sum::<usize>();
+    assert!(bytes(&z) * 4 < bytes(&raw), "compressed {} vs raw {}", bytes(&z), bytes(&raw));
+    assert_eq!(read_all(&raw, &f_raw).unwrap(), text);
+}

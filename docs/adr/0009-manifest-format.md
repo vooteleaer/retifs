@@ -54,5 +54,5 @@ The `retifs-core` tests cover:
 Still missing: cross-implementation manifest vectors.
 
 ## Blocking acceptance
-- **Inline tiny files** ([ADR-0013](0013-slow-links.md)): data under ~400 B inside the root node (a new node kind or inline leaf variant).
+- ~~Inline tiny files~~: **added (2026-10-14)** as node kind 2: `version ‖ 2 ‖ u16_be len ‖ data`, allowed only as the root, for files of at most `INLINE_MAX` = 951 bytes. The root then fits the 1 KiB class, so a tiny file is one blob and one fetch instead of two ([ADR-0013](0013-slow-links.md)).
 - **Full replicas vs erasure coding** ([ADR-0011](0011-redundancy-by-default.md)).
