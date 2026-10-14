@@ -27,7 +27,7 @@ An attacker who knows CIDs (because it created distinctive chunks and got people
 2. **The cache is never served to others.** Cached chunks are the user's reading history; only the user's own nodes may see them. Serving public content to strangers ("seeding") is an explicit opt-in per content class, never a side effect of reading.
 3. **Proofs stop CID-only probing.** Parties who only saw CIDs (pinning nodes, observers) can't produce proofs. A honeypot creator can (it knows the token), so rule 2 protects reading history.
 4. **No public summaries of holdings.** Announces carry no Bloom filters of held chunks. Store generation counters go only to authorized peers.
-5. **Holding doesn't imply reading.** Pool and volunteer nodes hold leased chunks they never chose to read. Optional cover holdings (pre-fetching unrelated public chunks) are an open question.
+5. **Holding doesn't imply reading.** Pool and volunteer nodes hold leased chunks they never chose to read. In diffuse mode, nodes also hold unrequested chunks (cover holdings), and the origin seeds by pushing over anonymous links instead of serving, so it's hidden among many holders ([ADR-0011](adr/0011-redundancy-by-default.md)). Limits: small networks, early-spread timing analysis, global passive observers.
 6. **Linkability.** A long-lived `retifs.node` destination makes a node trackable. Use per-group or per-namespace serving destinations and ephemeral identities for fetching where possible.
 7. **Probing is expensive.** Rate limits and stamps on `/have` and `/get` from non-own peers.
 
@@ -37,5 +37,5 @@ An attacker who knows CIDs (because it created distinctive chunks and got people
 - Compromised bootstrap (needs Secure Boot / measured boot).
 - Metadata timing analysis of live queries.
 - Sybil attacks on the DHT/discovery (rnfs uses node age).
-- Cover holdings for deniability: disk and bandwidth cost vs privacy gain.
+- Cover holdings and diffusion: disk and bandwidth cost vs privacy gain; how much jitter and batching are needed against source detection in early spread.
 - Timing side channels in "don't have" responses (lookup vs no lookup).

@@ -30,6 +30,7 @@ Prototypes are throwaway. They're for learning, not for locking in the format. T
 - [ ] Leases, `/retifs/put`, receipts (with test vectors: decision 6).
 - [ ] Own-node pool on a LAN, replication target, repair, storage proofs ([ADR-0011](adr/0011-redundancy-by-default.md)).
 - [ ] Volunteer storage offers (`retifs.store`).
+- [ ] Diffuse mode: anonymous push seeding, epidemic re-replication with jitter, cover holdings ([ADR-0011](adr/0011-redundancy-by-default.md)).
 - [ ] Decide full replicas vs erasure coding before accepting ADR-0008/0009.
 
 ## Phase 2: database

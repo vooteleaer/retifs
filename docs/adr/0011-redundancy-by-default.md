@@ -31,6 +31,22 @@ Supports 8 (redundant by default), 7 (holders are blind), 4 (local-first: writes
   - Owners with under-replicated data say so in their announce (e.g. "need replicas: ~2 GB").
   - A volunteer asks for a lease offer; the owner signs one if the volunteer fits its policy, and the volunteer pulls. **Without a signed lease nobody stores your data**, which keeps GC and accounting clean.
 
+### Diffusion and source anonymity ("diffuse" mode)
+Wide, fast replication also protects privacy: when many nodes hold a chunk, holding it says nothing about who wrote or read it.
+- **Push seeding hides the origin (an RNS property):**
+  - RNS packets carry no source address, and a link's destination doesn't learn who opened it.
+  - Pulling exposes the source: holders ask the origin's `retifs.node` destination. So in diffuse mode the origin **opens anonymous links and pushes** chunks to a few randomly chosen first holders (own pool or volunteers), and never serves that content as a destination itself.
+- **Epidemic diffusion:** holders replicate further under their own volunteer policy, with random delays, so copies quickly outnumber any set an observer could watch.
+- **Holding stops implying interest:** nodes in a diffusion pool hold chunks they never asked for (cover holdings). That makes honeypot probes uninformative: a chunk found on a node may have arrived by diffusion.
+- **Timing defences:** jitter, batching several releases together, and mixing with other replication traffic, against first-appearance analysis.
+- **Per content class:** private (own pool only), shared (group), diffused (wide, source-anonymous).
+- **Limits:**
+  - Small networks give a small crowd.
+  - The early spread can still hint at the source (rumour-source-detection results), which jitter and batching reduce but don't eliminate.
+  - A global passive observer is out of scope, as for RNS.
+  - Diffusion costs bandwidth and disk, so it suits fast links and volunteers, not LoRa.
+  - The cache is still never served: diffusion protects what's published or held for others, not reading history.
+
 ### Repair
 A holder that stops renewing receipts, fails proofs, or is gone too long is replaced: a new lease goes elsewhere. Repair runs continuously as part of the seeker loop, not as a separate tool.
 
