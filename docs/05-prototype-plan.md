@@ -24,6 +24,7 @@ Prototypes are throwaway. They're for learning, not for locking in the format. T
 ## Phase 1b: seeking, replication, redundancy, disk budget
 - [ ] Disk budget: store limit, free-space reserve, per-tier quotas, LRU eviction of the cache tier, space reclamation in slabs ([ADR-0012](adr/0012-disk-budget.md)).
 - [ ] Want-list in the store (readable and blind wants); `/retifs/have`; event-driven seeker triggered by announces; partial `status`/`get` ([ADR-0010](adr/0010-continuous-seeking.md)).
+- [ ] Holder map: per-chunk/per-group holders from receipts, `have` answers, hints and announces; source ranking, load spreading, failover, measured copy counts.
 - [ ] Holder hints in read-caps; store generation counter in announces.
 - [ ] Leases, `/retifs/put`, receipts (with test vectors: decision 6).
 - [ ] Own-node pool on a LAN, replication target, repair, storage proofs ([ADR-0011](adr/0011-redundancy-by-default.md)).

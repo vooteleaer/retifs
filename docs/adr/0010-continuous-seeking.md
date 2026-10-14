@@ -41,6 +41,26 @@ Option 3.
   - by default, read-cap holder hints, configured peers and our own nodes;
   - every `retifs.node` heard, as an opt-in, because asking reveals interest in CIDs.
 
+### Holder map
+There may be hundreds of copies of a chunk online. The daemon keeps a living **holder map** of who has what, not just a list of what's missing.
+- **Sources, by strength:**
+  - signed receipts (a promise to keep until T);
+  - `/retifs/have` answers (good but going stale);
+  - holder hints in read-caps;
+  - announce summaries (store generation, possibly a Bloom filter of held chunks);
+  - gossip from own nodes (opt-in).
+- **Uses:**
+  - **Pick the best source:** hops, RTT, link MTU, measured throughput, failure rate; LoRa last for bulk.
+  - **Spread load:** across many holders, filling different gaps from different nodes.
+  - **Instant failover:** the next holder is already known.
+  - **Measured redundancy:** confirmed copies (receipts) and probable copies (sightings), which repair acts on ([ADR-0011](0011-redundancy-by-default.md)).
+- **Bounded:**
+  - **Per chunk:** the best few holders (e.g. 8) plus a count of others seen.
+  - **Grouped:** holders recorded per lease or per manifest subtree where possible, since holders usually have whole groups.
+  - **Aged:** entries decay and are refreshed when a holder's store generation changes.
+- **Stale entries are harmless:** every chunk is verified against its CID on arrival, so a wrong holder only costs one wasted request.
+- **Privacy:** the map is local. Sharing it reveals who holds what, so gossip is opt-in and limited to own nodes by default.
+
 ### Holder hints
 A read-cap may carry hints: `retifs:1:<root>:<seed>:<size>@<node>,<node>`. Hints say where to ask; integrity always comes from the CID.
 
