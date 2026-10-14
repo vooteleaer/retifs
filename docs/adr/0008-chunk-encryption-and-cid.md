@@ -44,6 +44,14 @@ This is exactly an RNS Token with key `okm[0:64]` and a derived IV. RNS's `Token
 - `publisher_secret` is a separate 256-bit secret, never the RNS identity key.
 - **The reader needs only `seed`** (32 bytes) per chunk. The manifest stores `(cid, seed)`, and a read-cap for the content is the manifest's own `(cid, seed)`.
 
+### Chunker (writer policy v1, not format)
+FastCDC 2020 with **min 8 KiB, avg 12 KiB, max 16 KiB − 68 bytes**. Every content chunk except a file's last seals into exactly the **16 KiB class**:
+- about 10 % padding overhead;
+- chunk sizes reveal nothing about content;
+- the size suits LoRa.
+
+Chosen on 2026-10-14 from the measurements below. Readers don't depend on it; changing it later only affects dedup with older uploads.
+
 ### CID
 `cid = 0x01 ‖ SHA-256(chunk)`: 33 bytes, computed over the ciphertext.
 - The version byte is there from the start (lesson from IPFS CIDv0→v1).
@@ -69,7 +77,7 @@ Key and IV are both derived from `seed`, which is a PRF (HMAC) of the full frame
 - Harder:
   - CBC + HMAC costs more than an AEAD and can't be parallelised for encryption.
   - Padding wastes up to half the class for small chunks (the price of not leaking size).
-  - The chunker must keep chunks below 262 076 bytes.
+  - The chunker must keep chunks within a class (writer policy above).
 - **Measured padding overhead (2026-10-14):** a 3 MB file with the current chunker (FastCDC 4/16/60 KiB) took **4.48 MB** in the slab store, i.e. **49 % overhead**. Chunks just above a power of two land in the next class, and FastCDC spreads sizes across class boundaries.
 - **The overhead doesn't shrink for large files.** Chunk size is independent of file size: 1 MB to 1.8 GB files (random, DLLs, zip, mp4) all measured 46–49 %, with about 60 % of chunks landing in the 32 KiB class. Measured with `examples/padding_stats.rs`.
 - **Aligning the chunker to one class** (100 MB random data; the dedup column is new data after 10 inserts of 100 B into a 20 MB file):
@@ -88,4 +96,4 @@ Key and IV are both derived from `seed`, which is a PRF (HMAC) of the full frame
 - **Before acceptance:**
   - an external review of the construction and the KDF labels;
   - a decision on whether 1 KiB as the smallest class is right for LoRa;
-  - **reducing the padding overhead**. Options: align the chunker to class boundaries (e.g. `max = class − 68` and `min ≥ class/2`, so chunks fill one class), or finer classes such as 1.5× steps (less waste, but more size information leaks). Changing chunker parameters isn't irreversible; changing the class list is.
+  - ~~reducing the padding overhead~~: **resolved** by aligning the chunker to the 16 KiB class (8/12/16 KiB−68). Measured 10 % overhead, with 100 % of non-final chunks in the 16 KiB class.

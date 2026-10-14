@@ -28,7 +28,7 @@ internal  = cid (33) ‖ seed (32) ‖ u64_be span (bytes below)   73 bytes
 - **Canonical by construction.** There are no optional fields, no maps, and one width per field. Equal trees give equal bytes.
 - **The read capability** is `FileRef = (root cid, root seed, size)`. That's all a reader needs, and it reveals nothing beyond that one file.
 - **Strict validation on read:** version, kind, `length = 4 + count × width`, a known CID version, child spans that sum to the parent's span, and chunk lengths that match their leaf entries.
-- **Writer policy v1** (not format; readers accept any count): FastCDC chunks (4/16/60 KiB), then groups of up to **64** entries per node, bottom-up. A 64-entry internal node is 4 676 bytes and seals into the 8 KiB class. An empty file is a root leaf with 0 entries.
+- **Writer policy v1** (not format; readers accept any count): FastCDC chunks (8/12/16 KiB−68, [ADR-0008](0008-chunk-encryption-and-cid.md)), then groups of up to **64** entries per node, bottom-up. A 64-entry internal node is 4 676 bytes and seals into the 8 KiB class. An empty file is a root leaf with 0 entries.
 
 ## Impact on the threat model
 - Storage nodes see class-sized blobs only. Which blobs form a tree is hidden; only fetch timing remains, which is already listed in [threat model](../04-threat-model.md) "Known leaks".

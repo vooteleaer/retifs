@@ -10,7 +10,7 @@ Files, folders, albums, packages, versions and branches are all combinations of 
 
 ## 1. Content: encrypted chunks
 
-- Chunking: content-defined chunking (FastCDC). Target size is ~16–32 KB for LoRa and ~256 KB on fast links.
+- Chunking: content-defined chunking (FastCDC), 8–16 KiB pieces that all seal into the 16 KiB class (about 10 % padding, sizes reveal nothing). See [ADR-0008](adr/0008-chunk-encryption-and-cid.md).
 - **Each chunk is encrypted separately** with its own key/nonce and MAC. A chunk can be verified and decrypted on arrival, independently of the others, which enables random access and streaming.
 - **The CID is computed over the ciphertext**, so pinning nodes verify integrity without the key. The hash of the content itself lives in the encrypted manifest.
 - Chunks are padded to fixed size classes so the type doesn't leak through the size.
