@@ -23,7 +23,8 @@ Prototypes are throwaway. They're for learning, not for locking in the format. T
 
 ## Phase 1b: seeking, replication, redundancy, disk budget
 - [ ] **Holder privacy first (RNS style):** anonymous requests with proof of access (serve token in the read-cap, `HMAC(token, link_id ‖ request)`); the cache tier is never served to others; explicit publish/seed for anonymous public serving ([ADR-0010](adr/0010-continuous-seeking.md), [threat model](04-threat-model.md#holder-privacy-tracking-and-honeypot-attacks)).
-- [ ] Disk budget: store limit, free-space reserve, per-tier quotas, LRU eviction of the cache tier, space reclamation in slabs ([ADR-0012](adr/0012-disk-budget.md)).
+- [ ] Disk budget: store limit, free-space reserve, hard and elastic tiers, LRU eviction of the cache tier, space reclamation in slabs ([ADR-0012](adr/0012-disk-budget.md)).
+- [ ] Spare tier: fill free space with replicas by need score (rarest first), evicted first, idle bandwidth only.
 - [ ] Want-list in the store (readable and blind wants); `/retifs/have`; event-driven seeker triggered by announces; partial `status`/`get` ([ADR-0010](adr/0010-continuous-seeking.md)).
 - [ ] Holder map: per-chunk/per-group holders from receipts, `have` answers, hints and announces; source ranking, load spreading, failover, measured copy counts.
 - [ ] Holder hints in read-caps; store generation counter in announces.

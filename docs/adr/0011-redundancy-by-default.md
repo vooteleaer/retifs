@@ -66,6 +66,9 @@ Two independent limits, set per content class:
 
 A small radius means a smaller crowd (less source anonymity) but less exposure and bandwidth. That's a per-content choice. The spread budget travels with the lease, so its encoding is part of the lease format (decision 6).
 
+### Soft volunteering: the spare tier
+Besides promised volunteering (leases with receipts), nodes fill otherwise empty disk with **spare** replicas: no promise, evicted first, chosen by need (rarest first). They raise real redundancy across the network without anyone having to ask, and count as probable copies, not confirmed ones. See [ADR-0012](0012-disk-budget.md).
+
 ### Repair
 A holder that stops renewing receipts, fails proofs, or is gone too long is replaced: a new lease goes elsewhere. Repair runs continuously as part of the seeker loop, not as a separate tool.
 

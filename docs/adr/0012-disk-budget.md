@@ -17,25 +17,46 @@ Supports 4 (local-first: own writes keep working as long as possible) and 8 (red
 ## Decision
 
 ### Two global limits
-- **Store limit:** the maximum the store may occupy. Default: **50 % of the volume**, adjustable.
+- **Store limit:** the maximum the hard tiers (pinned and leased) may occupy. Default: **50 % of the volume**, adjustable. Elastic tiers may use more, down to the reserve.
 - **Free-space reserve:** retifs never takes the volume below it. Default: **the larger of 10 % of the volume and 5 GiB**.
 
 The effective limit is whichever is reached first. Both are checked against real free space (statvfs / GetDiskFreeSpaceEx), so other programs filling the disk shrink retifs's room too.
 
-### Per-tier budgets inside the store limit
-| Tier | Default budget | When full |
-|---|---|---|
-| **Pinned** (own data) | no separate cap; uses the store limit | refuse new writes with a clear error, after evicting all cache |
-| **Leases: own-node pool** | no separate cap (it's your data on another box) | refuse new leases, report under-replicated |
-| **Leases: volunteer storage** | **0, opt-in**; e.g. `--volunteer 500G` | refuse new leases; existing ones run until expiry |
-| **Cache** | the rest, up to 20 % of the store limit by default | evict (LRU) |
+### Tiers: hard and elastic
+Empty disk is wasted disk, but retifs must hand space back immediately. That's the OS page-cache model: use what's free, give it back when anyone needs it.
+
+| Tier | Promise | Budget | Under pressure |
+|---|---|---|---|
+| **Pinned** (own data) | yes | within the store limit | never evicted; new writes refused at the hard limit |
+| **Leased** (own-node pool, volunteer leases) | yes, with receipts | within the store limit; volunteer leases capped (e.g. `--volunteer 500G`) | refuse new leases; existing ones run to expiry |
+| **Cache** (your own reads) | no | up to 20 % of the store limit by default | evict LRU |
+| **Spare** (others' replicas, no lease) | **no** | **all free space above the reserve** (device-dependent default) | **evicted first, lowest need first** |
+
+- **Hard tiers** (pinned, leased) are bounded by the store limit.
+- **Elastic tiers** (cache, spare) use what's left down to the reserve and shrink automatically when other programs fill the disk.
+
+### Spare tier: filling free space by need
+- Chunks with no promise attached, held because the network needs them. They count as **probable** copies in the holder map ([ADR-0010](0010-continuous-seeking.md)), never as confirmed ones, so evicting them breaks no promise. Owner redundancy relies on leases and receipts ([ADR-0011](0011-redundancy-by-default.md)).
+- **Need score**, from the holder map:
+  - **rarity** (few known copies, highest weight; "rarest first");
+  - **recent demand**;
+  - **priority by who asked** (own pool, then friends and groups, then strangers);
+  - **within the spread policy** (otherwise not taken);
+  - **age**.
+- **Swap:** a candidate chunk is taken only if it outscores the lowest-scored spare chunk held, which is then evicted.
+- **Device defaults:**
+  - servers and NAS (mains power, fast links): spare on;
+  - laptops and phones (battery, metered or slow links): off or small.
+- **Filling** uses idle bandwidth only, at low priority, never over LoRa.
+- **Privacy bonus:** spare chunks are unrequested holdings, which gives the deniability of diffuse mode ([ADR-0011](0011-redundancy-by-default.md)).
 
 ### Eviction and refusal order under pressure
-1. Evict **cache** (least recently used first; never chunks a running read needs).
-2. Drop chunks of **expired leases**.
-3. **Refuse new leases** and stop renewing volunteer leases (they expire normally).
-4. **Refuse new pinned writes** with a clear error ("disk budget reached").
-5. **Never** silently drop pinned data or chunks of an active lease. If an operator really has to shrink a lease (`retifs release`), the holder sends a signed release to the owner, so the owner's repair recruits elsewhere ([ADR-0011](0011-redundancy-by-default.md)).
+1. Evict **spare** (lowest need first).
+2. Evict **cache** (least recently used first; never chunks a running read needs).
+3. Drop chunks of **expired leases**.
+4. **Refuse new leases** and stop renewing volunteer leases (they expire normally).
+5. **Refuse new pinned writes** with a clear error ("disk budget reached").
+6. **Never** silently drop pinned data or chunks of an active lease. If an operator really has to shrink a lease (`retifs release`), the holder sends a signed release to the owner, so the owner's repair recruits elsewhere ([ADR-0011](0011-redundancy-by-default.md)).
 
 ### Admission
 Before accepting a lease, the daemon checks its budget for that tier, including space already promised but not yet fetched. Seeking never pulls blind chunks beyond accepted leases.
@@ -51,11 +72,11 @@ Hole punching comes first; compaction comes later.
 `retifs status` and `ping` show usage per tier, the limits, the reserve, and what is being refused or evicted. Under-replication caused by full disks is reported as such.
 
 ### Configuration
-Flags or config: `--max-store`, `--min-free`, `--cache-max`, `--volunteer`. Later these become records in the node's own namespace, so they can be managed remotely.
+Flags or config: `--max-store`, `--min-free`, `--cache-max`, `--volunteer`, `--spare on|off|SIZE`. Later these become records in the node's own namespace, so they can be managed remotely.
 
 ## Impact on the threat model
 See the [threat model](../04-threat-model.md).
-- **Storage exhaustion by others:** volunteer storage is opt-in and hard-capped, and quotas apply per lease signer (ADR-0011). Leases for blind chunks can't exceed the budget.
+- **Storage exhaustion by others:** promised volunteer storage is capped, and quotas apply per lease signer (ADR-0011). The spare tier can't exhaust anything, because it only uses free space above the reserve and yields first.
 - **Timing and usage leak:** what a node evicts or refuses can hint at its usage. That's minor and accepted.
 
 ## Consequences
