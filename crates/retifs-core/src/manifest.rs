@@ -11,7 +11,7 @@
 //! A fixed binary layout is canonical by construction: equal trees give equal
 //! bytes, and so equal CIDs.
 
-use std::{fmt, ops::Range};
+use std::{fmt, ops::Range, str::FromStr};
 
 use crate::{
     chunk::{self, ChunkError, Seed, MAX_DATA},
@@ -46,6 +46,61 @@ pub struct FileRef {
     pub root: Cid,
     pub seed: Seed,
     pub size: u64,
+}
+
+/// Text form of a read capability (draft, not yet an accepted format):
+/// `retifs:1:<root cid hex>:<root seed hex>:<size>`.
+impl fmt::Display for FileRef {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(f, "retifs:1:{}:{}:{}", self.root, hex::encode(self.seed.0), self.size)
+    }
+}
+
+impl FromStr for FileRef {
+    type Err = ManifestError;
+
+    fn from_str(s: &str) -> Result<Self, Self::Err> {
+        let bad = ManifestError::Malformed("read-cap must be retifs:1:<cid>:<seed>:<size>");
+        let parts: Vec<&str> = s.trim().split(':').collect();
+        let ["retifs", "1", root, seed, size] = parts.as_slice() else { return Err(bad) };
+        let root: [u8; CID_LEN] = hex::decode(root).ok().and_then(|b| b.try_into().ok()).ok_or(bad.clone())?;
+        let seed: [u8; 32] = hex::decode(seed).ok().and_then(|b| b.try_into().ok()).ok_or(bad.clone())?;
+        Ok(FileRef {
+            root: Cid::from_bytes(root).ok_or(bad.clone())?,
+            seed: Seed(seed),
+            size: size.parse().map_err(|_| bad)?,
+        })
+    }
+}
+
+/// One decoded manifest node, for fetchers that walk the tree themselves
+/// (e.g. breadth-first over the network, many requests in flight).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Node {
+    pub leaf: bool,
+    pub entries: Vec<NodeEntry>,
+}
+
+/// A child of a node: a data chunk (in a leaf) or another node (internal).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct NodeEntry {
+    pub cid: Cid,
+    pub seed: Seed,
+    /// Data bytes (leaf entry) or bytes below the child (internal entry).
+    pub span: u64,
+}
+
+/// Decodes and validates an opened manifest node. `expected_span` is the
+/// span its parent claimed (the file size for the root).
+pub fn decode_node(plaintext: &[u8], expected_span: u64) -> Result<Node, ManifestError> {
+    let (kind, entries) = decode(plaintext)?;
+    if entries.iter().map(|e| e.span).sum::<u64>() != expected_span {
+        return Err(ManifestError::Malformed("spans don't add up to the parent's span"));
+    }
+    Ok(Node {
+        leaf: kind == KIND_LEAF,
+        entries: entries.into_iter().map(|e| NodeEntry { cid: e.cid, seed: e.seed, span: e.span }).collect(),
+    })
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]

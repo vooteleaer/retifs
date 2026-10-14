@@ -93,3 +93,13 @@ fn storage_sees_only_class_sized_blobs() {
         assert!(ct.len().is_power_of_two() && (1024..=262_144).contains(&ct.len()));
     }
 }
+
+#[test]
+fn read_cap_text_roundtrip() {
+    let mut store = MemStore::default();
+    let f = write(&mut store, &ConvergenceSecret::public(), &noise(50_000, 1)).unwrap();
+    let text = f.to_string();
+    assert!(text.starts_with("retifs:1:01"));
+    assert_eq!(text.parse::<retifs_core::FileRef>().unwrap(), f);
+    assert!("retifs:2:00:00:1".parse::<retifs_core::FileRef>().is_err());
+}

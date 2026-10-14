@@ -1,4 +1,9 @@
 //! retifs networking over Reticulum via Prns (prototype).
 //!
-//! Empty for now; `examples/join_smoke.rs` checks that Prns can be embedded as
-//! a shared-instance client of a running `prnsd`.
+//! - [`protocol`]: the `/retifs/get` wire format
+//! - [`node`]: Prns node helpers (attach to prnsd, identity, destinations)
+//! - [`fetch`]: batched, pipelined fetching of a whole file by read-cap
+
+pub mod fetch;
+pub mod node;
+pub mod protocol;
