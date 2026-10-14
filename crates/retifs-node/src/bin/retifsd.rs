@@ -1,6 +1,10 @@
 //! retifsd (prototype): the retifs shared instance.
 //!
-//!     retifsd [--store DIR] [--public] [--put FILE]...
+//!     retifsd [--store DIR] [--max-store SIZE] [--min-free SIZE] [--cache-max SIZE]
+//!             [--public] [--put FILE]...
+//!
+//! SIZE: bytes, or with a K/M/G/T suffix (powers of 1024). Defaults (ADR-0012):
+//! store limit 50 % of the volume, reserve max(10 %, 5 GiB), cache 20 % of the limit.
 //!
 //! - Owns the slab store (default: libretifs::default_store_dir()).
 //! - Attaches to the local prnsd as a shared-instance client and serves chunks
@@ -25,7 +29,7 @@ use retifs_net::{
     protocol::{decode_request, encode_response, GET_ENDPOINT},
     transport::PrnsTransport,
 };
-use retifs_store::{CacheTier, PinnedTier, SlabStore};
+use retifs_store::{CacheTier, SlabStore};
 use tokio::io::{AsyncRead, AsyncWrite};
 
 struct Get;
@@ -67,18 +71,35 @@ struct Args {
     store: PathBuf,
     public: bool,
     put: Vec<PathBuf>,
+    budget: retifs_store::Budget,
+}
+
+fn size(s: &str) -> u64 {
+    let s = s.trim();
+    let (num, mult) = match s.chars().last().map(|c| c.to_ascii_uppercase()) {
+        Some('K') => (&s[..s.len() - 1], 1u64 << 10),
+        Some('M') => (&s[..s.len() - 1], 1 << 20),
+        Some('G') => (&s[..s.len() - 1], 1 << 30),
+        Some('T') => (&s[..s.len() - 1], 1 << 40),
+        _ => (s, 1),
+    };
+    let n: f64 = num.parse().unwrap_or_else(|_| panic!("bad size {s}"));
+    (n * mult as f64) as u64
 }
 
 fn args() -> Args {
-    let mut a = Args { store: libretifs::default_store_dir(), public: false, put: Vec::new() };
+    let mut a = Args { store: libretifs::default_store_dir(), public: false, put: Vec::new(), budget: Default::default() };
     let mut it = std::env::args().skip(1);
     while let Some(arg) = it.next() {
         match arg.as_str() {
             "--store" => a.store = it.next().expect("--store DIR").into(),
             "--put" => a.put.push(it.next().expect("--put FILE").into()),
             "--public" => a.public = true,
+            "--max-store" => a.budget.max_store = Some(size(&it.next().expect("--max-store SIZE"))),
+            "--min-free" => a.budget.min_free = Some(size(&it.next().expect("--min-free SIZE"))),
+            "--cache-max" => a.budget.cache_max = Some(size(&it.next().expect("--cache-max SIZE"))),
             "-h" | "--help" => {
-                println!("retifsd [--store DIR] [--public] [--put FILE]...");
+                println!("retifsd [--store DIR] [--max-store SIZE] [--min-free SIZE] [--cache-max SIZE] [--public] [--put FILE]...");
                 std::process::exit(0);
             }
             other => panic!("unknown argument {other}"),
@@ -101,7 +122,10 @@ fn main() {
     let args = args();
     std::fs::create_dir_all(&args.store).expect("create store dir");
     let store = match SlabStore::open(&args.store) {
-        Ok(s) => s,
+        Ok(s) => {
+            s.set_budget(args.budget.clone());
+            s
+        }
         Err(retifs_store::StoreError::Db(e)) if matches!(*e, redb::Error::DatabaseAlreadyOpen) => {
             eprintln!("retifsd: another retifsd is already using {}", args.store.display());
             std::process::exit(1);
@@ -150,6 +174,21 @@ async fn serve(store: Arc<SlabStore>, identity: node::IdentitySecret, endpoint: 
     println!("local API at {endpoint}");
 
     tokio::spawn(local_api(endpoint, daemon));
+
+    // Keep within the disk budget even when other programs fill the volume (ADR-0012).
+    let budget_store = store.clone();
+    tokio::spawn(async move {
+        let mut tick = tokio::time::interval(Duration::from_secs(30));
+        loop {
+            tick.tick().await;
+            let s = budget_store.clone();
+            match tokio::task::spawn_blocking(move || s.enforce()).await {
+                Ok(Ok(freed)) if freed > 0 => println!("disk budget: evicted {freed} bytes of cache/spare"),
+                Ok(Err(e)) => eprintln!("disk budget: {e}"),
+                _ => {}
+            }
+        }
+    });
 
     let announcer = handle.clone();
     tokio::spawn(async move {
@@ -227,7 +266,25 @@ async fn connection(mut stream: impl AsyncRead + AsyncWrite + Unpin, daemon: Arc
 
 async fn handle(d: &Daemon, req: Request) -> Result<Response, String> {
     match req {
-        Request::Ping => Ok(Response::Pong { node: d.node_hex.clone(), chunks: d.store.len().map_err(|e| e.to_string())? }),
+        Request::Ping => {
+            let u = d.store.usage().map_err(|e| e.to_string())?;
+            let l = d.store.limits().map_err(|e| e.to_string())?;
+            Ok(Response::Pong {
+                node: d.node_hex.clone(),
+                chunks: d.store.len().map_err(|e| e.to_string())?,
+                usage: Some(libretifs::StoreUsage {
+                    pinned: u.pinned,
+                    leased: u.leased,
+                    cache: u.cache,
+                    spare: u.spare,
+                    store_limit: l.hard_max,
+                    reserve: l.reserve,
+                    cache_max: l.cache_max,
+                    disk_total: l.disk_total,
+                    disk_available: l.disk_available,
+                }),
+            })
+        }
 
         Request::Put { data, public, compress, publish } => {
             let store = d.store.clone();
@@ -289,10 +346,18 @@ async fn handle(d: &Daemon, req: Request) -> Result<Response, String> {
 /// Writes `data` as pinned own data and registers it for serving: to holders
 /// of its read-cap (serve token), and to anyone if `publish`.
 fn store_file(store: &SlabStore, data: &[u8], public: bool, publish: bool, opts: manifest::WriteOpts) -> Result<FileRef, String> {
-    let mut pinned = PinnedTier(store);
+    let mut pinned = retifs_store::TrackedPinned::new(store);
     let mut rec = Recording::new(&mut pinned);
-    let file = manifest::write_opts(&mut rec, &secret(public), data, opts).map_err(|e| e.to_string())?;
+    let written = manifest::write_opts(&mut rec, &secret(public), data, opts);
     let cids = rec.cids;
+    let file = match written {
+        Ok(f) => f,
+        Err(e) => {
+            // Don't leave half a file pinned (and eating the budget).
+            let _ = pinned.roll_back();
+            return Err(e.to_string());
+        }
+    };
     store.register_serving(&ServeToken::for_file(&file), &cids).map_err(|e| e.to_string())?;
     if publish {
         store.publish(&cids).map_err(|e| e.to_string())?;

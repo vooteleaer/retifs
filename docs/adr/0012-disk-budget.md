@@ -86,3 +86,24 @@ See the [threat model](../04-threat-model.md).
   - LRU tracking for the cache.
   - Hole punching is platform-specific.
   - A full disk can stop own writes, by design, rather than corrupting anything.
+
+## Implementation status (2026-10-14)
+In `retifs-store` and `retifsd`:
+- **Tiers:** a new `SPARE` flag; each chunk's effective tier is pinned > leased > cache > spare. Usage per tier is kept in the index, in the same transactions as the data.
+- **Limits:** a store limit for hard tiers, a free-space reserve (real volume figures via `fs4`), and a cache cap. Defaults as above; flags `--max-store`, `--min-free`, `--cache-max`.
+- **Admission:**
+  - A new chunk first reuses a freed slot of its class.
+  - Otherwise it may evict spare, then cache (spare only for spare), preferring its own class so a slot frees up.
+  - Hard tiers are never evicted; a write beyond the budget fails with "disk budget reached".
+  - A failed own write rolls back the chunks it newly added (`TrackedPinned`), so half a file doesn't eat the budget.
+- **LRU:** accesses are tracked in memory and written to the index lazily (non-durable).
+- **Space back to the OS:** removed slots are hole-punched (Linux `fallocate(PUNCH_HOLE)`, Windows sparse files with `FSCTL_SET_ZERO_DATA`) and reused.
+- **Background:** `enforce()` every 30 s trims the cache to its cap and restores the reserve when other programs fill the volume.
+- **Visibility:** `retifs ping` shows usage per tier, the limits and the volume.
+- **Tests:** usage accounting, cache LRU at its cap, eviction order under disk pressure (pinned never dropped), store limit for hard tiers only, `enforce` after others fill the disk, and holes (freed slot reads as zeros, neighbours intact). Plus a live daemon check: a put over the limit is refused and leaves nothing behind.
+- **Not yet:**
+  - The spare tier has no producer yet (need score, filling).
+  - Volunteer lease quotas.
+  - Eviction scans the whole index, which is fine for a prototype; an access-ordered index comes later.
+  - Segment compaction.
+

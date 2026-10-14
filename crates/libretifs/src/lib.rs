@@ -67,6 +67,8 @@ pub enum Response {
     Pong {
         node: String,
         chunks: u64,
+        #[serde(default)]
+        usage: Option<StoreUsage>,
     },
     Put {
         cap: String,
@@ -80,6 +82,20 @@ pub enum Response {
     Error {
         message: String,
     },
+}
+
+/// Disk usage per tier and the resolved budget (ADR-0012), in bytes.
+#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq, Eq)]
+pub struct StoreUsage {
+    pub pinned: u64,
+    pub leased: u64,
+    pub cache: u64,
+    pub spare: u64,
+    pub store_limit: u64,
+    pub reserve: u64,
+    pub cache_max: u64,
+    pub disk_total: u64,
+    pub disk_available: u64,
 }
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
@@ -238,9 +254,9 @@ impl Client {
         }
     }
 
-    pub async fn ping(&mut self) -> Result<(String, u64), ClientError> {
+    pub async fn ping(&mut self) -> Result<(String, u64, Option<StoreUsage>), ClientError> {
         match self.call(Request::Ping).await? {
-            Response::Pong { node, chunks } => Ok((node, chunks)),
+            Response::Pong { node, chunks, usage } => Ok((node, chunks, usage)),
             _ => Err(ClientError::Unexpected),
         }
     }

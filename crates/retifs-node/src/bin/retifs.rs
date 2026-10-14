@@ -36,8 +36,16 @@ async fn main() {
     let mut client = Client::connect(&store).await.unwrap_or_else(|e| fail(e));
     match command.as_str() {
         "ping" => {
-            let (node, chunks) = client.ping().await.unwrap_or_else(|e| fail(e));
+            let (node, chunks, usage) = client.ping().await.unwrap_or_else(|e| fail(e));
             println!("retifsd <{node}>, {chunks} chunks in store");
+            if let Some(u) = usage {
+                println!(
+                    "  own (pinned) {}  promised (leased) {}  of store limit {}\n  cache {} of {}  spare {}\n  volume: {} free of {}, reserve {}",
+                    human(u.pinned), human(u.leased), human(u.store_limit),
+                    human(u.cache), human(u.cache_max), human(u.spare),
+                    human(u.disk_available), human(u.disk_total), human(u.reserve)
+                );
+            }
         }
         "put" => {
             let path: PathBuf = it.next().unwrap_or_else(|| usage()).into();
@@ -84,6 +92,16 @@ async fn main() {
         }
         _ => usage(),
     }
+}
+
+fn human(b: u64) -> String {
+    const UNITS: [&str; 5] = ["B", "KiB", "MiB", "GiB", "TiB"];
+    let (mut v, mut i) = (b as f64, 0);
+    while v >= 1024.0 && i < UNITS.len() - 1 {
+        v /= 1024.0;
+        i += 1;
+    }
+    if i == 0 { format!("{b} B") } else { format!("{v:.1} {}", UNITS[i]) }
 }
 
 fn fail(e: impl std::fmt::Display) -> ! {
