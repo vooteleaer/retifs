@@ -78,6 +78,9 @@ Files, folders, albums, packages, versions and branches are all combinations of 
 - **Local store:** metadata always fully local; content in pinned / cache / serving tiers, stored as ciphertext. `keep:<device>` tags and query-based keep rules pull chunks proactively for offline use. See [ADR-0005](adr/0005-local-store-offline.md).
 - **On disk:** no special filesystem. Slab segments per size class plus a redb index on any Linux filesystem; self-verifying, crash-safe (content first, then index), exportable as a bundle. See [ADR-0007](adr/0007-local-store-layout.md).
 - Renewal can be delegated to a pinning service via a capability.
+- **Seeking and replication** ([ADR-0010](adr/0010-continuous-seeking.md), proposed): a persistent chunk-level want-list and an event-driven seeker (`have` / `get` / `put` / `lease` / `receipt`). Missing data is a normal state that fills in as holders become reachable.
+- **Redundancy by default** ([ADR-0011](adr/0011-redundancy-by-default.md), proposed): every piece of own data has a replication target, met by own-node pools, recruited peers and volunteer storage nodes, with repair and storage proofs.
+- **Disk budget** ([ADR-0012](adr/0012-disk-budget.md), proposed): a store size limit and a free-space reserve; evict cache first, refuse new leases next, never silently drop pinned data or active leases.
 - **Deletion = key destruction.**
 - Archive nodes deliberately pin valuable public content (library).
 

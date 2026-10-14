@@ -29,6 +29,7 @@
 5. **The BeOS way, not the WinFS way.** Free-form key-value attributes, schema as convention, opaque blocks. No relational engine on every file's path.
 6. **The file tree is a compatibility view,** not the primary interface.
 7. **Storage nodes are blind.** They hold hash-addressed noise and know nothing of its structure.
+8. **Redundant by default.** Every piece of your own data has a replication target from the moment it's written. "Only here" is a visible, temporary state, not a setting. Your own nodes pool and repair automatically, and others can volunteer storage ([ADR-0011](adr/0011-redundancy-by-default.md), proposed).
 
 ## Non-goals
 
@@ -44,4 +45,5 @@
 - **Why not rnfs?** It's a good IPFS port to RNS, but it's public by default and uses plaintext CIDs, which conflicts with principle 1 at the format level. We learn from it rather than build directly on it.
 - **Why not git?** We take its history model, but git has no distributed storage, queries or crypto.
 - **Why not NFS/Samba/Nextcloud?** They have a server in the middle and are location-based and trust-based.
+- **Why not RAID, Ceph or MinIO?** They're bound to one location or cluster, don't encrypt at the storage layer, and assume a fast, always-on LAN. retifs redundancy works across sites and links, and holders only ever see ciphertext.
 - **Why not an SQL database?** WinFS tried. See [prior art](03-prior-art.md).

@@ -5,7 +5,11 @@
 - **Discovery:** Bloom filters in announces vs a DHT (the rnfs experience) vs a hybrid.
 - **Scaling:** regional limiting of announces, hierarchy, path requests on demand.
 - **Relationship with Prns:** upstream contributions vs fork policy, given one dominant maintainer.
-- **Pinning economics:** reciprocity vs an exchange mechanism.
+- **Pinning economics:** reciprocity vs an exchange mechanism, for volunteer storage ([ADR-0011](adr/0011-redundancy-by-default.md)).
+- **Full replicas vs erasure coding:** k-of-n shares cost less per unit of protection but are a format decision; blocks accepting ADR-0008/0009.
+- **Default disk budget:** 50 % of the volume and a reserve of max(10 %, 5 GiB) are guesses; tune on real devices ([ADR-0012](adr/0012-disk-budget.md)).
+- **Default replication target:** e.g. "all my storage nodes, at least 2 copies, one offsite"; how to express it simply.
+- **Store generation in announces:** size and privacy of the counter that tells peers a node has new chunks ([ADR-0010](adr/0010-continuous-seeking.md)).
 - **Spam:** LXMF stamps on announces, pinning requests, attributes.
 - **App identity on Linux:** how to bind a per-app capability to a process reliably without a sandbox (Flatpak/portal identity, executable hash, user prompt?).
 - **Removal race:** which of a member's writes count when they were made offline, concurrently with that member's removal? Causal rule needed.

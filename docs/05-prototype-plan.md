@@ -21,6 +21,15 @@ Prototypes are throwaway. They're for learning, not for locking in the format. T
 - [ ] Local HTTP gateway (a client of `libretifs`).
 - [ ] Alpine: `/etc/apk/repositories` → gateway (apk knows nothing about RNS).
 
+## Phase 1b: seeking, replication, redundancy, disk budget
+- [ ] Disk budget: store limit, free-space reserve, per-tier quotas, LRU eviction of the cache tier, space reclamation in slabs ([ADR-0012](adr/0012-disk-budget.md)).
+- [ ] Want-list in the store (readable and blind wants); `/retifs/have`; event-driven seeker triggered by announces; partial `status`/`get` ([ADR-0010](adr/0010-continuous-seeking.md)).
+- [ ] Holder hints in read-caps; store generation counter in announces.
+- [ ] Leases, `/retifs/put`, receipts (with test vectors: decision 6).
+- [ ] Own-node pool on a LAN, replication target, repair, storage proofs ([ADR-0011](adr/0011-redundancy-by-default.md)).
+- [ ] Volunteer storage offers (`retifs.store`).
+- [ ] Decide full replicas vs erasure coding before accepting ADR-0008/0009.
+
 ## Phase 2: database
 - [ ] Attribute records (signed), Prolly-tree index, local queries; `set` / `query` / `watch` / `transaction` / `at` in the API.
 - [ ] `keep:<device>` tag and query-based keep rules (proactive pull).

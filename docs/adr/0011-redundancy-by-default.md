@@ -1,0 +1,62 @@
+# ADR-0011: Redundancy by default
+
+- **Status:** proposed
+- **Date:** 2026-10-14
+- **Irreversible:** partly. The choice between full replicas and erasure-coded shares affects the content format and **blocks acceptance of [ADR-0008](0008-chunk-encryption-and-cid.md) and [ADR-0009](0009-manifest-format.md)**.
+
+## Context
+With wants alone ([ADR-0010](0010-continuous-seeking.md)), replication is demand-driven: popular data spreads, and data nobody else reads stays on one node. For your own data, that's the wrong default. retifs should be usable as a self-healing store for servers and NAS-like setups (a few nodes on a LAN acting as a redundant pool), as well as across sites and mesh links. That makes redundancy a core property ([vision](../00-vision.md), principle 8), not an add-on.
+
+## Principles
+Supports 8 (redundant by default), 7 (holders are blind), 4 (local-first: writes succeed locally first, replication follows) and 1 (all replicas are ciphertext). Violates none.
+
+## Decision
+
+### Replication target as policy
+- Every piece of own data has a target, set per namespace, keep rule or tag. Example: "all my storage nodes, at least 2 copies, one in another failure domain".
+- **Default greater than 1.** If the target can't be met (e.g. one node only), writes still succeed locally and `status` says **under-replicated** clearly.
+- `status` shows the real state: only here, N/M replicas, or complete.
+
+### Three sources of holders (one mechanism: leases, ADR-0010)
+| Source | Initiator | Example |
+|---|---|---|
+| Demand | someone wants the data | a friend opens a shared album |
+| Owner policy | the owner's daemon recruits holders | own NAS pool, plus 1 offsite |
+| Volunteer supply | a storage node seeks work | a community or library node with spare disk |
+
+- **Own-node pool:** devices authorised by the same root identity recognise each other. On a LAN they find each other via AutoInterface and replicate with zero configuration. Adding a box means it fills up and starts repairing.
+- **Recruitment:** the owner's daemon issues leases to candidates (own nodes first, then configured peers, then volunteers if policy allows) until the target is met.
+- **Volunteer storage:**
+  - Nodes with spare capacity announce a `retifs.store` destination with an offer: free capacity, maximum lease length, failure domain, and policy (anyone or friends only).
+  - Owners with under-replicated data say so in their announce (e.g. "need replicas: ~2 GB").
+  - A volunteer asks for a lease offer; the owner signs one if the volunteer fits its policy, and the volunteer pulls. **Without a signed lease nobody stores your data**, which keeps GC and accounting clean.
+
+### Repair
+A holder that stops renewing receipts, fails proofs, or is gone too long is replaced: a new lease goes elsewhere. Repair runs continuously as part of the seeker loop, not as a separate tool.
+
+### Proof of storage
+A receipt is a promise. Before handing out a lease, the owner precomputes a few challenges for random chunks, e.g. `HMAC(nonce, chunk)` using only RNS primitives. Later it asks the holder to answer them, which needs neither a download nor a local copy. A failed proof counts as a lost replica.
+
+### Placement
+- **Failure domains:** nodes advertise a coarse failure-domain hint (site, power or network domain, link type), and recruitment spreads across domains.
+- **Link-aware:** bulk replication uses fast links. LoRa-only nodes aren't recruited as bulk holders; LoRa carries wants, leases, receipts and small repairs.
+- **Opt-out:** small devices (Pi, phone) may opt out of holding others' data and are still protected themselves.
+
+### Full replicas vs erasure coding (open, blocks ADR-0008/0009)
+- **Full replicas** are simple and fit the current format. 3 copies cost 3× and survive 2 losses.
+- **Erasure coding** (Tahoe-LAFS style, k-of-n) costs less per unit of protection: 4-of-6 costs 1.5× and survives 2 losses; 3-of-10 costs 3.3× and survives 7.
+- Shares would be new CIDs derived from chunk groups, so this is a format decision. It must be settled before ADR-0008/0009 are accepted. A likely outcome is full replicas first, with erasure-coded share groups as a later, versioned layer, which would still need room in the format now.
+
+## Impact on the threat model
+See the [threat model](../04-threat-model.md).
+- **Holders** see ciphertext, chunk grouping per lease, lease timing and the owner key that signed. Mitigations: **per-lease derived signing keys** (unlinkable to the owner's identity and to each other), split leases, cover chunks.
+- **Malicious or lazy volunteers** (Sybil) are limited by proofs of storage, spreading over failure domains and many holders, and stamps (as in LXMF) that make spamming offers or lease requests costly.
+- **Storage exhaustion attacks** on volunteers are limited by quotas per lease signer and stamp cost.
+
+## Consequences
+- Easier: losing a device doesn't lose data. A NAS pool works out of the box. Community storage is possible without trusting holders.
+- Harder:
+  - Disk and bandwidth multiply by the replication factor.
+  - Proofs, repair and placement add state and background traffic.
+  - Lease grouping leaks which chunks belong together.
+  - Incentives beyond reciprocity remain open ("pinning economics").
