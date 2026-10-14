@@ -71,6 +71,20 @@ Key and IV are both derived from `seed`, which is a PRF (HMAC) of the full frame
   - Padding wastes up to half the class for small chunks (the price of not leaking size).
   - The chunker must keep chunks below 262 076 bytes.
 - **Measured padding overhead (2026-10-14):** a 3 MB file with the current chunker (FastCDC 4/16/60 KiB) took **4.48 MB** in the slab store, i.e. **49 % overhead**. Chunks just above a power of two land in the next class, and FastCDC spreads sizes across class boundaries.
+- **The overhead doesn't shrink for large files.** Chunk size is independent of file size: 1 MB to 1.8 GB files (random, DLLs, zip, mp4) all measured 46–49 %, with about 60 % of chunks landing in the 32 KiB class. Measured with `examples/padding_stats.rs`.
+- **Aligning the chunker to one class** (100 MB random data; the dedup column is new data after 10 inserts of 100 B into a 20 MB file):
+
+  | FastCDC min/avg/max | Avg chunk | Padding overhead | Forced cuts at max | New data after edits |
+  |---|---|---|---|---|
+  | 4 / 16 / 60 KiB (current) | 19.4 KiB | 49.3 % | 0.2 % | 1.50 % |
+  | 8 / 10 / 16 KiB−68 | 12.6 KiB | 27.1 % | 19 % | 0.92 % |
+  | 8 / 12 / 16 KiB−68 | 14.5 KiB | 10.3 % | 54 % | 1.73 % |
+  | 10 / 12 / 16 KiB−68 | 14.8 KiB | 7.9 % | 57 % | — |
+  | 12 / 14 / 16 KiB−68 | 15.6 KiB | 2.8 % | 73 % | 2.26 % |
+  | 16 / 24 / 32 KiB−68 | 29.0 KiB | 10.3 % | 53 % | 2.90 % |
+
+  FastCDC resynchronises at the next natural cut, so even with many forced cuts, dedup after edits stays close to the current config.
+
 - **Before acceptance:**
   - an external review of the construction and the KDF labels;
   - a decision on whether 1 KiB as the smallest class is right for LoRa;
