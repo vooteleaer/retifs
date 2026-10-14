@@ -92,7 +92,7 @@ A read-cap may carry hints: `retifs:1:<root>:<seed>:<size>@<node>,<node>`. Hints
 
 ## Impact on the threat model
 See the [threat model](../04-threat-model.md).
-- **Answering reveals holdings (tracking/honeypot attack).** Mitigated by authorization, a never-served cache, proof of read access and no public summaries (see "Who may ask").
+- **Answering reveals holdings (tracking/honeypot attack).** Mitigated by anonymous proof of access (serve tokens), a never-served cache, deliberate publishing and no public summaries (see "Who may ask").
 - Asking reveals interest in CIDs; prefixes leak slightly less. Asking only trusted candidates by default limits it.
 - A lease reveals which chunks belong together to the holder (not content or structure). Mitigations: split leases, cover chunks, per-lease derived signing keys ([ADR-0011](0011-redundancy-by-default.md)).
 - A malicious holder can withhold data. Multi-source, proofs and repair (ADR-0011) limit the damage.
