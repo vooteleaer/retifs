@@ -1,29 +1,35 @@
 //! retifs CLI (prototype).
 //!
-//!     retifs get READ-CAP --from NODE [-o OUT] [--batch N] [--inflight N]
+//!     retifs get READ-CAP --from NODE [--from NODE]... [-o OUT]
+//!                [--links N] [--batch N] [--inflight N] [--timeout SECS] [--cache DIR]
 //!
-//! Attaches to the local prnsd, finds a path to NODE (a retifsd destination
-//! hash), fetches the file behind READ-CAP with batched, pipelined requests,
-//! verifies every chunk and writes the plaintext.
+//! Attaches to the local prnsd, opens N links to each NODE (a retifsd
+//! destination hash), and fetches the file behind READ-CAP: local cache first,
+//! then batched requests spread over all links. Chunks one node lacks are
+//! taken from another. Every chunk is verified; the plaintext is written to OUT.
 
-use std::{path::PathBuf, time::{Duration, Instant}};
+use std::{path::PathBuf, time::Instant};
 
 use personal_rns::prelude::*;
 use retifs_core::FileRef;
 use retifs_net::{
-    fetch::{fetch_file, FetchOpts},
+    fetch::{fetch_file, FetchOpts, NoCache},
     node::{attach, block_on, destination, new_identity, parse_destination},
+    transport::{PrnsTransport, Transport},
 };
+use retifs_store::{CacheTier, SlabStore};
 
 struct Args {
     cap: FileRef,
-    from: DestinationHash,
+    from: Vec<DestinationHash>,
     out: PathBuf,
+    links_per_node: usize,
+    cache: Option<PathBuf>,
     opts: FetchOpts,
 }
 
 fn usage() -> ! {
-    eprintln!("retifs get READ-CAP --from NODE [-o OUT] [--batch N] [--inflight N]");
+    eprintln!("retifs get READ-CAP --from NODE [--from NODE]... [-o OUT] [--links N] [--batch N] [--inflight N] [--timeout SECS] [--cache DIR]");
     std::process::exit(2);
 }
 
@@ -33,18 +39,24 @@ fn args() -> Args {
         usage();
     }
     let cap: FileRef = it.next().unwrap_or_else(|| usage()).parse().unwrap_or_else(|e| panic!("{e}"));
-    let (mut from, mut out, mut opts) = (None, PathBuf::from("retifs.out"), FetchOpts::default());
+    let mut a = Args { cap, from: Vec::new(), out: "retifs.out".into(), links_per_node: 1, cache: None, opts: FetchOpts::default() };
     while let Some(arg) = it.next() {
         let mut value = || it.next().unwrap_or_else(|| usage());
         match arg.as_str() {
-            "--from" => from = Some(parse_destination(&value()).expect("NODE is a 32-hex-digit destination hash")),
-            "-o" | "--out" => out = value().into(),
-            "--batch" => opts.batch = value().parse().expect("--batch N"),
-            "--inflight" => opts.inflight = value().parse().expect("--inflight N"),
+            "--from" => a.from.push(parse_destination(&value()).expect("NODE is a 32-hex-digit destination hash")),
+            "-o" | "--out" => a.out = value().into(),
+            "--links" => a.links_per_node = value().parse().expect("--links N"),
+            "--batch" => a.opts.batch = value().parse().expect("--batch N"),
+            "--inflight" => a.opts.inflight_per_link = value().parse().expect("--inflight N"),
+            "--cache" => a.cache = Some(value().into()),
+            "--timeout" => a.opts.timeout = std::time::Duration::from_secs_f64(value().parse().expect("--timeout SECS")),
             _ => usage(),
         }
     }
-    Args { cap, from: from.unwrap_or_else(|| usage()), out, opts }
+    if a.from.is_empty() {
+        usage();
+    }
+    a
 }
 
 fn main() {
@@ -65,31 +77,44 @@ async fn get(args: Args) {
     });
     let handle = node.handle();
     let of = attach(&handle).await.unwrap_or_else(|e| panic!("{e}"));
-    eprintln!("attached to {of}; requesting path");
+    eprintln!("attached to {of}");
 
     let work = async {
+        let transport = PrnsTransport::new(handle.clone());
         let t0 = Instant::now();
-        let path = tokio::time::timeout(Duration::from_secs(60), handle.request_path(args.from))
-            .await
-            .expect("no path to node within 60 s")
-            .unwrap_or_else(|e| panic!("path request failed: {e:?}"));
-        let t_path = t0.elapsed();
-        eprintln!("path found in {t_path:?} ({:?} hops); linking", path.hops);
-        let link = handle.establish_link(args.from).await.unwrap_or_else(|e| panic!("link failed: {e:?}"));
-        let t_link = t0.elapsed() - t_path;
-        eprintln!("link up in {t_link:?}; fetching");
+        let mut links = Vec::new();
+        for peer in &args.from {
+            for _ in 0..args.links_per_node {
+                match transport.connect(*peer).await {
+                    Ok(link) => links.push(link),
+                    Err(e) => eprintln!("link to {}: {e}", hex(peer)),
+                }
+            }
+        }
+        if links.is_empty() {
+            panic!("could not link to any node");
+        }
+        let t_links = t0.elapsed();
 
         let t1 = Instant::now();
-        let (data, stats) = fetch_file(&handle, link, &args.cap, args.opts).await.unwrap_or_else(|e| panic!("{e}"));
+        let result = match &args.cache {
+            Some(dir) => {
+                let mut store = SlabStore::open(dir).expect("open cache store");
+                store.set_sync(false); // a cache can always be refetched
+                fetch_file(&transport, &links, &args.cap, args.opts, &mut CacheTier(&mut store)).await
+            }
+            None => fetch_file(&transport, &links, &args.cap, args.opts, &mut NoCache).await,
+        };
+        let (data, stats) = result.unwrap_or_else(|e| panic!("{e}"));
         let secs = t1.elapsed().as_secs_f64();
         std::fs::write(&args.out, &data).unwrap_or_else(|e| panic!("{}: {e}", args.out.display()));
 
-        println!("path {:?} ({:?} hops), link {:?}", t_path, path.hops, t_link);
+        println!("{} link(s) to {} node(s) in {:?}", links.len(), args.from.len(), t_links);
         println!(
-            "fetched {} bytes in {:.2} s = {:.2} Mbps plaintext ({} chunks, {} requests, {} tree levels, {} ciphertext bytes; batch {} x {} in flight)",
+            "fetched {} bytes in {:.2} s = {:.2} Mbps ({} chunks, {} tree levels, {} requests, {} retries, {} from cache, {} network bytes; batch {} x {} in flight per link)",
             data.len(), secs, data.len() as f64 * 8.0 / secs / 1e6,
-            stats.chunks, stats.requests, stats.tree_levels, stats.ciphertext_bytes,
-            args.opts.batch, args.opts.inflight,
+            stats.chunks, stats.tree_levels, stats.requests, stats.retries, stats.cache_hits, stats.network_bytes,
+            args.opts.batch, args.opts.inflight_per_link,
         );
         println!("verified and written to {}", args.out.display());
     };
@@ -98,4 +123,8 @@ async fn get(args: Args) {
         () = work => {}
         r = node.run() => eprintln!("node stopped: {r:?}"),
     }
+}
+
+fn hex(d: &DestinationHash) -> String {
+    d.as_bytes().iter().map(|b| format!("{b:02x}")).collect()
 }

@@ -241,3 +241,19 @@ fn allocate(w: &redb::WriteTransaction, class: u8) -> Result<(u32, u32), StoreEr
     next.insert(class, n + 1)?;
     Ok(((n / SLOTS_PER_SEGMENT) as u32, (n % SLOTS_PER_SEGMENT) as u32))
 }
+
+/// A view of the store whose writes land in the cache tier (evictable),
+/// for chunks fetched from the network rather than written locally.
+pub struct CacheTier<'a>(pub &'a mut SlabStore);
+
+impl Store for CacheTier<'_> {
+    type Error = StoreError;
+
+    fn put(&mut self, cid: Cid, ciphertext: Vec<u8>) -> Result<(), StoreError> {
+        self.0.insert(&cid, &ciphertext, tier::CACHE).map(|_| ())
+    }
+
+    fn get(&self, cid: &Cid) -> Result<Option<Vec<u8>>, StoreError> {
+        self.0.fetch(cid)
+    }
+}
