@@ -32,7 +32,8 @@ Prototypes are throwaway. They're for learning, not for locking in the format. T
 - [ ] Own-node pool on a LAN, replication target, repair, storage proofs ([ADR-0011](adr/0011-redundancy-by-default.md)).
 - [ ] Volunteer storage offers (`retifs.store`).
 - [ ] Diffuse mode: anonymous push seeding, epidemic re-replication with jitter, cover holdings ([ADR-0011](adr/0011-redundancy-by-default.md)).
-- [ ] Decide full replicas vs erasure coding before accepting ADR-0008/0009.
+- [ ] Decide before accepting ADR-0008/0009: full replicas vs erasure coding; compression flag in the chunk frame; inline tiny files in manifests.
+- [ ] Slow links: per-interface priority and airtime budget; no bulk/spare/diffusion over LoRa ([ADR-0013](adr/0013-slow-links.md)); LoRa measurements once a second RNode is available.
 
 ## Phase 2: database
 - [ ] Attribute records (signed), Prolly-tree index, local queries; `set` / `query` / `watch` / `transaction` / `at` in the API.

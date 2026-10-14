@@ -81,6 +81,7 @@ Files, folders, albums, packages, versions and branches are all combinations of 
 - **Seeking and replication** ([ADR-0010](adr/0010-continuous-seeking.md), proposed): a persistent chunk-level want-list and an event-driven seeker (`have` / `get` / `put` / `lease` / `receipt`). Missing data is a normal state that fills in as holders become reachable.
 - **Redundancy by default** ([ADR-0011](adr/0011-redundancy-by-default.md), proposed): every piece of own data has a replication target, met by own-node pools, recruited peers and volunteer storage nodes, with repair and storage proofs.
 - **Disk budget** ([ADR-0012](adr/0012-disk-budget.md), proposed): a store size limit and a free-space reserve; evict cache first, refuse new leases next, never silently drop pinned data or active leases.
+- **Slow links** ([ADR-0013](adr/0013-slow-links.md), proposed): LoRa carries the control plane; bulk only on explicit request within an airtime budget; prioritised sending; inline tiny files and compression before encryption (format, pending).
 - **Deletion = key destruction.**
 - Archive nodes deliberately pin valuable public content (library).
 

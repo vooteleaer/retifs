@@ -52,3 +52,7 @@ The `retifs-core` tests cover:
 - all stored blobs being class-sized.
 
 Still missing: cross-implementation manifest vectors.
+
+## Blocking acceptance
+- **Inline tiny files** ([ADR-0013](0013-slow-links.md)): data under ~400 B inside the root node (a new node kind or inline leaf variant).
+- **Full replicas vs erasure coding** ([ADR-0011](0011-redundancy-by-default.md)).

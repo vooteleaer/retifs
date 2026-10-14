@@ -93,6 +93,7 @@ Key and IV are both derived from `seed`, which is a PRF (HMAC) of the full frame
 
   FastCDC resynchronises at the next natural cut, so even with many forced cuts, dedup after edits stays close to the current config.
 
+- **Also blocking (from [ADR-0011](0011-redundancy-by-default.md) and [ADR-0013](0013-slow-links.md)):** full replicas vs erasure coding, and a **compression flag** in the frame (compress before encrypt).
 - **Before acceptance:**
   - an external review of the construction and the KDF labels;
   - a decision on whether 1 KiB as the smallest class is right for LoRa;
