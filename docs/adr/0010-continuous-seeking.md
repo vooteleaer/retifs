@@ -61,16 +61,19 @@ There may be hundreds of copies of a chunk online. The daemon keeps a living **h
 - **Stale entries are harmless:** every chunk is verified against its CID on arrival, so a wrong holder only costs one wasted request.
 - **Privacy:** the map is local. Sharing it reveals who holds what, so gossip is opt-in and limited to own nodes by default.
 
-### Who may ask (holder privacy)
-Answering `have` or `get` reveals what a node holds. An attacker who knows CIDs (honeypot chunks it created, or CIDs computed from a known public file) could otherwise map who read what. So, as in the [threat model](../04-threat-model.md#holder-privacy-tracking-and-honeypot-attacks):
-- **Serving requires authorization:** own nodes, lease owners (for their lease's chunks), and capability holders for a namespace. Requesters identify on the link. Everyone else gets "don't have", indistinguishable in content and timing.
-- **The cache tier is never served** except to own nodes. Seeding public content to strangers is opt-in per content class.
-- **Non-public requests carry proof of read access** (knowledge of the seed, over a nonce).
-- **No public holdings summaries** in announces. Generation counters go to authorized peers only.
-- **Rate limits and stamps** for requests from non-own peers.
+### Who may ask: RNS style (anonymous by default)
+As in RNS, where a NomadNet page or LXMF delivery doesn't learn who's asking unless the requester chooses to `identify`, **access is proven by knowing a secret, not by revealing who you are.** Answering `have`/`get` reveals holdings, so an attacker who knows CIDs (honeypot chunks, or CIDs computed from a known public file) must not be able to probe ([threat model](../04-threat-model.md#holder-privacy-tracking-and-honeypot-attacks)).
+- **Fetchers are anonymous by default:** ephemeral links, no `identify`.
+- **Proof of access:** each file or lease has a **serve token**, carried in the read-cap (and given to holders with the lease). Requests carry `HMAC(token, link_id ‖ request)`. The link ID is a free, replay-proof nonce, so there's no extra round trip. The holder verifies the proof and learns nothing about the requester. Without a valid proof the response is "don't have", indistinguishable in content and timing.
+- **Identity only where policy needs it:** own nodes, quotas and volunteer-storage accounting use RNS `identify`, like restricted NomadNet pages. Ordinary reading never does.
+- **Publishing is deliberate:** content explicitly **published or seeded** is served to anonymous requesters without proof, like hosting a micron page. Being seen holding it reveals nothing private.
+- **The cache tier is never served** (with or without proof) except to own nodes. A honeypot creator knows the seed and the token, but still can't see reading history.
+- **No public holdings summaries** in announces. Generation counters go to proven or own peers only.
+- **Rate limits and stamps** for non-own requesters.
+- **Option (later):** per-file serving destinations derived from the read-cap, so only cap holders can even find where a file is served.
 
 ### Holder hints
-A read-cap may carry hints: `retifs:1:<root>:<seed>:<size>@<node>,<node>`. Hints say where to ask; integrity always comes from the CID.
+A read-cap may carry hints: `retifs:1:<root>:<seed>:<size>@<node>,<node>`. Hints say where to ask; integrity always comes from the CID. The read-cap also carries the file's serve token (format to be fixed together with the lease format, decision 6).
 
 ### Replication: push the want, pull the data
 - **Lease:** a signed "keep these CIDs until T" from an owner (or a key the owner delegated). It lists chunks, never manifests ([irreversible decision 6](../02-irreversible-decisions.md)). A node that accepts a lease adds blind wants, and its seeker pulls the chunks from the owner or from anyone who has them.

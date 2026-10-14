@@ -23,15 +23,15 @@ Every crypto decision is checked against this.
 
 ## Holder privacy (tracking and honeypot attacks)
 An attacker who knows CIDs (because it created distinctive chunks and got people to fetch them, or computed them from a known public file) could ask nodes "do you have these?" and learn who read what. Rules:
-1. **Holding is private; serving needs authorization.** `/have` and `/get` answer only authorized requesters: own nodes, the owner of a lease for that lease's chunks, and holders of a capability for the namespace. Requesters identify on the link. Everyone else gets a response indistinguishable from "don't have", with uniform timing.
+1. **Anonymous by default, access by possession (RNS style).** Requesters don't identify; they prove knowledge of a per-file or per-lease serve token from the read-cap (`HMAC(token, link_id ‖ request)`). Without a valid proof the response is indistinguishable from "don't have", in content and timing. Identity (`identify`) is used only where policy needs it: own nodes, quotas, volunteer accounting. Explicitly published or seeded content is served to anyone, like a micron page.
 2. **The cache is never served to others.** Cached chunks are the user's reading history; only the user's own nodes may see them. Serving public content to strangers ("seeding") is an explicit opt-in per content class, never a side effect of reading.
-3. **Proof of read access for non-public content.** A request must show knowledge of the chunk's seed (e.g. an HMAC derived from the seed over a fresh nonce). That stops probing by parties who only saw CIDs (pinning nodes, observers). It doesn't stop the creator of a honeypot, who knows the seed; rules 1–2 cover that case.
+3. **Proofs stop CID-only probing.** Parties who only saw CIDs (pinning nodes, observers) can't produce proofs. A honeypot creator can (it knows the token), so rule 2 protects reading history.
 4. **No public summaries of holdings.** Announces carry no Bloom filters of held chunks. Store generation counters go only to authorized peers.
 5. **Holding doesn't imply reading.** Pool and volunteer nodes hold leased chunks they never chose to read. Optional cover holdings (pre-fetching unrelated public chunks) are an open question.
 6. **Linkability.** A long-lived `retifs.node` destination makes a node trackable. Use per-group or per-namespace serving destinations and ephemeral identities for fetching where possible.
 7. **Probing is expensive.** Rate limits and stamps on `/have` and `/get` from non-own peers.
 
-**Prototype status (2026-10-14):** `retifsd` still answers `/retifs/get` for anyone (`AllowAll`). Fixing that comes before any non-test use.
+**Prototype status (2026-10-14):** `retifsd` still answers `/retifs/get` for anyone (`AllowAll`) without proofs, and doesn't separate the cache tier. Fixing that comes before any non-test use.
 
 ## Open
 - Compromised bootstrap (needs Secure Boot / measured boot).
