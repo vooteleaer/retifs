@@ -54,7 +54,7 @@ See the [threat model](../04-threat-model.md).
 
 ## Implementation status (2026-10-14)
 The first slice exists: `crates/libretifs` (client, no Reticulum dependency) and the server in `retifsd`.
-- **Endpoint:** a Unix socket at `<store>/retifs.sock` (mode 0600), or on Windows a named pipe `\.\pipeetifs-<hash of store path>`. The store defaults to `$RETIFS_STORE`, `$XDG_DATA_HOME/retifs`, `~/.local/share/retifs` or `%LOCALAPPDATA%etifs`.
+- **Endpoint:** a Unix socket at `<store>/retifs.sock` (mode 0600), or on Windows a named pipe `\.\pipe\retifs-<hash of store path>`. The store defaults to `$RETIFS_STORE`, `$XDG_DATA_HOME/retifs`, `~/.local/share/retifs` or `%LOCALAPPDATA%\retifs`.
 - **Framing:** `u32_be length ‖ msgpack {v, id, msg}`.
 - **Operations:** `ping`, `put` (file → pinned → read-cap), `get` (local store first, then the given nodes; fetched chunks cached) and `status` (local presence, walking the manifest offline).
 - **Not yet:** records, attributes, queries, `watch`, transactions and history (§5–10 of the [API draft](../07-api.md)); per-app capabilities and `SO_PEERCRED`; fd passing (bulk data travels in the message, ≤ 256 MiB); remote use over a Link.
