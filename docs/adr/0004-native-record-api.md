@@ -51,3 +51,15 @@ See the [threat model](../04-threat-model.md).
 ## Consequences
 - Easier: applications work with records, queries and history directly. Local and remote access look the same. FUSE shrinks to a translation layer.
 - Harder: applications must be written for the API to benefit. Identifying apps reliably per process on Linux is imperfect without a sandbox (Flatpak/portal identity helps). Language bindings beyond Rust/C come later.
+
+## Implementation status (2026-10-14)
+The first slice exists: `crates/libretifs` (client, no Reticulum dependency) and the server in `retifsd`.
+- **Endpoint:** a Unix socket at `<store>/retifs.sock` (mode 0600), or on Windows a named pipe `\.\pipeetifs-<hash of store path>`. The store defaults to `$RETIFS_STORE`, `$XDG_DATA_HOME/retifs`, `~/.local/share/retifs` or `%LOCALAPPDATA%etifs`.
+- **Framing:** `u32_be length ‖ msgpack {v, id, msg}`.
+- **Operations:** `ping`, `put` (file → pinned → read-cap), `get` (local store first, then the given nodes; fetched chunks cached) and `status` (local presence, walking the manifest offline).
+- **Not yet:** records, attributes, queries, `watch`, transactions and history (§5–10 of the [API draft](../07-api.md)); per-app capabilities and `SO_PEERCRED`; fd passing (bulk data travels in the message, ≤ 256 MiB); remote use over a Link.
+- **Measured locally (two daemons, one machine):**
+  - `put` 10 MiB, then local `get` in 0.04–0.06 s.
+  - The second daemon fetched it from the first over Reticulum in 2.5 s (4 links, cache writes not fsynced); afterwards `status` showed it complete, and a repeat `get` was fully local.
+  - A second daemon on the same store is refused.
+

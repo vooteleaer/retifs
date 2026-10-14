@@ -63,7 +63,6 @@ pub struct FetchStats {
 
 #[derive(Debug)]
 pub enum FetchError {
-    NoLinks,
     TooManyLinks,
     /// No link delivered a valid copy (missing everywhere, corrupt, or all requests failed).
     Unavailable { cid: Cid, last_error: String },
@@ -74,7 +73,6 @@ pub enum FetchError {
 impl fmt::Display for FetchError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
-            FetchError::NoLinks => f.write_str("no links to fetch from"),
             FetchError::TooManyLinks => f.write_str("at most 64 links"),
             FetchError::Unavailable { cid, last_error } => write!(f, "no peer delivered chunk {cid} ({last_error})"),
             FetchError::Manifest(e) => write!(f, "{e}"),
@@ -98,7 +96,8 @@ impl Store for NoCache {
     }
 }
 
-/// Fetches and verifies the whole file behind `file`.
+/// Fetches and verifies the whole file behind `file`. With no `links`, only
+/// the local store is used.
 pub async fn fetch_file<T: Transport>(
     transport: &T,
     links: &[T::Link],
@@ -106,9 +105,6 @@ pub async fn fetch_file<T: Transport>(
     opts: FetchOpts,
     cache: &mut impl Store,
 ) -> Result<(Vec<u8>, FetchStats), FetchError> {
-    if links.is_empty() {
-        return Err(FetchError::NoLinks);
-    }
     if links.len() > 64 {
         return Err(FetchError::TooManyLinks);
     }
@@ -234,6 +230,9 @@ async fn fetch_remote<T: Transport>(
     opts: FetchOpts,
     stats: &mut FetchStats,
 ) -> Result<Vec<Fetched>, FetchError> {
+    if links.is_empty() {
+        return Err(FetchError::Unavailable { cid: entries[0].cid, last_error: "not held locally and no peers given".into() });
+    }
     let batch = opts.batch.clamp(1, MAX_BATCH);
     let n = entries.len();
     let queue = (0..n)

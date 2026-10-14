@@ -17,6 +17,8 @@ path = "src/bin/retifs.rs"
 
 [dependencies]
 getrandom = "0.3"
+libretifs = { path = "../libretifs" }
+redb = "2"
 personal-rns = { version = "=0.3.7", features = ["tokio-host", "tcp", "shared-instance"] }
 retifs-core = { path = "../retifs-core" }
 retifs-net = { path = "../retifs-net" }

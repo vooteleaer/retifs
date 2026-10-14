@@ -37,7 +37,7 @@ fn persists_across_reopen() {
     let dir = tempfile::tempdir().unwrap();
     let a = sealed(1, 3000);
     {
-        let mut st = SlabStore::open(dir.path()).unwrap();
+        let st = SlabStore::open(dir.path()).unwrap();
         assert!(st.insert(&a.cid, &a.ciphertext, tier::CACHE).unwrap());
     }
     let st = SlabStore::open(dir.path()).unwrap();
@@ -48,7 +48,7 @@ fn persists_across_reopen() {
 #[test]
 fn dedup_merges_tiers_without_new_slot() {
     let dir = tempfile::tempdir().unwrap();
-    let mut st = SlabStore::open(dir.path()).unwrap();
+    let st = SlabStore::open(dir.path()).unwrap();
     let a = sealed(1, 3000);
     assert!(st.insert(&a.cid, &a.ciphertext, tier::CACHE).unwrap());
     assert!(!st.insert(&a.cid, &a.ciphertext, tier::PINNED).unwrap());
@@ -60,7 +60,7 @@ fn dedup_merges_tiers_without_new_slot() {
 #[test]
 fn freed_slots_are_reused() {
     let dir = tempfile::tempdir().unwrap();
-    let mut st = SlabStore::open(dir.path()).unwrap();
+    let st = SlabStore::open(dir.path()).unwrap();
     let (a, b, c) = (sealed(1, 3000), sealed(2, 3000), sealed(3, 3000));
     st.insert(&a.cid, &a.ciphertext, tier::CACHE).unwrap();
     st.insert(&b.cid, &b.ciphertext, tier::CACHE).unwrap();
@@ -78,7 +78,7 @@ fn corruption_on_disk_is_detected() {
     let dir = tempfile::tempdir().unwrap();
     let a = sealed(1, 3000);
     {
-        let mut st = SlabStore::open(dir.path()).unwrap();
+        let st = SlabStore::open(dir.path()).unwrap();
         st.insert(&a.cid, &a.ciphertext, tier::CACHE).unwrap();
     }
     let seg = dir.path().join("slabs/c4k/seg-000000");
@@ -92,7 +92,7 @@ fn corruption_on_disk_is_detected() {
 #[test]
 fn refuses_bad_input() {
     let dir = tempfile::tempdir().unwrap();
-    let mut st = SlabStore::open(dir.path()).unwrap();
+    let st = SlabStore::open(dir.path()).unwrap();
     let a = sealed(1, 3000);
     let wrong = Cid::of(b"something else");
     assert!(matches!(st.insert(&wrong, &a.ciphertext, tier::CACHE), Err(StoreError::Corrupt(_))));

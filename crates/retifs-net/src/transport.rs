@@ -39,6 +39,27 @@ impl PrnsTransport {
     pub fn new(handle: PrnsNodeHandle) -> Self {
         PrnsTransport { handle, path_timeout: Duration::from_secs(60) }
     }
+
+    /// Requests a path, retrying: a single Prns path request can time out even
+    /// when the destination is reachable (seen between two local clients of one prnsd).
+    pub async fn ensure_path(&self, peer: DestinationHash) -> Result<(), String> {
+        let deadline = tokio::time::Instant::now() + self.path_timeout;
+        let mut last = String::from("no attempt");
+        while tokio::time::Instant::now() < deadline {
+            let left = deadline - tokio::time::Instant::now();
+            match tokio::time::timeout(left, self.handle.request_path(peer)).await {
+                Ok(Ok(_found)) => return Ok(()),
+                Ok(Err(e)) => last = format!("{e:?}"),
+                Err(_) => last = "timed out".into(),
+            }
+        }
+        Err(format!("no path within {:?} (last: {last})", self.path_timeout))
+    }
+
+    /// Opens a link to a peer whose path is already known.
+    pub async fn link(&self, peer: DestinationHash) -> Result<LinkId, String> {
+        self.handle.establish_link(peer).await.map_err(|e| format!("link failed: {e:?}"))
+    }
 }
 
 impl Transport for PrnsTransport {
@@ -46,14 +67,10 @@ impl Transport for PrnsTransport {
     type Link = LinkId;
 
     fn connect(&self, peer: DestinationHash) -> impl Future<Output = Result<LinkId, String>> + Send {
-        let handle = self.handle.clone();
-        let timeout = self.path_timeout;
+        let this = self.clone();
         async move {
-            tokio::time::timeout(timeout, handle.request_path(peer))
-                .await
-                .map_err(|_| format!("no path within {timeout:?}"))?
-                .map_err(|e| format!("path request failed: {e:?}"))?;
-            handle.establish_link(peer).await.map_err(|e| format!("link failed: {e:?}"))
+            this.ensure_path(peer).await?;
+            this.link(peer).await
         }
     }
 

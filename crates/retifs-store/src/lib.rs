@@ -7,6 +7,10 @@
 //! Write order is content first, then reference: the slot is written (and
 //! fsynced) inside the same redb transaction that records it, so a crash
 //! before commit leaves only a free slot with garbage in it.
+//!
+//! All operations take `&self`: redb serialises write transactions and slot
+//! allocation happens inside them, so one store can be shared (e.g. in an
+//! `Arc`) by the daemon's serving, import and cache paths.
 
 use std::{
     fmt,
@@ -90,20 +94,27 @@ impl SlabStore {
         Ok(SlabStore { root, db, sync: true })
     }
 
-    /// fsync each written slot (default on). Off only for tests and benchmarks.
+    /// fsync each pinned slot (default on). Cache and serving tiers are never
+    /// fsynced, since they can be refetched. Off only for tests and benchmarks.
     pub fn set_sync(&mut self, on: bool) {
         self.sync = on;
     }
 
     /// Stores a chunk. Returns false if it was already present (its tier
     /// flags are merged). Rejects bytes that don't match the CID.
-    pub fn insert(&mut self, cid: &Cid, ciphertext: &[u8], tier: u8) -> Result<bool, StoreError> {
+    pub fn insert(&self, cid: &Cid, ciphertext: &[u8], tier: u8) -> Result<bool, StoreError> {
         let class = class_index(ciphertext.len())?;
         if !cid.verify(ciphertext) {
             return Err(StoreError::Corrupt(*cid));
         }
         let key = cid.as_bytes().as_slice();
-        let w = self.db.begin_write()?;
+        // Only pinned data (own writes) must survive a crash; cached and served
+        // chunks can be fetched again, so they skip fsync of both slot and index.
+        let durable = self.sync && tier & tier::PINNED != 0;
+        let mut w = self.db.begin_write()?;
+        if !durable {
+            w.set_durability(redb::Durability::None);
+        }
         let inserted = {
             let mut index = w.open_table(INDEX)?;
             let existing = index.get(key)?.map(|g| g.value());
@@ -114,7 +125,7 @@ impl SlabStore {
                 false
             } else {
                 let (seg, slot) = allocate(&w, class)?;
-                self.write_slot(class, seg, slot, ciphertext)?;
+                self.write_slot(class, seg, slot, ciphertext, durable)?;
                 index.insert(key, (class, seg, slot, tier))?;
                 true
             }
@@ -142,7 +153,7 @@ impl SlabStore {
     }
 
     /// Removes a chunk and frees its slot for reuse.
-    pub fn remove(&mut self, cid: &Cid) -> Result<bool, StoreError> {
+    pub fn remove(&self, cid: &Cid) -> Result<bool, StoreError> {
         let w = self.db.begin_write()?;
         let removed = {
             let mut index = w.open_table(INDEX)?;
@@ -163,7 +174,7 @@ impl SlabStore {
     }
 
     /// Replaces a chunk's tier flags. Moving between tiers copies no bytes.
-    pub fn set_tier(&mut self, cid: &Cid, tier: u8) -> Result<bool, StoreError> {
+    pub fn set_tier(&self, cid: &Cid, tier: u8) -> Result<bool, StoreError> {
         let w = self.db.begin_write()?;
         let found = {
             let mut index = w.open_table(INDEX)?;
@@ -194,13 +205,13 @@ impl SlabStore {
             .join(format!("seg-{seg:06}"))
     }
 
-    fn write_slot(&self, class: u8, seg: u32, slot: u32, bytes: &[u8]) -> Result<(), StoreError> {
+    fn write_slot(&self, class: u8, seg: u32, slot: u32, bytes: &[u8], durable: bool) -> Result<(), StoreError> {
         let path = self.segment_path(class, seg);
         fs::create_dir_all(path.parent().expect("segment has a parent dir"))?;
         let mut f = OpenOptions::new().create(true).truncate(false).write(true).open(path)?;
         f.seek(SeekFrom::Start(slot as u64 * bytes.len() as u64))?;
         f.write_all(bytes)?;
-        if self.sync {
+        if durable {
             f.sync_data()?;
         }
         Ok(())
@@ -242,9 +253,24 @@ fn allocate(w: &redb::WriteTransaction, class: u8) -> Result<(u32, u32), StoreEr
     Ok(((n / SLOTS_PER_SEGMENT) as u32, (n % SLOTS_PER_SEGMENT) as u32))
 }
 
+/// A view of the store whose writes land in the pinned tier: own writes (ADR-0005).
+pub struct PinnedTier<'a>(pub &'a SlabStore);
+
+impl Store for PinnedTier<'_> {
+    type Error = StoreError;
+
+    fn put(&mut self, cid: Cid, ciphertext: Vec<u8>) -> Result<(), StoreError> {
+        self.0.insert(&cid, &ciphertext, tier::PINNED).map(|_| ())
+    }
+
+    fn get(&self, cid: &Cid) -> Result<Option<Vec<u8>>, StoreError> {
+        self.0.fetch(cid)
+    }
+}
+
 /// A view of the store whose writes land in the cache tier (evictable),
 /// for chunks fetched from the network rather than written locally.
-pub struct CacheTier<'a>(pub &'a mut SlabStore);
+pub struct CacheTier<'a>(pub &'a SlabStore);
 
 impl Store for CacheTier<'_> {
     type Error = StoreError;

@@ -16,7 +16,8 @@ Prototypes are throwaway. They're for learning, not for locking in the format. T
 - [ ] Transfer, open: LAN throughput ceiling, occasional unsettled request with ≥4 links, pinning/leases, serving side behind the transport trait.
 - [x] Local store: slab segments per size class + redb index, tier flags, slot reuse, CID-verified reads (`crates/retifs-store`, [ADR-0007](adr/0007-local-store-layout.md)).
 - [ ] Local store, continued: LRU eviction of the cache tier, lease expiry for the serving tier, keep rules ([ADR-0005](adr/0005-local-store-offline.md)).
-- [ ] `libretifs` + local socket: `create`, `put_block`, `read`, `status` ([ADR-0004](adr/0004-native-record-api.md)).
+- [x] `libretifs` + local endpoint (Unix socket / Windows named pipe): `ping`, `put`, `get`, `status` via `retifsd` ([ADR-0004](adr/0004-native-record-api.md), implementation status).
+- [ ] Local API, continued: records/attributes (`create`, `put_block`, `set`, `query`), streaming / fd passing, per-app capabilities, faster cache writes (batch per tree level, keep segment files open).
 - [ ] Local HTTP gateway (a client of `libretifs`).
 - [ ] Alpine: `/etc/apk/repositories` → gateway (apk knows nothing about RNS).
 
