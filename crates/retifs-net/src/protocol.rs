@@ -22,6 +22,13 @@ use retifs_core::{
 pub const GET_ENDPOINT: &str = "/retifs/get";
 pub const MAX_BATCH: usize = 64;
 
+/// `/retifs/have`: token_id (16) ‖ proof (16) ‖ CID prefix (8) × n  →  bitmap (n bits).
+/// 48 prefixes keep the request (416 B) within one link packet, so `have`
+/// requests can be pipelined on one link (see docs/recon/first-transfer.md).
+pub const HAVE_ENDPOINT: &str = "/retifs/have";
+pub const HAVE_PREFIX: usize = 8;
+pub const MAX_HAVE: usize = 48;
+
 const FOUND: u8 = 0;
 const MISSING: u8 = 1;
 
@@ -121,6 +128,55 @@ pub fn decode_response(mut bytes: &[u8], expected: usize) -> Result<Vec<Option<V
     Ok(items)
 }
 
+/// A decoded `/retifs/have` request.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct HaveRequest {
+    pub token_id: [u8; TOKEN_ID_LEN],
+    pub proof: [u8; PROOF_LEN],
+    pub prefixes: Vec<[u8; HAVE_PREFIX]>,
+}
+
+pub fn encode_have(token_id: &[u8; TOKEN_ID_LEN], proof: &[u8; PROOF_LEN], prefixes: &[[u8; HAVE_PREFIX]]) -> Vec<u8> {
+    let mut out = Vec::with_capacity(TOKEN_ID_LEN + PROOF_LEN + prefixes.len() * HAVE_PREFIX);
+    out.extend_from_slice(token_id);
+    out.extend_from_slice(proof);
+    for p in prefixes {
+        out.extend_from_slice(p);
+    }
+    out
+}
+
+pub fn decode_have(bytes: &[u8]) -> Result<HaveRequest, ProtocolError> {
+    let (head, body) = bytes
+        .split_first_chunk::<{ TOKEN_ID_LEN + PROOF_LEN }>()
+        .ok_or(ProtocolError("have request shorter than its header"))?;
+    if body.is_empty() || !body.len().is_multiple_of(HAVE_PREFIX) || body.len() / HAVE_PREFIX > MAX_HAVE {
+        return Err(ProtocolError("have request needs 1..=48 prefixes"));
+    }
+    Ok(HaveRequest {
+        token_id: head[..TOKEN_ID_LEN].try_into().unwrap(),
+        proof: head[TOKEN_ID_LEN..].try_into().unwrap(),
+        prefixes: body.as_chunks::<HAVE_PREFIX>().0.to_vec(),
+    })
+}
+
+pub fn encode_bitmap(bits: &[bool]) -> Vec<u8> {
+    let mut out = vec![0u8; bits.len().div_ceil(8)];
+    for (i, &b) in bits.iter().enumerate() {
+        if b {
+            out[i / 8] |= 0x80 >> (i % 8);
+        }
+    }
+    out
+}
+
+pub fn decode_bitmap(bytes: &[u8], n: usize) -> Result<Vec<bool>, ProtocolError> {
+    if bytes.len() != n.div_ceil(8) {
+        return Err(ProtocolError("bitmap length differs from request"));
+    }
+    Ok((0..n).map(|i| bytes[i / 8] & (0x80 >> (i % 8)) != 0).collect())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -135,5 +191,12 @@ mod tests {
         assert!(decode_response(&encode_response(&items), 3).is_err());
         assert!(decode_request(&[0; 32]).is_err(), "header only, no CIDs");
         assert!(decode_request(&encode_request(&[0; 16], &[0; 16], &vec![Cid::of(b"x"); MAX_BATCH + 1])).is_err());
+
+        let prefixes = [[1u8; HAVE_PREFIX], [2; HAVE_PREFIX]];
+        let have = encode_have(&[3; 16], &[4; 16], &prefixes);
+        assert!(have.len() <= 32 + MAX_HAVE * HAVE_PREFIX);
+        assert_eq!(decode_have(&have).unwrap(), HaveRequest { token_id: [3; 16], proof: [4; 16], prefixes: prefixes.to_vec() });
+        let bits = vec![true, false, true, true, false, false, false, false, true];
+        assert_eq!(decode_bitmap(&encode_bitmap(&bits), bits.len()).unwrap(), bits);
     }
 }

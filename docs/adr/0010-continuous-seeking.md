@@ -110,5 +110,16 @@ See the [threat model](../04-threat-model.md).
   - `/retifs/get` v1 request: `token_id ‖ proof ‖ CIDs`.
   - `retifsd` keeps a serving index (token, CID) for its own writes, plus published CIDs under an all-zero id. Fetched and cached chunks are never in it.
   - Covered by unit tests, in-memory fetch tests (wrong token: nothing served), and a three-daemon run on one machine (owner serves, forged read-cap and cache-only holder get nothing).
-- **Not yet:** want-list, `have`, holder map, leases, receipts, rate limits and stamps.
+- **Want-list and seeker, first slice:**
+  - `retifs-store` keeps wanted files, wants per chunk (seed and span, so nodes expand into children), and hints per (file, peer) with back-off from 30 s to 30 min. An announce resets that peer's back-off.
+  - `/retifs/have`: token id, proof, and up to 48 CID prefixes of 8 bytes (fits one packet), answered with a bitmap from the serving index only (cache stays invisible).
+  - `retifs_net::seek::seek_round`: `have`, then `get` for what's held.
+  - `retifsd` runs a seeker woken by new wants, announces of hinted peers, and a 30 s tick. It completes from local chunks first, then asks peers, storing arrivals in the cache tier and expanding nodes into new wants.
+  - `retifs want CAP --from NODE` queues a file; `status` shows "seeking (N holders known)".
+- **Tests:** in-memory, two peers each holding half fill a file together and a prober learns nothing from `have` or `get`. Live, B wanted a 3 MB file while its only holder A was offline; 6 s after A came back and announced, B had all 211 chunks, with no manual retry, and the hash matched.
+- **Not yet:**
+  - A holder map beyond per-file hints (ranking per chunk, learning holders from others).
+  - Candidates other than hints (own-node pool, opt-in announced nodes).
+  - Leases and receipts.
+  - Rate limits and stamps.
 

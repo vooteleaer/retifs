@@ -30,6 +30,9 @@ use std::{
     time::{SystemTime, UNIX_EPOCH},
 };
 
+mod wants;
+pub use wants::{Hint, PeerId, Want};
+
 use redb::{Database, ReadableTable, ReadableTableMetadata, TableDefinition};
 use retifs_core::{
     access::{PUBLIC_ID, TOKEN_ID_LEN},
@@ -46,7 +49,7 @@ const FREE: TableDefinition<(u8, u32, u32), ()> = TableDefinition::new("free");
 const NEXT: TableDefinition<u8, u64> = TableDefinition::new("next");
 /// Serving index: token_id ‖ CID → (). Only chunks registered here are served
 /// to others; fetched/cached chunks never are (holder privacy, ADR-0010).
-const SERVE: TableDefinition<&[u8], ()> = TableDefinition::new("serve");
+pub(crate) const SERVE: TableDefinition<&[u8], ()> = TableDefinition::new("serve");
 /// token_id → serve token, for verifying proofs.
 const TOKENS: TableDefinition<&[u8], &[u8]> = TableDefinition::new("tokens");
 /// Effective tier → bytes stored in it.
@@ -197,7 +200,7 @@ from_redb!(redb::Error, redb::DatabaseError, redb::TransactionError, redb::Table
 
 pub struct SlabStore {
     root: PathBuf,
-    db: Database,
+    pub(crate) db: Database,
     sync: bool,
     budget: RwLock<Budget>,
     /// Recent accesses not yet written to the ACCESS table.
@@ -217,6 +220,7 @@ impl SlabStore {
         w.open_table(TOKENS)?;
         w.open_table(USAGE)?;
         w.open_table(ACCESS)?;
+        wants::open_tables(&w)?;
         w.commit()?;
         Ok(SlabStore { root, db, sync: true, budget: RwLock::new(Budget::default()), touched: Mutex::new(HashMap::new()) })
     }

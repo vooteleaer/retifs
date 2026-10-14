@@ -59,6 +59,13 @@ pub enum Request {
     },
     /// What of `cap` is held locally.
     Status { cap: String },
+    /// Seek `cap` in the background until it's complete (ADR-0010): ask the
+    /// given nodes now, and again whenever they announce, with back-off.
+    Want {
+        cap: String,
+        /// retifsd destination hashes (hex) to ask.
+        from: Vec<String>,
+    },
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -121,6 +128,12 @@ pub struct Status {
     pub total_chunks: Option<usize>,
     /// Manifest nodes needed to see the whole tree but not held locally.
     pub missing_nodes: usize,
+    /// Still being sought in the background.
+    #[serde(default)]
+    pub seeking: bool,
+    /// Peers known to ask for it.
+    #[serde(default)]
+    pub holders_known: usize,
 }
 
 impl Status {
@@ -278,6 +291,13 @@ impl Client {
         let req = Request::Get { cap: cap.into(), from: from.to_vec(), links_per_node, batch };
         match self.call(req).await? {
             Response::Get { data, stats } => Ok((data, stats)),
+            _ => Err(ClientError::Unexpected),
+        }
+    }
+
+    pub async fn want(&mut self, cap: &str, from: &[String]) -> Result<Status, ClientError> {
+        match self.call(Request::Want { cap: cap.into(), from: from.to_vec() }).await? {
+            Response::Status(s) => Ok(s),
             _ => Err(ClientError::Unexpected),
         }
     }

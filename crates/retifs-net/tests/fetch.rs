@@ -14,7 +14,8 @@ use std::{
 use retifs_core::{manifest, Cid, ConvergenceSecret, FileRef, ServeToken, Store};
 use retifs_net::{
     fetch::{fetch_file, FetchError, FetchOpts, NoCache},
-    protocol::{decode_request, encode_response},
+    protocol::{decode_have, decode_request, encode_bitmap, encode_response, HAVE_ENDPOINT},
+    seek::seek_round,
     transport::Transport,
 };
 
@@ -64,7 +65,7 @@ impl Transport for MemTransport {
         format!("link-{link}").into_bytes()
     }
 
-    fn request(&self, link: usize, _endpoint: &'static str, body: Vec<u8>) -> impl Future<Output = Result<Vec<u8>, String>> + Send {
+    fn request(&self, link: usize, endpoint: &'static str, body: Vec<u8>) -> impl Future<Output = Result<Vec<u8>, String>> + Send {
         let peers = self.0.clone();
         async move {
             let peer = &peers[link];
@@ -72,6 +73,20 @@ impl Transport for MemTransport {
             tokio::time::sleep(peer.delay).await;
             if peer.behaviour == Behaviour::FailAll {
                 return Err("link broke".into());
+            }
+            if endpoint == HAVE_ENDPOINT {
+                let req = decode_have(&body).map_err(|e| e.to_string())?;
+                let refs: Vec<&[u8]> = req.prefixes.iter().map(|p| p.as_slice()).collect();
+                let authorized = match &peer.token {
+                    None => true,
+                    Some(t) => req.token_id == t.id() && t.verify_have(format!("link-{link}").as_bytes(), &refs, &req.proof),
+                };
+                let bits: Vec<bool> = req
+                    .prefixes
+                    .iter()
+                    .map(|p| authorized && peer.chunks.keys().any(|c| &c.as_bytes()[..8] == p.as_slice()))
+                    .collect();
+                return Ok(encode_bitmap(&bits));
             }
             let req = decode_request(&body).map_err(|e| e.to_string())?;
             let authorized = match &peer.token {
@@ -221,3 +236,59 @@ async fn peers_serve_only_with_a_valid_proof() {
     let err = fetch_file(&net, &[0], &f, opts(), &mut NoCache).await.unwrap_err();
     assert!(matches!(err, FetchError::Unavailable { .. }), "a node serving another file's token looks like it has nothing: {err}");
 }
+
+/// The (CID, seed) of every data chunk of a small file (its root is a leaf).
+fn leaves(f: &FileRef, store: &MemStore) -> Vec<(Cid, retifs_core::Seed)> {
+    let root = retifs_core::open(&f.root, &f.seed, &store.0[&f.root]).unwrap();
+    let node = retifs_core::manifest::decode_node(&root, f.size).unwrap();
+    assert!(node.leaf);
+    node.entries.iter().map(|e| (e.cid, e.seed)).collect()
+}
+
+#[tokio::test]
+async fn seeking_rounds_fill_gaps_from_whichever_peer_has_them() {
+    let (data, f, store) = file(400_000);
+    let want = leaves(&f, &store);
+    let n = want.len();
+    // Peer 0 holds the first half of the data chunks, peer 1 the second half.
+    let half = |range: std::ops::Range<usize>| -> HashMap<Cid, Vec<u8>> {
+        want[range].iter().map(|(c, _)| (*c, store.0[c].clone())).collect()
+    };
+    let mut p0 = peer(half(0..n / 2), Behaviour::Good, 1);
+    let mut p1 = peer(half(n / 2..n), Behaviour::Good, 1);
+    p0.token = Some(ServeToken::for_file(&f));
+    p1.token = Some(ServeToken::for_file(&f));
+    let net = MemTransport(Arc::new(vec![p0, p1]));
+    let token = ServeToken::for_file(&f);
+    let t = Duration::from_secs(5);
+
+    let r0 = seek_round(&net, 0, &token, &want, t).await.unwrap();
+    assert_eq!((r0.held, r0.got.len()), (n / 2, n / 2));
+    let still: Vec<_> = want.iter().enumerate().filter(|(i, _)| !r0.got.iter().any(|g| g.0 == *i)).map(|(_, w)| *w).collect();
+    let r1 = seek_round(&net, 1, &token, &still, t).await.unwrap();
+    assert_eq!(r1.got.len(), n - n / 2, "the second peer fills the rest");
+
+    // Reassemble from both rounds and compare.
+    let mut by_cid: HashMap<Cid, Vec<u8>> = HashMap::new();
+    for (i, _, pt) in &r0.got {
+        by_cid.insert(want[*i].0, pt.clone());
+    }
+    for (i, _, pt) in &r1.got {
+        by_cid.insert(still[*i].0, pt.clone());
+    }
+    let joined: Vec<u8> = want.iter().flat_map(|(c, _)| by_cid[c].clone()).collect();
+    assert_eq!(joined, data);
+}
+
+#[tokio::test]
+async fn have_reveals_nothing_without_the_read_cap() {
+    let (_, f, store) = file(300_000);
+    let want = leaves(&f, &store);
+    let mut p = peer(store.0.clone(), Behaviour::Good, 1);
+    p.token = Some(ServeToken::for_file(&f));
+    let net = MemTransport(Arc::new(vec![p]));
+    let stranger = ServeToken::for_file(&FileRef { seed: retifs_core::Seed([0x42; 32]), ..f });
+    let r = seek_round(&net, 0, &stranger, &want, Duration::from_secs(5)).await.unwrap();
+    assert_eq!((r.held, r.got.len()), (0, 0), "a prober learns nothing from have or get");
+}
+

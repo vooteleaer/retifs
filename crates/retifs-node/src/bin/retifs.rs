@@ -4,6 +4,7 @@
 //!     retifs [--store DIR] put FILE [--public] [--compress] [--publish]
 //!     retifs [--store DIR] get READ-CAP [--from NODE]... [-o OUT] [--links N] [--batch N]
 //!     retifs [--store DIR] status READ-CAP
+//!     retifs [--store DIR] want READ-CAP [--from NODE]...
 //!
 //! `get` reads from the daemon's local store first, then fetches the rest from
 //! the given nodes; fetched chunks stay cached in the daemon's store.
@@ -17,7 +18,8 @@ fn usage() -> ! {
         "retifs [--store DIR] ping\n\
          retifs [--store DIR] put FILE [--public] [--compress] [--publish]\n\
          retifs [--store DIR] get READ-CAP [--from NODE]... [-o OUT] [--links N] [--batch N]\n\
-         retifs [--store DIR] status READ-CAP"
+         retifs [--store DIR] status READ-CAP\n\
+         retifs [--store DIR] want READ-CAP [--from NODE]..."
     );
     std::process::exit(2);
 }
@@ -79,19 +81,36 @@ async fn main() {
                 s.chunks, s.from_local, s.requests, s.retries, s.network_bytes, s.links, out.display()
             );
         }
+        "want" => {
+            let cap = it.next().unwrap_or_else(|| usage());
+            let mut from = Vec::new();
+            while let Some(arg) = it.next() {
+                match arg.as_str() {
+                    "--from" => from.push(it.next().unwrap_or_else(|| usage())),
+                    _ => usage(),
+                }
+            }
+            let s = client.want(&cap, &from).await.unwrap_or_else(|e| fail(e));
+            print_status(&s);
+        }
         "status" => {
             let cap = it.next().unwrap_or_else(|| usage());
             let s = client.status(&cap).await.unwrap_or_else(|e| fail(e));
-            let total = s.total_chunks.map_or("?".to_string(), |t| t.to_string());
-            println!(
-                "{} bytes: {}/{} chunks local{}{}",
-                s.size, s.local_chunks, total,
-                if s.missing_nodes > 0 { format!(", {} manifest node(s) not held locally", s.missing_nodes) } else { String::new() },
-                if s.complete() { " (complete, readable offline)" } else { "" }
-            );
+            print_status(&s);
         }
         _ => usage(),
     }
+}
+
+fn print_status(s: &libretifs::Status) {
+    let total = s.total_chunks.map_or("?".to_string(), |t| t.to_string());
+    println!(
+        "{} bytes: {}/{} chunks local{}{}{}",
+        s.size, s.local_chunks, total,
+        if s.missing_nodes > 0 { format!(", {} manifest node(s) not held locally", s.missing_nodes) } else { String::new() },
+        if s.complete() { " (complete, readable offline)" } else { "" },
+        if s.seeking { format!(", seeking ({} holder(s) known)", s.holders_known) } else { String::new() }
+    );
 }
 
 fn human(b: u64) -> String {

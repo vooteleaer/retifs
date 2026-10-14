@@ -5,6 +5,7 @@
 //! token     = HKDF-SHA256(ikm = root seed, salt = "retifs/v1/serve", info = "", L = 32)
 //! token_id  = SHA-256(token)[0..16]
 //! proof     = HMAC-SHA256(token, "retifs/v1/get" ‖ link_nonce ‖ cid ‖ cid ‖ …)[0..16]
+//! have      = HMAC-SHA256(token, "retifs/v1/have" ‖ link_nonce ‖ prefix ‖ prefix ‖ …)[0..16]
 //! ```
 //! The token is derived from the read-cap, so anyone who can read a file can
 //! prove it, and nothing extra has to be shared. The link nonce (the RNS link
@@ -25,6 +26,7 @@ pub const PUBLIC_ID: [u8; TOKEN_ID_LEN] = [0; TOKEN_ID_LEN];
 
 const SERVE_SALT: &[u8] = b"retifs/v1/serve";
 const PROOF_LABEL: &[u8] = b"retifs/v1/get";
+const HAVE_LABEL: &[u8] = b"retifs/v1/have";
 
 #[derive(Clone, PartialEq, Eq)]
 pub struct ServeToken(pub [u8; 32]);
@@ -50,23 +52,39 @@ impl ServeToken {
     }
 
     pub fn proof(&self, link_nonce: &[u8], cids: &[Cid]) -> [u8; PROOF_LEN] {
-        self.mac(link_nonce, cids).finalize().into_bytes()[..PROOF_LEN].try_into().unwrap()
+        finish(self.mac(PROOF_LABEL, link_nonce, cids.iter().map(|c| c.as_bytes().as_slice())))
     }
 
     /// Constant-time check of a truncated proof.
     pub fn verify(&self, link_nonce: &[u8], cids: &[Cid], proof: &[u8; PROOF_LEN]) -> bool {
-        self.mac(link_nonce, cids).verify_truncated_left(proof).is_ok()
+        self.mac(PROOF_LABEL, link_nonce, cids.iter().map(|c| c.as_bytes().as_slice()))
+            .verify_truncated_left(proof)
+            .is_ok()
     }
 
-    fn mac(&self, link_nonce: &[u8], cids: &[Cid]) -> Hmac<Sha256> {
+    /// Proof for a `have` request over CID prefixes (a different label, so a
+    /// `have` proof can never be replayed as a `get` proof).
+    pub fn have_proof(&self, link_nonce: &[u8], prefixes: &[&[u8]]) -> [u8; PROOF_LEN] {
+        finish(self.mac(HAVE_LABEL, link_nonce, prefixes.iter().copied()))
+    }
+
+    pub fn verify_have(&self, link_nonce: &[u8], prefixes: &[&[u8]], proof: &[u8; PROOF_LEN]) -> bool {
+        self.mac(HAVE_LABEL, link_nonce, prefixes.iter().copied()).verify_truncated_left(proof).is_ok()
+    }
+
+    fn mac<'a>(&self, label: &[u8], link_nonce: &[u8], items: impl Iterator<Item = &'a [u8]>) -> Hmac<Sha256> {
         let mut mac = Hmac::<Sha256>::new_from_slice(&self.0).expect("HMAC takes any key length");
-        mac.update(PROOF_LABEL);
+        mac.update(label);
         mac.update(link_nonce);
-        for cid in cids {
-            mac.update(cid.as_bytes());
+        for item in items {
+            mac.update(item);
         }
         mac
     }
+}
+
+fn finish(mac: Hmac<Sha256>) -> [u8; PROOF_LEN] {
+    mac.finalize().into_bytes()[..PROOF_LEN].try_into().unwrap()
 }
 
 #[cfg(test)]
@@ -88,5 +106,10 @@ mod tests {
         assert!(!t.verify(b"link-1", &cids[..1], &p), "different CIDs");
         assert!(!ServeToken::for_file(&file(2)).verify(b"link-1", &cids, &p), "another file's token");
         assert_ne!(t.id(), PUBLIC_ID);
+
+        let prefixes: Vec<&[u8]> = cids.iter().map(|c| &c.as_bytes()[..8]).collect();
+        let hp = t.have_proof(b"link-1", &prefixes);
+        assert!(t.verify_have(b"link-1", &prefixes, &hp));
+        assert!(!t.verify(b"link-1", &cids, &hp), "a have proof is not a get proof");
     }
 }
