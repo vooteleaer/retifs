@@ -47,6 +47,25 @@ Wide, fast replication also protects privacy: when many nodes hold a chunk, hold
   - Diffusion costs bandwidth and disk, so it suits fast links and volunteers, not LoRa.
   - The cache is still never served: diffusion protects what's published or held for others, not reading history.
 
+### Spread policy: how far data travels
+Two independent limits, set per content class:
+- **Replication generations (spread budget):**
+  - The origin's push is generation 1. Each re-replication passes the data on with the budget decremented, and at 0 nobody passes it further.
+  - Against position leaks (Freenet's hops-to-live lesson), the origin **picks a random starting budget** from a range, and at the top of the range the counter is decremented **only with some probability**. A first-generation holder therefore can't tell it's first.
+- **Network radius (RNS hops, from the path table):**
+  - `max_hops` keeps copies within a local mesh or community.
+  - `min_hops` makes an offsite copy at least N hops away, a cheap proxy for another failure domain.
+- **Link type:** bulk replication never crosses LoRa interfaces, even within the radius. Wants, leases and receipts may.
+
+| Class | Generations | Radius | Example |
+|---|---|---|---|
+| private | 1 (own pool only) | own nodes | personal photos |
+| local | 2–3 | ≤ 3 hops, no LoRa bulk | village mesh notices |
+| offsite backup | 1 | ≥ 3 hops | NAS plus remote copy |
+| diffused | random 4–7 | unlimited (fast links) | published document, source-anonymous |
+
+A small radius means a smaller crowd (less source anonymity) but less exposure and bandwidth. That's a per-content choice. The spread budget travels with the lease, so its encoding is part of the lease format (decision 6).
+
 ### Repair
 A holder that stops renewing receipts, fails proofs, or is gone too long is replaced: a new lease goes elsewhere. Repair runs continuously as part of the seeker loop, not as a separate tool.
 
