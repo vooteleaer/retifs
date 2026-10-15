@@ -8,6 +8,10 @@
 //!     retifs [--store DIR] get READ-CAP [--from NODE]... [-o OUT] [--links N] [--batch N]
 //!     retifs [--store DIR] status READ-CAP
 //!     retifs [--store DIR] want READ-CAP [--from NODE]...
+//!     retifs [--store DIR] replicate READ-CAP --to NODE...
+//!
+//! `replicate` keeps an own file on other nodes under signed leases (ADR-0011);
+//! `status` then shows how many of them confirmed with a receipt.
 //!
 //! `get` reads from the daemon's local store first, then fetches the rest from
 //! the given nodes; fetched chunks stay cached in the daemon's store.
@@ -22,7 +26,8 @@ fn usage() -> ! {
          retifs [--store DIR] put FILE [--public] [--compress] [--publish] [--record NAME | --one-off]\n\
          retifs [--store DIR] get READ-CAP [--from NODE]... [-o OUT] [--links N] [--batch N]\n\
          retifs [--store DIR] status READ-CAP\n\
-         retifs [--store DIR] want READ-CAP [--from NODE]..."
+         retifs [--store DIR] want READ-CAP [--from NODE]...
+         retifs [--store DIR] replicate READ-CAP --to NODE..."
     );
     std::process::exit(2);
 }
@@ -103,6 +108,21 @@ async fn main() {
             let s = client.want(&cap, &from).await.unwrap_or_else(|e| fail(e));
             print_status(&s);
         }
+        "replicate" => {
+            let cap = it.next().unwrap_or_else(|| usage());
+            let mut to = Vec::new();
+            while let Some(arg) = it.next() {
+                match arg.as_str() {
+                    "--to" => to.push(it.next().unwrap_or_else(|| usage())),
+                    _ => usage(),
+                }
+            }
+            if to.is_empty() {
+                usage();
+            }
+            let s = client.replicate(&cap, &to).await.unwrap_or_else(|e| fail(e));
+            print_status(&s);
+        }
         "status" => {
             let cap = it.next().unwrap_or_else(|| usage());
             let s = client.status(&cap).await.unwrap_or_else(|e| fail(e));
@@ -121,6 +141,9 @@ fn print_status(s: &libretifs::Status) {
         if s.complete() { " (complete, readable offline)" } else { "" },
         if s.seeking { format!(", seeking ({} holder(s) known)", s.holders_known) } else { String::new() }
     );
+    if s.leased_to > 0 {
+        println!("  leased to {} node(s), {} confirmed by receipt", s.leased_to, s.replicas);
+    }
 }
 
 fn human(b: u64) -> String {

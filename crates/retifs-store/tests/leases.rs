@@ -1,0 +1,116 @@
+//! Leases on the holder and owner side (ADR-0010/0011).
+
+use retifs_core::{
+    lease::{Lease, LeaseKey, Receipt, Renewal},
+    seal, ChunkToken, ConvergenceSecret, Sealed,
+};
+use retifs_store::{tier, Accept, ProofState, SlabStore, LEASE_CHUNK_ESTIMATE};
+
+fn chunk(n: u8) -> Sealed {
+    seal(&ConvergenceSecret::public(), &[n; 3000]).unwrap()
+}
+
+fn store() -> (tempfile::TempDir, SlabStore) {
+    let dir = tempfile::tempdir().unwrap();
+    let mut st = SlabStore::open(dir.path()).unwrap();
+    st.set_sync(false);
+    (dir, st)
+}
+
+fn lease(id: u8, chunks: &[Sealed], expires: u64) -> (LeaseKey, Lease) {
+    let key = LeaseKey::derive(&[9; 32], &[id; 16]);
+    let entries = chunks.iter().map(|c| (c.cid, ChunkToken::for_seed(&c.seed))).collect();
+    let l = Lease::sign(&key, [id; 16], expires, 1, entries);
+    (key, l)
+}
+
+#[test]
+fn holder_accepts_pulls_serves_and_expires() {
+    let (_d, st) = store();
+    let chunks: Vec<Sealed> = (0..3).map(chunk).collect();
+    let (key, l) = lease(1, &chunks, 1000);
+
+    assert_eq!(st.accept_lease(&l, &[[7; 16]], 0).unwrap(), Accept::NoRoom, "holding for others is off");
+    assert_eq!(st.accept_lease(&l, &[[7; 16]], 3 * LEASE_CHUNK_ESTIMATE).unwrap(), Accept::Accepted);
+    assert_eq!(st.accept_lease(&l, &[], 3 * LEASE_CHUNK_ESTIMATE).unwrap(), Accept::Accepted, "idempotent");
+    let (_, other) = lease(1, &chunks[..1], 1000);
+    assert_eq!(st.accept_lease(&other, &[], u64::MAX).unwrap(), Accept::Conflict, "same id, other content");
+
+    let wants = st.lease_wants().unwrap();
+    assert_eq!(wants.len(), 1);
+    assert_eq!(wants[0].1.len(), 3);
+    assert_eq!(wants[0].0.sources, vec![[7; 16]]);
+    // Served under the chunk's token even before it arrives (answers "don't have" until then).
+    assert_eq!(st.serving_token(&chunks[0].cid).unwrap(), Some(ChunkToken::for_seed(&chunks[0].seed)));
+
+    for c in &chunks[..2] {
+        assert!(st.lease_arrived(&c.cid, &c.ciphertext).unwrap());
+    }
+    assert!(!st.lease_arrived(&chunk(9).cid, &chunk(9).ciphertext).unwrap(), "not leased: refused");
+    let h = st.held_lease(&l.id).unwrap().unwrap();
+    assert_eq!((h.held, h.lease.entries.len()), (2, 3));
+    assert_eq!(st.usage().unwrap().leased, 2 * 4096);
+    assert_eq!(st.lease_chunk(&l.id, 1).unwrap().unwrap(), chunks[1].ciphertext);
+
+    // Renewal: only the lease key, only later.
+    assert!(!st.renew_lease(&Renewal::sign(&LeaseKey::derive(&[8; 32], &[1; 16]), [1; 16], 2000)).unwrap());
+    assert!(!st.renew_lease(&Renewal::sign(&key, [1; 16], 900)).unwrap());
+    assert!(st.renew_lease(&Renewal::sign(&key, [1; 16], 2000)).unwrap());
+    assert_eq!(st.expire_leases(1500).unwrap(), 0, "renewed");
+
+    assert_eq!(st.expire_leases(2500).unwrap(), 1);
+    assert!(st.fetch(&chunks[0].cid).unwrap().is_none(), "leased-only chunk removed");
+    assert_eq!(st.serving_token(&chunks[0].cid).unwrap(), None, "no longer served");
+    assert_eq!(st.usage().unwrap().leased, 0);
+    assert!(st.lease_wants().unwrap().is_empty());
+}
+
+#[test]
+fn shared_chunks_survive_until_the_last_lease_and_own_data_stays() {
+    let (_d, st) = store();
+    let (a, b, own) = (chunk(1), chunk(2), chunk(3));
+    st.insert(&own.cid, &own.ciphertext, tier::PINNED).unwrap();
+    st.register_serving(&[(own.cid, ChunkToken::for_seed(&own.seed))]).unwrap();
+    let (_, l1) = lease(1, &[a.clone(), own.clone()], 100);
+    let (_, l2) = lease(2, &[a.clone(), b.clone()], 200);
+    st.accept_lease(&l1, &[], u64::MAX).unwrap();
+    st.accept_lease(&l2, &[], u64::MAX).unwrap();
+    for c in [&a, &b] {
+        st.lease_arrived(&c.cid, &c.ciphertext).unwrap();
+    }
+    assert_eq!(st.tier(&own.cid).unwrap(), Some(tier::PINNED | tier::SERVING), "already local: kept at once");
+
+    assert_eq!(st.expire_leases(150).unwrap(), 1);
+    assert!(st.fetch(&a.cid).unwrap().is_some(), "still kept by lease 2");
+    assert_eq!(st.tier(&own.cid).unwrap(), Some(tier::PINNED));
+    assert!(st.serving_token(&own.cid).unwrap().is_some(), "own data still served");
+
+    assert_eq!(st.expire_leases(250).unwrap(), 1);
+    assert!(st.fetch(&a.cid).unwrap().is_none() && st.fetch(&b.cid).unwrap().is_none());
+}
+
+#[test]
+fn owner_counts_holders_with_valid_receipts() {
+    let (_d, st) = store();
+    let chunks: Vec<Sealed> = (0..2).map(chunk).collect();
+    let root = chunks[0].cid;
+    let (_, l1) = lease(1, &chunks, 1000);
+    let (_, l2) = lease(2, &chunks, 1000);
+    st.record_own_lease(&l1, &[1; 16], &root).unwrap();
+    st.record_own_lease(&l2, &[2; 16], &root).unwrap();
+    assert!(st.confirmed_holders(&root, 10).unwrap().is_empty(), "no receipts yet");
+
+    let mut own = st.own_leases().unwrap();
+    for o in &mut own {
+        let r = Receipt::sign(&[5; 64], &o.lease, 1000);
+        assert_eq!(r.lease_digest, o.lease.digest());
+        o.receipt_until = r.holds_until;
+    }
+    own[1].proof = ProofState::Failed;
+    for o in &own {
+        st.update_own_lease(o).unwrap();
+    }
+    let holder_ok = own.iter().find(|o| o.proof != ProofState::Failed).unwrap().holder;
+    assert_eq!(st.confirmed_holders(&root, 10).unwrap(), vec![holder_ok]);
+    assert!(st.confirmed_holders(&root, 1001).unwrap().is_empty(), "receipts ran out");
+}

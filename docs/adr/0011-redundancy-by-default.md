@@ -98,3 +98,8 @@ See the [threat model](../04-threat-model.md).
   - Proofs, repair and placement add state and background traffic.
   - Lease grouping leaks which chunks belong together.
   - Incentives beyond reciprocity remain open ("pinning economics").
+
+## Implementation status (2026-10-15)
+- Leases, renewals, receipts and storage proofs exist as a first slice ([ADR-0010](0010-continuous-seeking.md), "Leases and receipts"): `retifs replicate CAP --to NODE…` keeps a file on chosen nodes, and `status` reports confirmed copies.
+- Per-lease derived signing keys are implemented; spread budget (generations) is in the format, set to 0 (don't pass on) for now.
+- Not yet: replication targets as policy, own-node pool discovery, automatic recruitment and repair to a target, failure domains, volunteer offers (`retifs.store`), diffuse mode, the spare tier, and the full-replicas-vs-erasure-coding decision.

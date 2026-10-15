@@ -1,10 +1,14 @@
 //! retifsd (prototype): the retifs shared instance.
 //!
 //!     retifsd [--store DIR] [--max-store SIZE] [--min-free SIZE] [--cache-max SIZE]
-//!             [--private-requests] [--public] [--put FILE]...
+//!             [--private-requests] [--hold-for-others SIZE] [--lease-term DURATION]
+//!             [--public] [--put FILE]...
 //!
 //! SIZE: bytes, or with a K/M/G/T suffix (powers of 1024). Defaults (ADR-0012):
 //! store limit 50 % of the volume, reserve max(10 %, 5 GiB), cache 20 % of the limit.
+//! `--hold-for-others`: accept leases from others up to SIZE (default 0: refuse).
+//! `--lease-term`: how long leases this node gives out run before renewal is
+//! due (seconds, or with an s/m/h/d suffix; default 30d). They're renewed at half-term.
 //!
 //! - Owns the slab store (default: libretifs::default_store_dir()).
 //! - Attaches to the local prnsd as a shared-instance client and serves chunks
@@ -24,24 +28,41 @@ use std::{
 use libretifs::{read_frame, write_frame, Envelope, GetStats, Request, Response, Status, PROTOCOL_VERSION};
 use personal_rns::prelude::*;
 use retifs_core::{
+    lease::{self, node_destination, Lease, LeaseId, LeaseKey, Receipt, Renewal},
     manifest::{self, decode_node, decode_root, NodeEntry},
-    open, ChunkToken, ConvergenceSecret, FileRef,
+    open, ChunkToken, Cid, ConvergenceSecret, FileRef,
 };
 use personal_rns::routing::links::LinkId;
 use retifs_net::{
     fetch::{fetch_file, FetchOpts},
     node::{self, attach, block_on, destination, destination_hex, load_or_create_identity, parse_destination},
-    protocol::{decode_have, decode_request, encode_bitmap, encode_response, GET_ENDPOINT, HAVE_ENDPOINT},
-    seek::seek_round,
-    transport::PrnsTransport,
+    protocol::{
+        decode_have, decode_lease_request, decode_lease_status, decode_prove, decode_prove_reply, decode_receipt_reply,
+        decode_request, encode_bitmap, encode_lease_request, encode_prove, encode_prove_reply, encode_receipt_reply,
+        encode_response, LeaseRequest, LeaseStatus, ReceiptReply, GET_ENDPOINT, HAVE_ENDPOINT, LEASE_ENDPOINT,
+        PROVE_ENDPOINT, RECEIPT_ENDPOINT,
+    },
+    seek::{pull_round, seek_round},
+    transport::{PrnsTransport, Transport},
 };
-use retifs_store::{tier, PeerId, Want};
+use retifs_store::{tier, Accept, OwnLease, PeerId, ProofState, Want};
 use tokio::sync::{mpsc, Notify};
 use retifs_store::{CacheTier, SlabStore};
 use tokio::io::{AsyncRead, AsyncWrite};
 
+/// What the request endpoints share (the Prns node's app state).
+struct Shared {
+    store: Arc<SlabStore>,
+    /// The node's RNS identity secret (X25519 ‖ Ed25519): signs receipts.
+    identity: [u8; 64],
+    /// Bytes of leased chunks this node keeps for others (0: refuse leases).
+    hold_limit: u64,
+    /// Wakes the lease puller (a lease was accepted).
+    pull_wake: Notify,
+}
+
 struct Get;
-impl RequestEndpoint<Arc<SlabStore>> for Get {
+impl RequestEndpoint<Arc<Shared>> for Get {
     const ENDPOINT_ID: &'static str = GET_ENDPOINT;
     const POLICY: RequestEndpointPolicy = RequestEndpointPolicy::AllowAll;
 
@@ -49,11 +70,11 @@ impl RequestEndpoint<Arc<SlabStore>> for Get {
     /// published chunks need no proof. Anything else gets the same answer as
     /// "don't have" (holder privacy, ADR-0010). Fetched/cached chunks are never
     /// in the serving index, so they're never served.
-    async fn handle(mut context: RequestContext<'_, Arc<SlabStore>>) -> Result<(), Decline> {
+    async fn handle(mut context: RequestContext<'_, Arc<Shared>>) -> Result<(), Decline> {
         let Ok(items) = decode_request(context.data) else {
             return Err(Decline::Ignore);
         };
-        let store = context.state;
+        let store = &context.state.store;
         let nonce = context.respond_token().link_id.as_bytes().to_vec();
         // One lookup for all items; same work on every path, so a refusal
         // doesn't stand out by timing.
@@ -74,15 +95,15 @@ impl RequestEndpoint<Arc<SlabStore>> for Get {
 /// `/retifs/have`: which of these CID prefixes do you serve under this token?
 /// Same rules as `get`: proof of possession, or published; cache is invisible.
 struct Have;
-impl RequestEndpoint<Arc<SlabStore>> for Have {
+impl RequestEndpoint<Arc<Shared>> for Have {
     const ENDPOINT_ID: &'static str = HAVE_ENDPOINT;
     const POLICY: RequestEndpointPolicy = RequestEndpointPolicy::AllowAll;
 
-    async fn handle(mut context: RequestContext<'_, Arc<SlabStore>>) -> Result<(), Decline> {
+    async fn handle(mut context: RequestContext<'_, Arc<Shared>>) -> Result<(), Decline> {
         let Ok(items) = decode_have(context.data) else {
             return Err(Decline::Ignore);
         };
-        let store = context.state;
+        let store = &context.state.store;
         let nonce = context.respond_token().link_id.as_bytes().to_vec();
         let bits: Vec<bool> = items
             .iter()
@@ -95,12 +116,96 @@ impl RequestEndpoint<Arc<SlabStore>> for Have {
     }
 }
 
+/// `/retifs/lease`: offers of leases (keep these chunks for me) and renewals.
+/// The offer itself is anonymous; what limits it is the hold limit (ADR-0011).
+struct LeaseEndpoint;
+impl RequestEndpoint<Arc<Shared>> for LeaseEndpoint {
+    const ENDPOINT_ID: &'static str = LEASE_ENDPOINT;
+    const POLICY: RequestEndpointPolicy = RequestEndpointPolicy::AllowAll;
+
+    async fn handle(mut context: RequestContext<'_, Arc<Shared>>) -> Result<(), Decline> {
+        let s = context.state.clone();
+        let status = match decode_lease_request(context.data) {
+            Err(_) => LeaseStatus::Invalid,
+            Ok(LeaseRequest::Offer { lease, .. }) if lease.expires <= now_s() => LeaseStatus::Invalid,
+            Ok(LeaseRequest::Offer { lease, sources }) => match s.store.accept_lease(&lease, &sources, s.hold_limit) {
+                Ok(Accept::Accepted) => {
+                    println!("lease {}: keeping {} chunk(s) for someone until {}", hex(&lease.id), lease.entries.len(), lease.expires);
+                    s.pull_wake.notify_one();
+                    LeaseStatus::Accepted
+                }
+                Ok(Accept::NoRoom) => LeaseStatus::NoRoom,
+                Ok(Accept::Conflict) | Err(_) => LeaseStatus::Invalid,
+            },
+            Ok(LeaseRequest::Renew(r)) => match s.store.held_lease(&r.id) {
+                Ok(Some(_)) if s.store.renew_lease(&r).unwrap_or(false) => LeaseStatus::Accepted,
+                Ok(Some(_)) => LeaseStatus::Invalid,
+                _ => LeaseStatus::Unknown,
+            },
+        };
+        context.respond(vec![status as u8])
+    }
+}
+
+/// `/retifs/receipt`: a signed receipt once every chunk of the lease is held, else progress.
+struct ReceiptEndpoint;
+impl RequestEndpoint<Arc<Shared>> for ReceiptEndpoint {
+    const ENDPOINT_ID: &'static str = RECEIPT_ENDPOINT;
+    const POLICY: RequestEndpointPolicy = RequestEndpointPolicy::AllowAll;
+
+    async fn handle(mut context: RequestContext<'_, Arc<Shared>>) -> Result<(), Decline> {
+        let Ok(id) = <LeaseId>::try_from(context.data) else {
+            return Err(Decline::Ignore);
+        };
+        let s = context.state.clone();
+        let reply = match s.store.held_lease(&id) {
+            Ok(Some(h)) if h.held == h.lease.entries.len() => ReceiptReply::Receipt(Receipt::sign(&s.identity, &h.lease, h.expires)),
+            Ok(Some(h)) => ReceiptReply::Progress { held: h.held as u16, total: h.lease.entries.len() as u16 },
+            _ => ReceiptReply::Unknown,
+        };
+        context.respond(encode_receipt_reply(&reply))
+    }
+}
+
+/// `/retifs/prove`: storage proofs for chunks of a held lease (fresh nonce each time).
+struct ProveEndpoint;
+impl RequestEndpoint<Arc<Shared>> for ProveEndpoint {
+    const ENDPOINT_ID: &'static str = PROVE_ENDPOINT;
+    const POLICY: RequestEndpointPolicy = RequestEndpointPolicy::AllowAll;
+
+    async fn handle(mut context: RequestContext<'_, Arc<Shared>>) -> Result<(), Decline> {
+        let Ok((id, nonce, indices)) = decode_prove(context.data) else {
+            return Err(Decline::Ignore);
+        };
+        let store = &context.state.store;
+        let answers: Vec<_> = indices
+            .iter()
+            .map(|&i| store.lease_chunk(&id, i as usize).ok().flatten().map(|ct| lease::prove(&nonce, &ct)))
+            .collect();
+        context.respond(encode_prove_reply(&answers))
+    }
+}
+
 struct Args {
     store: PathBuf,
     public: bool,
     put: Vec<PathBuf>,
     budget: retifs_store::Budget,
     private_requests: bool,
+    hold_limit: u64,
+    lease_term: u64,
+}
+
+fn duration_secs(s: &str) -> u64 {
+    let s = s.trim();
+    let (num, mult) = match s.chars().last() {
+        Some('s') => (&s[..s.len() - 1], 1),
+        Some('m') => (&s[..s.len() - 1], 60),
+        Some('h') => (&s[..s.len() - 1], 3600),
+        Some('d') => (&s[..s.len() - 1], 86_400),
+        _ => (s, 1),
+    };
+    num.parse::<u64>().unwrap_or_else(|_| panic!("bad duration {s}")) * mult
 }
 
 fn size(s: &str) -> u64 {
@@ -123,6 +228,8 @@ fn args() -> Args {
         put: Vec::new(),
         budget: Default::default(),
         private_requests: false,
+        hold_limit: 0,
+        lease_term: 30 * 86_400,
     };
     let mut it = std::env::args().skip(1);
     while let Some(arg) = it.next() {
@@ -134,8 +241,13 @@ fn args() -> Args {
             "--min-free" => a.budget.min_free = Some(size(&it.next().expect("--min-free SIZE"))),
             "--cache-max" => a.budget.cache_max = Some(size(&it.next().expect("--cache-max SIZE"))),
             "--private-requests" => a.private_requests = true,
+            "--hold-for-others" => a.hold_limit = size(&it.next().expect("--hold-for-others SIZE")),
+            "--lease-term" => a.lease_term = duration_secs(&it.next().expect("--lease-term DURATION")).max(60),
             "-h" | "--help" => {
-                println!("retifsd [--store DIR] [--max-store SIZE] [--min-free SIZE] [--cache-max SIZE] [--public] [--put FILE]...");
+                println!(
+                    "retifsd [--store DIR] [--max-store SIZE] [--min-free SIZE] [--cache-max SIZE] [--private-requests]
+                             [--hold-for-others SIZE] [--lease-term DURATION] [--public] [--put FILE]..."
+                );
                 std::process::exit(0);
             }
             other => panic!("unknown argument {other}"),
@@ -197,8 +309,7 @@ fn main() {
     let identity = load_or_create_identity(&args.store.join("node_identity")).expect("node identity");
     let endpoint = libretifs::endpoint(&args.store);
     let store = Arc::new(store);
-    let private_requests = args.private_requests;
-    block_on(move || serve(store, identity, endpoint, private_requests));
+    block_on(move || serve(store, identity, endpoint, args));
 }
 
 struct Daemon {
@@ -212,18 +323,67 @@ struct Daemon {
     /// One item per `have`/`get` request when seeking: slower, but a peer
     /// can't group chunks by request (ADR-0010, request-pattern leaks).
     private_requests: bool,
+    node_id: PeerId,
+    /// Derives per-lease signing keys (prototype: one namespace per store).
+    namespace_key: [u8; 32],
+    lease_term: u64,
+    /// Wakes lease upkeep (receipts, renewals, proofs) after new leases.
+    upkeep_wake: Notify,
 }
 
-async fn serve(store: Arc<SlabStore>, identity: node::IdentitySecret, endpoint: String, private_requests: bool) {
+impl Daemon {
+    /// A link to `peer`, reusing an open one.
+    async fn link_to(&self, peer: &PeerId) -> Result<LinkId, String> {
+        if let Some(l) = self.links.lock().unwrap().get(peer).copied() {
+            return Ok(l);
+        }
+        let dest = parse_destination(&hex(peer)).expect("peer id");
+        let mut t = self.transport.clone();
+        t.path_timeout = Duration::from_secs(20);
+        t.ensure_path(dest).await?;
+        let link = t.link(dest).await?;
+        self.links.lock().unwrap().insert(*peer, link);
+        Ok(link)
+    }
+
+    fn drop_link(&self, peer: &PeerId) {
+        self.links.lock().unwrap().remove(peer);
+    }
+
+    async fn ask(&self, link: LinkId, endpoint: &'static str, body: Vec<u8>) -> Result<Vec<u8>, String> {
+        tokio::time::timeout(Duration::from_secs(60), self.transport.request(link, endpoint, body))
+            .await
+            .map_err(|_| format!("{endpoint}: timed out"))?
+    }
+
+    fn sign_lease(&self, id: LeaseId, expires: u64, entries: Vec<(Cid, ChunkToken)>) -> Lease {
+        // Generations 0: holders keep the data but don't pass it on (own-pool class, ADR-0011).
+        Lease::sign(&LeaseKey::derive(&self.namespace_key, &id), id, expires, 0, entries)
+    }
+}
+
+async fn serve(store: Arc<SlabStore>, identity: node::IdentitySecret, endpoint: String, args: Args) {
+    let identity_bytes: [u8; 64] = identity[..].try_into().expect("RNS identity secrets are 64 bytes");
     let dest = destination(identity, true);
     let dest_hash = dest.destination_hash().expect("valid destination");
+    // Receipts are signed with the node identity and checked against the node's
+    // address, so the identity layout must be RNS's (X25519 ‖ Ed25519).
+    if node_destination(&lease::identity_public(&identity_bytes)) != *dest_hash.as_bytes() {
+        eprintln!("warning: node identity layout differs from RNS; receipts from this node won't verify");
+    }
+    let shared = Arc::new(Shared {
+        store: store.clone(),
+        identity: identity_bytes,
+        hold_limit: args.hold_limit,
+        pull_wake: Notify::new(),
+    });
     let (heard_tx, heard_rx) = mpsc::unbounded_channel::<PeerId>();
     let node = PrnsNode::new(PrnsNodeRecipe {
         transport_identity: None,
         pre_configured_destinations: [dest],
-        app_state: store.clone(),
+        app_state: shared.clone(),
         storage: GrowableHeap,
-        request_endpoints: request_endpoints![Get, Have],
+        request_endpoints: request_endpoints![Get, Have, LeaseEndpoint, ReceiptEndpoint, ProveEndpoint],
         on_event: move |event, _state| {
             if let PrnsEvent::Diagnostic(Diagnostic::AnnounceHeard { destination, .. }) = event {
                 let _ = heard_tx.send(*destination.as_bytes());
@@ -240,13 +400,23 @@ async fn serve(store: Arc<SlabStore>, identity: node::IdentitySecret, endpoint: 
         node_hex: destination_hex(&dest_hash),
         wake: Arc::new(Notify::new()),
         links: Mutex::new(HashMap::new()),
-        private_requests,
+        private_requests: args.private_requests,
+        node_id: *dest_hash.as_bytes(),
+        namespace_key: namespace_key(&store),
+        lease_term: args.lease_term,
+        upkeep_wake: Notify::new(),
     });
     println!("attached to shared instance {of}");
     println!("serving {} chunks as retifs.node <{}>", store.len().unwrap_or(0), daemon.node_hex);
     println!("local API at {endpoint}");
 
+    if args.hold_limit > 0 {
+        println!("holding up to {} bytes for others", args.hold_limit);
+    }
+
     tokio::spawn(local_api(endpoint, daemon.clone()));
+    tokio::spawn(lease_puller(daemon.clone(), shared.clone()));
+    tokio::spawn(lease_upkeep(daemon.clone()));
     tokio::spawn(seeker(daemon, heard_rx));
 
     // Keep within the disk budget even when other programs fill the volume (ADR-0012).
@@ -416,6 +586,35 @@ async fn handle(d: &Daemon, req: Request) -> Result<Response, String> {
             Ok(Response::Status(full_status(&d.store, &cap)))
         }
 
+        Request::Replicate { cap, to } => {
+            let cap: FileRef = cap.parse().map_err(|e: retifs_core::ManifestError| e.to_string())?;
+            let chunks = file_chunks(&d.store, &cap)?;
+            // The holders pull from this node with the chunks' tokens.
+            d.store.register_serving(&chunks).map_err(|e| e.to_string())?;
+            for h in &to {
+                let peer = *parse_destination(h).ok_or_else(|| format!("bad node hash {h}"))?.as_bytes();
+                let link = d.link_to(&peer).await.map_err(|e| format!("{h}: {e}"))?;
+                for part in chunks.chunks(lease::MAX_CHUNKS) {
+                    let mut id = [0u8; lease::ID_LEN];
+                    getrandom::fill(&mut id).expect("OS entropy");
+                    let l = d.sign_lease(id, now_s() + d.lease_term, part.to_vec());
+                    let req = LeaseRequest::Offer { lease: l.clone(), sources: vec![d.node_id] };
+                    let reply = d.ask(link, LEASE_ENDPOINT, encode_lease_request(&req)).await;
+                    match reply.and_then(|r| decode_lease_status(&r).map_err(|e| e.to_string())) {
+                        Ok(LeaseStatus::Accepted) => d.store.record_own_lease(&l, &peer, &cap.root).map_err(|e| e.to_string())?,
+                        Ok(other) => return Err(format!("{h} refused the lease: {other:?}")),
+                        Err(e) => {
+                            d.drop_link(&peer);
+                            return Err(format!("{h}: {e}"));
+                        }
+                    }
+                }
+                println!("replicate: leased {} chunk(s) of {} to <{h}>", chunks.len(), cap.root);
+            }
+            d.upkeep_wake.notify_one();
+            Ok(Response::Status(full_status(&d.store, &cap)))
+        }
+
         Request::Want { cap, from } => {
             let cap: FileRef = cap.parse().map_err(|e: retifs_core::ManifestError| e.to_string())?;
             let peers: Vec<PeerId> = from
@@ -464,7 +663,214 @@ fn full_status(store: &SlabStore, cap: &FileRef) -> Status {
     let mut s = local_status(store, cap);
     s.seeking = store.is_wanted(&cap.root).unwrap_or(false);
     s.holders_known = store.hints(&cap.root).map(|h| h.len()).unwrap_or(0);
+    let own = store.own_leases().unwrap_or_default();
+    s.leased_to = own.iter().filter(|o| o.root == cap.root).map(|o| o.holder).collect::<std::collections::BTreeSet<_>>().len();
+    s.replicas = store.confirmed_holders(&cap.root, now_s()).map(|h| h.len()).unwrap_or(0);
     s
+}
+
+fn now_s() -> u64 {
+    now_ms() / 1000
+}
+
+/// Every chunk of a file (manifest nodes, data and padding) with its access
+/// token, from the local store: what a lease for the whole file lists.
+fn file_chunks(store: &SlabStore, file: &FileRef) -> Result<Vec<(Cid, ChunkToken)>, String> {
+    let mut out = Vec::new();
+    let mut level = vec![NodeEntry { cid: file.root, seed: file.seed, span: file.size }];
+    while !level.is_empty() {
+        let mut next = Vec::new();
+        for e in level {
+            out.push((e.cid, ChunkToken::for_seed(&e.seed)));
+            let ct = store
+                .fetch(&e.cid)
+                .map_err(|e| e.to_string())?
+                .ok_or("not all of the file is local; get it first")?;
+            let pt = open(&e.cid, &e.seed, &ct).map_err(|e| e.to_string())?;
+            let node = if e.cid == file.root { decode_root(&pt, e.span) } else { decode_node(&pt, e.span) }
+                .map_err(|e| e.to_string())?;
+            if node.leaf {
+                out.extend(node.entries.iter().map(|c| (c.cid, ChunkToken::for_seed(&c.seed))));
+            } else {
+                next.extend(node.entries);
+            }
+        }
+        level = next;
+    }
+    Ok(out)
+}
+
+// ------------------------------------------------------------------ leases
+
+/// Holder side: pulls missing chunks of accepted leases from their sources,
+/// and drops expired leases. Woken by new leases, else every 30 s.
+async fn lease_puller(d: Arc<Daemon>, shared: Arc<Shared>) {
+    let mut tick = tokio::time::interval(Duration::from_secs(30));
+    loop {
+        tokio::select! {
+            _ = shared.pull_wake.notified() => {}
+            _ = tick.tick() => {}
+        }
+        match d.store.expire_leases(now_s()) {
+            Ok(n) if n > 0 => println!("leases: {n} expired, their chunks released"),
+            Err(e) => eprintln!("leases: {e}"),
+            _ => {}
+        }
+        if let Err(e) = pull_pass(&d).await {
+            eprintln!("lease puller: {e}");
+        }
+    }
+}
+
+async fn pull_pass(d: &Daemon) -> Result<(), String> {
+    for (held, missing) in d.store.lease_wants().map_err(|e| e.to_string())? {
+        let total = held.lease.entries.len();
+        let mut have = total - missing.len();
+        for src in &held.sources {
+            let link = match d.link_to(src).await {
+                Ok(l) => l,
+                Err(e) => {
+                    eprintln!("lease {}: source <{}> unreachable: {e}", hex(&held.lease.id), hex(src));
+                    continue;
+                }
+            };
+            let round = match pull_round(&d.transport, link, &missing, d.private_requests, Duration::from_secs(60)).await {
+                Ok(r) => r,
+                Err(e) => {
+                    eprintln!("lease {}: <{}>: {e}", hex(&held.lease.id), hex(src));
+                    d.drop_link(src);
+                    continue;
+                }
+            };
+            for (i, ct) in round.got {
+                if d.store.lease_arrived(&missing[i].0, &ct).map_err(|e| e.to_string())? {
+                    have += 1;
+                }
+            }
+            if have == total {
+                println!("lease {}: holding all {total} chunk(s)", hex(&held.lease.id));
+                break;
+            }
+        }
+    }
+    Ok(())
+}
+
+/// How often the owner checks each holder still has the data.
+const PROOF_INTERVAL: Duration = Duration::from_secs(600);
+
+/// Owner side: collects receipts, renews leases at half-term, and checks
+/// storage proofs. Woken after new leases, else every 30 s.
+async fn lease_upkeep(d: Arc<Daemon>) {
+    let mut tick = tokio::time::interval(Duration::from_secs(30));
+    let mut proved: HashMap<LeaseId, Instant> = HashMap::new();
+    loop {
+        tokio::select! {
+            _ = d.upkeep_wake.notified() => {}
+            _ = tick.tick() => {}
+        }
+        let Ok(leases) = d.store.own_leases() else { continue };
+        for mut o in leases {
+            if let Err(e) = upkeep_one(&d, &mut o, &mut proved).await {
+                eprintln!("lease {} at <{}>: {e}", hex(&o.lease.id), hex(&o.holder));
+                d.drop_link(&o.holder);
+            }
+        }
+    }
+}
+
+async fn upkeep_one(d: &Daemon, o: &mut OwnLease, proved: &mut HashMap<LeaseId, Instant>) -> Result<(), String> {
+    let now = now_s();
+    let id = o.lease.id;
+    let due_proof = |o: &OwnLease, proved: &HashMap<LeaseId, Instant>| {
+        o.receipt_until > 0 && proved.get(&id).is_none_or(|t| t.elapsed() > PROOF_INTERVAL)
+    };
+    let renew = o.expires < now + d.lease_term / 2;
+    if !renew && o.receipt_until >= o.expires && !due_proof(o, proved) {
+        return Ok(());
+    }
+    let link = d.link_to(&o.holder).await?;
+    let before = (o.expires, o.receipt_until, o.proof);
+
+    if renew {
+        let expires = now + d.lease_term;
+        let r = Renewal::sign(&LeaseKey::derive(&d.namespace_key, &id), id, expires);
+        let status = decode_lease_status(&d.ask(link, LEASE_ENDPOINT, encode_lease_request(&LeaseRequest::Renew(r))).await?)
+            .map_err(|e| e.to_string())?;
+        match status {
+            LeaseStatus::Accepted => {
+                o.expires = expires;
+                println!("lease {}: renewed at <{}> until {expires}", hex(&id), hex(&o.holder));
+            }
+            LeaseStatus::Unknown => reoffer(d, link, o, expires).await?,
+            other => return Err(format!("renewal refused: {other:?}")),
+        }
+    }
+
+    if o.receipt_until < o.expires {
+        let reply = decode_receipt_reply(&d.ask(link, RECEIPT_ENDPOINT, id.to_vec()).await?).map_err(|e| e.to_string())?;
+        match reply {
+            ReceiptReply::Receipt(r) => {
+                if r.lease_id != id || r.lease_digest != o.lease.digest() {
+                    return Err("receipt for another lease".into());
+                }
+                if node_destination(&r.holder) != o.holder {
+                    return Err("receipt signed by another node".into());
+                }
+                o.receipt_until = r.holds_until.min(o.expires);
+                println!("lease {}: receipt from <{}>, held until {}", hex(&id), hex(&o.holder), o.receipt_until);
+            }
+            ReceiptReply::Progress { held, total } => println!("lease {}: <{}> has {held}/{total}", hex(&id), hex(&o.holder)),
+            ReceiptReply::Unknown => {
+                println!("lease {}: <{}> lost the lease, offering it again", hex(&id), hex(&o.holder));
+                let expires = o.expires.max(now + d.lease_term / 2);
+                reoffer(d, link, o, expires).await?;
+            }
+        }
+    }
+
+    if due_proof(o, proved) {
+        let n = o.lease.entries.len();
+        let mut rnd = [0u8; 16 + 8];
+        getrandom::fill(&mut rnd).expect("OS entropy");
+        let nonce: [u8; 16] = rnd[..16].try_into().unwrap();
+        let indices: Vec<u16> = rnd[16..].chunks(2).map(|b| (u16::from_be_bytes([b[0], b[1]]) as usize % n) as u16).collect();
+        let mut expected = Vec::new();
+        for &i in &indices {
+            let ct = d.store.fetch(&o.lease.entries[i as usize].0).map_err(|e| e.to_string())?;
+            expected.push(ct.map(|ct| lease::prove(&nonce, &ct)));
+        }
+        let reply = d.ask(link, PROVE_ENDPOINT, encode_prove(&id, &nonce, &indices)).await?;
+        let answers = decode_prove_reply(&reply, indices.len()).map_err(|e| e.to_string())?;
+        // Only chunks this node still has can be checked.
+        let checked: Vec<bool> = expected.iter().zip(&answers).filter_map(|(e, a)| e.map(|e| Some(e) == *a)).collect();
+        if !checked.is_empty() {
+            o.proof = if checked.iter().all(|&ok| ok) { ProofState::Passed } else { ProofState::Failed };
+            println!("lease {}: storage proof from <{}>: {:?} ({} chunk(s))", hex(&id), hex(&o.holder), o.proof, checked.len());
+        }
+        proved.insert(id, Instant::now());
+    }
+
+    if (o.expires, o.receipt_until, o.proof) != before {
+        d.store.update_own_lease(o).map_err(|e| e.to_string())?;
+    }
+    Ok(())
+}
+
+/// The holder lost a lease (restart without it, expiry): offer it again under
+/// the same ID, with a fresh expiry, and wait for a new receipt.
+async fn reoffer(d: &Daemon, link: LinkId, o: &mut OwnLease, expires: u64) -> Result<(), String> {
+    let l = d.sign_lease(o.lease.id, expires, o.lease.entries.clone());
+    let req = LeaseRequest::Offer { lease: l.clone(), sources: vec![d.node_id] };
+    match decode_lease_status(&d.ask(link, LEASE_ENDPOINT, encode_lease_request(&req)).await?).map_err(|e| e.to_string())? {
+        LeaseStatus::Accepted => {
+            o.lease = l;
+            o.expires = expires;
+            o.receipt_until = 0;
+            Ok(())
+        }
+        other => Err(format!("re-offer refused: {other:?}")),
+    }
 }
 
 fn now_ms() -> u64 {
@@ -493,8 +899,6 @@ async fn seeker(d: Arc<Daemon>, mut heard: mpsc::UnboundedReceiver<PeerId>) {
 
 async fn seek_pass(d: &Daemon) -> Result<(), String> {
     let store = &d.store;
-    let mut transport = d.transport.clone();
-    transport.path_timeout = Duration::from_secs(20);
     for file in store.wanted_files().map_err(|e| e.to_string())? {
         let root = file.root;
         expand_local(store, &root)?;
@@ -508,22 +912,12 @@ async fn seek_pass(d: &Daemon) -> Result<(), String> {
                 continue;
             }
             let peer_hex = hex(&hint.peer);
-            let cached = d.links.lock().unwrap().get(&hint.peer).copied();
-            let link = match cached {
-                Some(l) => l,
-                None => {
-                    let peer = parse_destination(&peer_hex).expect("stored peer id");
-                    match async { transport.ensure_path(peer).await?; transport.link(peer).await }.await {
-                        Ok(l) => {
-                            d.links.lock().unwrap().insert(hint.peer, l);
-                            l
-                        }
-                        Err(e) => {
-                            eprintln!("seeker: {peer_hex} unreachable: {e}");
-                            store.hint_result(&root, &hint.peer, false, now_ms()).map_err(|e| e.to_string())?;
-                            continue;
-                        }
-                    }
+            let link = match d.link_to(&hint.peer).await {
+                Ok(l) => l,
+                Err(e) => {
+                    eprintln!("seeker: {peer_hex} unreachable: {e}");
+                    store.hint_result(&root, &hint.peer, false, now_ms()).map_err(|e| e.to_string())?;
+                    continue;
                 }
             };
             // Rounds until this peer has nothing more for us (nodes reveal more wants).
@@ -534,11 +928,11 @@ async fn seek_pass(d: &Daemon) -> Result<(), String> {
                     break;
                 }
                 let pairs: Vec<(retifs_core::Cid, retifs_core::Seed)> = wants.iter().map(|w| (w.cid, w.seed)).collect();
-                let round = match seek_round(&transport, link, &pairs, d.private_requests, Duration::from_secs(60)).await {
+                let round = match seek_round(&d.transport, link, &pairs, d.private_requests, Duration::from_secs(60)).await {
                     Ok(r) => r,
                     Err(e) => {
                         eprintln!("seeker: {peer_hex}: {e}");
-                        d.links.lock().unwrap().remove(&hint.peer);
+                        d.drop_link(&hint.peer);
                         break;
                     }
                 };

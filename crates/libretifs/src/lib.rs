@@ -70,6 +70,14 @@ pub enum Request {
         /// retifsd destination hashes (hex) to ask.
         from: Vec<String>,
     },
+    /// Keep own file `cap` on other nodes (ADR-0011): offer each a signed
+    /// lease over its chunks; they pull the chunks and return receipts. The
+    /// daemon renews the leases and checks storage proofs from then on.
+    Replicate {
+        cap: String,
+        /// retifsd destination hashes (hex) of the holders.
+        to: Vec<String>,
+    },
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -138,6 +146,13 @@ pub struct Status {
     /// Peers known to ask for it.
     #[serde(default)]
     pub holders_known: usize,
+    /// Nodes this daemon leased the file to.
+    #[serde(default)]
+    pub leased_to: usize,
+    /// Of those, nodes with a valid receipt for every lease and no failed
+    /// storage proof: confirmed copies besides this one.
+    #[serde(default)]
+    pub replicas: usize,
 }
 
 impl Status {
@@ -315,6 +330,13 @@ impl Client {
 
     pub async fn status(&mut self, cap: &str) -> Result<Status, ClientError> {
         match self.call(Request::Status { cap: cap.into() }).await? {
+            Response::Status(s) => Ok(s),
+            _ => Err(ClientError::Unexpected),
+        }
+    }
+
+    pub async fn replicate(&mut self, cap: &str, to: &[String]) -> Result<Status, ClientError> {
+        match self.call(Request::Replicate { cap: cap.into(), to: to.to_vec() }).await? {
             Response::Status(s) => Ok(s),
             _ => Err(ClientError::Unexpected),
         }

@@ -7,6 +7,7 @@ pub mod access;
 pub mod chunk;
 pub mod chunker;
 pub mod cid;
+pub mod lease;
 pub mod manifest;
 pub mod secret;
 

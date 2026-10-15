@@ -6,7 +6,16 @@
 //!                                         | 0x01                              (not served)
 //! have request  = item × n          item = cid prefix (8) ‖ proof (16)  1..=MAX_HAVE items
 //! have response = bitmap (n bits)
+//!
+//! lease request    = 0x01 ‖ lease ‖ n (u8) ‖ source node (16) × n     offer a lease (sources: where to pull)
+//!                  | 0x02 ‖ renewal (89)                             move its expiry
+//! lease response   = status (u8): 0 accepted, 1 no room, 2 invalid or conflicting, 3 unknown lease
+//! receipt request  = lease_id (16)
+//! receipt response = 0x00 ‖ receipt (185) | 0x01 ‖ held (u16) ‖ total (u16) | 0x02 (unknown lease)
+//! prove request    = lease_id (16) ‖ nonce (16) ‖ index (u16) × n      1..=MAX_PROVE indices
+//! prove response   = (0x00 ‖ answer (16) | 0x01) × n
 //! ```
+//! Lease formats: retifs_core::lease (decision 6).
 //! Every item carries its own proof of access, derived from that chunk's seed
 //! (retifs_core::access). There is no file-level token on the wire, so items
 //! of one file can't be linked by token, and one-item requests (one packet)
@@ -16,7 +25,12 @@
 
 use std::fmt;
 
-use retifs_core::{access::PROOF_LEN, cid::CID_LEN, Cid};
+use retifs_core::{
+    access::PROOF_LEN,
+    cid::CID_LEN,
+    lease::{Lease, LeaseId, Receipt, Renewal, PROVE_LEN},
+    Cid,
+};
 
 pub const GET_ENDPOINT: &str = "/retifs/get";
 pub const MAX_BATCH: usize = 64;
@@ -28,6 +42,14 @@ pub const HAVE_ITEM: usize = HAVE_PREFIX + PROOF_LEN;
 /// 16 items = 384 B: a `have` request fits one link packet, so `have`
 /// requests can be pipelined on one link (docs/recon/first-transfer.md).
 pub const MAX_HAVE: usize = 16;
+
+pub const LEASE_ENDPOINT: &str = "/retifs/lease";
+pub const RECEIPT_ENDPOINT: &str = "/retifs/receipt";
+pub const PROVE_ENDPOINT: &str = "/retifs/prove";
+pub const MAX_PROVE: usize = 16;
+
+const OFFER: u8 = 1;
+const RENEW: u8 = 2;
 
 const FOUND: u8 = 0;
 const MISSING: u8 = 1;
@@ -149,8 +171,170 @@ pub fn decode_bitmap(bytes: &[u8], n: usize) -> Result<Vec<bool>, ProtocolError>
     Ok((0..n).map(|i| bytes[i / 8] & (0x80 >> (i % 8)) != 0).collect())
 }
 
+/// A `/retifs/lease` request.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum LeaseRequest {
+    Offer { lease: Lease, sources: Vec<[u8; 16]> },
+    Renew(Renewal),
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[repr(u8)]
+pub enum LeaseStatus {
+    Accepted = 0,
+    NoRoom = 1,
+    Invalid = 2,
+    Unknown = 3,
+}
+
+pub fn encode_lease_request(req: &LeaseRequest) -> Vec<u8> {
+    match req {
+        LeaseRequest::Offer { lease, sources } => {
+            let mut out = vec![OFFER];
+            out.extend_from_slice(&lease.encode());
+            out.push(sources.len() as u8);
+            for s in sources {
+                out.extend_from_slice(s);
+            }
+            out
+        }
+        LeaseRequest::Renew(r) => [&[RENEW][..], &r.encode()].concat(),
+    }
+}
+
+/// Parses and verifies (lease signature; a renewal is verified against the stored lease).
+pub fn decode_lease_request(bytes: &[u8]) -> Result<LeaseRequest, ProtocolError> {
+    match bytes.split_first() {
+        Some((&OFFER, rest)) => {
+            let (lease, rest) = Lease::decode(rest).map_err(|_| ProtocolError("invalid lease"))?;
+            let (&n, rest) = rest.split_first().ok_or(ProtocolError("missing source count"))?;
+            if rest.len() != n as usize * 16 {
+                return Err(ProtocolError("source list length"));
+            }
+            let sources = rest.as_chunks::<16>().0.to_vec();
+            Ok(LeaseRequest::Offer { lease, sources })
+        }
+        Some((&RENEW, rest)) => Ok(LeaseRequest::Renew(Renewal::decode(rest).map_err(|_| ProtocolError("invalid renewal"))?)),
+        _ => Err(ProtocolError("unknown lease request")),
+    }
+}
+
+pub fn decode_lease_status(bytes: &[u8]) -> Result<LeaseStatus, ProtocolError> {
+    match bytes {
+        [0] => Ok(LeaseStatus::Accepted),
+        [1] => Ok(LeaseStatus::NoRoom),
+        [2] => Ok(LeaseStatus::Invalid),
+        [3] => Ok(LeaseStatus::Unknown),
+        _ => Err(ProtocolError("lease status")),
+    }
+}
+
+/// A holder's answer to `/retifs/receipt`.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum ReceiptReply {
+    Receipt(Receipt),
+    Progress { held: u16, total: u16 },
+    Unknown,
+}
+
+pub fn encode_receipt_reply(r: &ReceiptReply) -> Vec<u8> {
+    match r {
+        ReceiptReply::Receipt(r) => [&[0u8][..], &r.encode()].concat(),
+        ReceiptReply::Progress { held, total } => [&[1u8][..], &held.to_be_bytes(), &total.to_be_bytes()].concat(),
+        ReceiptReply::Unknown => vec![2],
+    }
+}
+
+/// Parses a receipt reply; a receipt's signature is verified, not yet its signer.
+pub fn decode_receipt_reply(bytes: &[u8]) -> Result<ReceiptReply, ProtocolError> {
+    match bytes.split_first() {
+        Some((0, rest)) => Ok(ReceiptReply::Receipt(Receipt::decode(rest).map_err(|_| ProtocolError("invalid receipt"))?)),
+        Some((1, [a, b, c, d])) => Ok(ReceiptReply::Progress { held: u16::from_be_bytes([*a, *b]), total: u16::from_be_bytes([*c, *d]) }),
+        Some((2, [])) => Ok(ReceiptReply::Unknown),
+        _ => Err(ProtocolError("receipt reply")),
+    }
+}
+
+pub fn encode_prove(id: &LeaseId, nonce: &[u8; 16], indices: &[u16]) -> Vec<u8> {
+    let mut out = [id.as_slice(), nonce].concat();
+    for i in indices {
+        out.extend_from_slice(&i.to_be_bytes());
+    }
+    out
+}
+
+pub fn decode_prove(bytes: &[u8]) -> Result<(LeaseId, [u8; 16], Vec<u16>), ProtocolError> {
+    let n = bytes.len().saturating_sub(32) / 2;
+    if bytes.len() < 34 || !bytes.len().is_multiple_of(2) || n > MAX_PROVE {
+        return Err(ProtocolError("prove request needs lease id, nonce and 1..=16 indices"));
+    }
+    let indices = bytes[32..].as_chunks::<2>().0.iter().map(|b| u16::from_be_bytes(*b)).collect();
+    Ok((bytes[..16].try_into().unwrap(), bytes[16..32].try_into().unwrap(), indices))
+}
+
+pub fn encode_prove_reply(answers: &[Option<[u8; PROVE_LEN]>]) -> Vec<u8> {
+    let mut out = Vec::new();
+    for a in answers {
+        match a {
+            Some(a) => {
+                out.push(FOUND);
+                out.extend_from_slice(a);
+            }
+            None => out.push(MISSING),
+        }
+    }
+    out
+}
+
+pub fn decode_prove_reply(mut bytes: &[u8], expected: usize) -> Result<Vec<Option<[u8; PROVE_LEN]>>, ProtocolError> {
+    let mut out = Vec::with_capacity(expected);
+    while let Some((&tag, rest)) = bytes.split_first() {
+        match tag {
+            MISSING => {
+                out.push(None);
+                bytes = rest;
+            }
+            FOUND if rest.len() >= PROVE_LEN => {
+                out.push(Some(rest[..PROVE_LEN].try_into().unwrap()));
+                bytes = &rest[PROVE_LEN..];
+            }
+            _ => return Err(ProtocolError("prove reply")),
+        }
+    }
+    if out.len() != expected {
+        return Err(ProtocolError("prove reply count differs from request"));
+    }
+    Ok(out)
+}
+
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn lease_messages_roundtrip() {
+        use super::*;
+        use retifs_core::{lease::LeaseKey, ChunkToken};
+        let key = LeaseKey::derive(&[1; 32], &[2; 16]);
+        let lease = Lease::sign(&key, [2; 16], 99, 1, vec![(Cid::of(b"a"), ChunkToken([3; 32]))]);
+        for req in [
+            LeaseRequest::Offer { lease: lease.clone(), sources: vec![[4; 16], [5; 16]] },
+            LeaseRequest::Renew(Renewal::sign(&key, [2; 16], 100)),
+        ] {
+            assert_eq!(decode_lease_request(&encode_lease_request(&req)).unwrap(), req);
+        }
+        let mut forged = encode_lease_request(&LeaseRequest::Offer { lease, sources: vec![] });
+        forged[30] ^= 1;
+        assert!(decode_lease_request(&forged).is_err());
+        assert_eq!(encode_lease_request(&LeaseRequest::Renew(Renewal::sign(&key, [2; 16], 1))).len(), 90, "one packet");
+
+        for r in [ReceiptReply::Progress { held: 3, total: 9 }, ReceiptReply::Unknown] {
+            assert_eq!(decode_receipt_reply(&encode_receipt_reply(&r)).unwrap(), r);
+        }
+        let (id, nonce, idx) = decode_prove(&encode_prove(&[1; 16], &[2; 16], &[0, 7, 65535])).unwrap();
+        assert_eq!((id, nonce, idx), ([1; 16], [2; 16], vec![0, 7, 65535]));
+        let answers = vec![Some([9; PROVE_LEN]), None];
+        assert_eq!(decode_prove_reply(&encode_prove_reply(&answers), 2).unwrap(), answers);
+    }
+
     use super::*;
 
     #[test]

@@ -30,7 +30,7 @@ pub struct SeekRound {
 }
 
 /// Asks `link`'s peer for `wanted` (CID and seed of each): `have` first, then
-/// `get` for what it holds. Every chunk is verified before it's returned.
+/// `get` for what it holds. Every chunk is verified and opened before it's returned.
 pub async fn seek_round<T: Transport>(
     transport: &T,
     link: T::Link,
@@ -38,9 +38,38 @@ pub async fn seek_round<T: Transport>(
     per_item: bool,
     timeout: Duration,
 ) -> Result<SeekRound, String> {
+    let blind: Vec<(Cid, ChunkToken)> = wanted.iter().map(|(c, s)| (*c, ChunkToken::for_seed(s))).collect();
+    let pulled = pull_round(transport, link, &blind, per_item, timeout).await?;
+    let mut round = SeekRound { held: pulled.held, requests: pulled.requests, got: Vec::new() };
+    for (i, ct) in pulled.got {
+        let (cid, seed) = wanted[i];
+        if let Ok(pt) = open(&cid, &seed, &ct) {
+            round.got.push((i, ct, pt));
+        }
+    }
+    Ok(round)
+}
+
+/// What a blind round brought: (index into the wanted list, ciphertext).
+#[derive(Debug, Default)]
+pub struct PullRound {
+    pub got: Vec<(usize, Vec<u8>)>,
+    pub held: usize,
+    pub requests: usize,
+}
+
+/// Like [`seek_round`], for chunks known only by CID and access token (held
+/// for others under a lease): the proofs are the same, and chunks are
+/// verified against their CID but can't be opened.
+pub async fn pull_round<T: Transport>(
+    transport: &T,
+    link: T::Link,
+    wanted: &[(Cid, ChunkToken)],
+    per_item: bool,
+    timeout: Duration,
+) -> Result<PullRound, String> {
     let nonce = transport.link_nonce(link);
-    let tokens: Vec<ChunkToken> = wanted.iter().map(|(_, s)| ChunkToken::for_seed(s)).collect();
-    let mut round = SeekRound::default();
+    let mut round = PullRound::default();
     let (have_batch, get_batch) = if per_item { (1, 1) } else { (MAX_HAVE, SEEK_GET_BATCH) };
 
     let indices: Vec<usize> = (0..wanted.len()).collect();
@@ -50,7 +79,7 @@ pub async fn seek_round<T: Transport>(
             .iter()
             .map(|&i| {
                 let prefix: [u8; HAVE_PREFIX] = wanted[i].0.as_bytes()[..HAVE_PREFIX].try_into().unwrap();
-                (prefix, tokens[i].have_proof(&nonce, &prefix))
+                (prefix, wanted[i].1.have_proof(&nonce, &prefix))
             })
             .collect();
         round.requests += 1;
@@ -63,18 +92,17 @@ pub async fn seek_round<T: Transport>(
     round.held = held.len();
 
     for batch in held.chunks(get_batch) {
-        let items: Vec<(Cid, [u8; 16])> = batch.iter().map(|&i| (wanted[i].0, tokens[i].get_proof(&nonce, &wanted[i].0))).collect();
+        let items: Vec<(Cid, [u8; 16])> = batch.iter().map(|&i| (wanted[i].0, wanted[i].1.get_proof(&nonce, &wanted[i].0))).collect();
         round.requests += 1;
         let resp = tokio::time::timeout(timeout, transport.request(link, GET_ENDPOINT, encode_request(&items)))
             .await
             .map_err(|_| "get: timed out".to_string())??;
         let got = decode_response(&resp, items.len()).map_err(|e| e.to_string())?;
         for (&i, item) in batch.iter().zip(got) {
-            if let Some(ct) = item {
-                let (cid, seed) = wanted[i];
-                if let Ok(pt) = open(&cid, &seed, &ct) {
-                    round.got.push((i, ct, pt));
-                }
+            if let Some(ct) = item
+                && wanted[i].0.verify(&ct)
+            {
+                round.got.push((i, ct));
             }
         }
     }

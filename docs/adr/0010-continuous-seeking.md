@@ -94,9 +94,10 @@ A read-cap may carry hints: `retifs:1:<root>:<seed>:<size>@<node>,<node>`. Hints
 |---|---|---|
 | `/retifs/have` | items of CID prefix (8) ‖ proof (16), ≤ 16 | bitmap |
 | `/retifs/get` | items of CID (33) ‖ proof (16), ≤ 64 | ciphertexts |
-| `/retifs/put` | lease id + ciphertexts | per-chunk accept/reject |
-| `/retifs/lease` | signed lease | accept (with quota) or reject |
+| `/retifs/put` | lease id + ciphertexts | per-chunk accept/reject (not yet implemented) |
+| `/retifs/lease` | signed lease ‖ source nodes, or renewal | accepted, no room, invalid, unknown lease |
 | `/retifs/receipt` | lease id | signed receipt, or progress |
+| `/retifs/prove` | lease id ‖ nonce ‖ chunk indices | storage proof per chunk |
 
 ## Impact on the threat model
 See the [threat model](../04-threat-model.md).
@@ -128,6 +129,23 @@ See the [threat model](../04-threat-model.md).
 - **Not yet:**
   - A holder map beyond per-file hints (ranking per chunk, learning holders from others).
   - Candidates other than hints (own-node pool, opt-in announced nodes).
-  - Leases and receipts.
-  - Rate limits and stamps.
+  - `/retifs/put` (push), so a holder can fill a lease without reaching the owner (diffuse mode).
+  - Rate limits and stamps; per-signer quotas.
+
+## Leases and receipts, first slice (2026-10-15)
+Format (decision 6, draft v1, `retifs_core::lease`, vectors in `test-vectors/lease-v1.json` verified against Python RNS by `verify_lease_rns.py`):
+```text
+lease    = 0x01 ‖ lease_id (16) ‖ signer (32) ‖ expires (u64 BE) ‖ generations (u8) ‖ count (u16 BE)
+           ‖ (cid (33) ‖ chunk_token (32)) × count ‖ Ed25519 sig over "retifs/v1/lease" ‖ body
+renewal  = 0x01 ‖ lease_id ‖ expires ‖ sig over "retifs/v1/renew" ‖ 0x01 ‖ lease_id ‖ expires      (89 B)
+receipt  = 0x01 ‖ lease_id ‖ SHA-256(lease body) ‖ holds_until ‖ holder RNS public key (64) ‖ sig
+proof    = HMAC-SHA256(nonce, "retifs/v1/prove" ‖ ciphertext)[0..16]
+```
+- **Chunk list, never a manifest.** Each entry carries the chunk's access token (one-way from its seed), so the holder verifies requesters' proofs and proves access itself when pulling, without being able to decrypt. Blind wants are (CID, token).
+- **Per-lease signing key:** `Ed25519 seed = HKDF(namespace key, "retifs/v1/lease-key", lease_id)`. Leases are unlinkable to the owner and to each other; only the owner can renew.
+- **Renewal moves only the expiry** and fits one packet, so keeping data alive over LoRa costs one packet per lease.
+- **Receipts** are signed with the holder's RNS identity and bound to the exact lease body. The owner checks that the key hashes to the `retifs.node` destination it leased to. At startup `retifsd` checks that the Prns identity layout matches RNS (X25519 ‖ Ed25519).
+- **Holder:** `retifsd --hold-for-others SIZE` accepts leases up to SIZE (estimated at 16 KiB per chunk; default 0, refuse). Leased chunks are in the hard SERVING tier and the serving index, so the holder serves them exactly as the owner would. The lease puller pulls missing chunks from the lease's sources with the same per-chunk proofs (`retifs_net::seek::pull_round`). When the last lease keeping a chunk expires, its flag and token go, and a chunk with no other tier is removed.
+- **Owner:** `retifs replicate CAP --to NODE…` leases every chunk of the file (nodes, data, padding; ≤ 1024 per lease) to each node. Upkeep collects receipts, renews at half-term (`--lease-term`, default 30 days), re-offers a lease the holder lost, and checks storage proofs on 4 random chunks every 10 minutes. `status` shows "leased to N node(s), M confirmed by receipt" (a failed proof un-confirms).
+- **Tests:** unit and store tests (signatures, tampering, quota, conflict, refcounts across leases, own data kept, expiry, confirmed holders). Live, three daemons on one machine: two nodes without room refused a 2 MB file (`NoRoom`); a holder accepted it, pulled 144 chunks, returned a receipt, passed the storage proof, and was renewed at half-term; with the owner offline, a reader with the read-cap got the file from the holder (hash matched).
 

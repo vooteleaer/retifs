@@ -30,7 +30,9 @@ use std::{
     time::{Duration, Instant, SystemTime, UNIX_EPOCH},
 };
 
+mod leases;
 mod wants;
+pub use leases::{Accept, BlindWants, HeldLease, OwnLease, ProofState, LEASE_CHUNK_ESTIMATE};
 pub use wants::{Hint, PeerId, Want};
 
 use redb::{Database, ReadableTable, ReadableTableMetadata, TableDefinition};
@@ -223,6 +225,7 @@ impl SlabStore {
         w.open_table(USAGE)?;
         w.open_table(ACCESS)?;
         wants::open_tables(&w)?;
+        leases::open_tables(&w)?;
         w.commit()?;
         Ok(SlabStore {
             root,

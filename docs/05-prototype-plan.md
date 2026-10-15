@@ -13,9 +13,9 @@ Prototypes are throwaway. They're for learning, not for locking in the format. T
 - [x] Manifests: Merkle tree of sealed nodes, `FileRef` read-cap, random-access reads ([ADR-0009](adr/0009-manifest-format.md), proposed).
 - [x] `retifsd` + `retifs get` on Prns: `/retifs/get [cids]` from the slab store, batched breadth-first fetch by read-cap, verified across Windows/Linux/aarch64 and LAN/backbone ([first-transfer](recon/first-transfer.md)).
 - [x] Transfer, continued: transport trait (client side), several links per peer, multi-source with retry, local-first cache ([first-transfer](recon/first-transfer.md)).
-- [ ] Transfer, open: LAN throughput ceiling, occasional unsettled request with ≥4 links, pinning/leases, serving side behind the transport trait.
+- [ ] Transfer, open: LAN throughput ceiling, occasional unsettled request with ≥4 links, flaky path requests between local clients, serving side behind the transport trait.
 - [x] Local store: slab segments per size class + redb index, tier flags, slot reuse, CID-verified reads (`crates/retifs-store`, [ADR-0007](adr/0007-local-store-layout.md)).
-- [ ] Local store, continued: LRU eviction of the cache tier, lease expiry for the serving tier, keep rules ([ADR-0005](adr/0005-local-store-offline.md)).
+- [ ] Local store, continued: keep rules ([ADR-0005](adr/0005-local-store-offline.md)).
 - [x] `libretifs` + local endpoint (Unix socket / Windows named pipe): `ping`, `put`, `get`, `status` via `retifsd` ([ADR-0004](adr/0004-native-record-api.md), implementation status).
 - [ ] Local API, continued: records/attributes (`create`, `put_block`, `set`, `query`), streaming / fd passing, per-app capabilities, faster cache writes (batch per tree level, keep segment files open).
 - [ ] Local HTTP gateway (a client of `libretifs`).
@@ -26,12 +26,14 @@ Prototypes are throwaway. They're for learning, not for locking in the format. T
 - [x] Disk budget: store limit, free-space reserve, hard and elastic tiers, LRU eviction of the cache tier, hole punching, background enforcement, rollback of failed writes ([ADR-0012](adr/0012-disk-budget.md), implementation status).
 - [ ] Spare tier: fill free space with replicas by need score (rarest first), evicted first, idle bandwidth only.
 - [x] Want-list in the store (readable wants); `/retifs/have`; event-driven seeker woken by announces; `retifs want`; partial `status` ([ADR-0010](adr/0010-continuous-seeking.md), implementation status).
-- [ ] Blind wants (for leases), range reads of partially available files.
+- [x] Blind wants for leases (CID + access token, pulled by the holder).
+- [ ] Range reads of partially available files.
 - [x] Request privacy: per-chunk access proofs (no file token on the wire), one-item requests (`--private-requests`, `batch: 1`), PADMÉ padding with padding fetched like data, per-record personal secrets (versions dedup) ([ADR-0008](adr/0008-chunk-encryption-and-cid.md), [ADR-0010](adr/0010-continuous-seeking.md)).
 - [ ] Request privacy, continued: sliced `have` per peer, decoy prefixes, several links with jitter.
 - [ ] Holder map: per-chunk/per-group holders from receipts, `have` answers, hints and announces; source ranking, load spreading, failover, measured copy counts.
 - [ ] Holder hints in read-caps; store generation counter in announces.
-- [ ] Leases, `/retifs/put`, receipts (with test vectors: decision 6).
+- [x] Leases, renewals, receipts, storage proofs; `retifsd --hold-for-others`, `retifs replicate`; vectors verified against RNS (decision 6, [ADR-0010](adr/0010-continuous-seeking.md)).
+- [ ] `/retifs/put` (push to holders).
 - [ ] Own-node pool on a LAN, replication target, repair, storage proofs ([ADR-0011](adr/0011-redundancy-by-default.md)).
 - [ ] Volunteer storage offers (`retifs.store`).
 - [ ] Diffuse mode: anonymous push seeding, epidemic re-replication with jitter, cover holdings ([ADR-0011](adr/0011-redundancy-by-default.md)).
