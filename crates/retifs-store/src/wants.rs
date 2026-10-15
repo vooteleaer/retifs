@@ -11,7 +11,7 @@
 //! announce from a peer resets its back-off.
 
 use redb::{ReadableTable, TableDefinition};
-use retifs_core::{cid::CID_LEN, manifest::FileRef, Cid, Seed};
+use retifs_core::{cid::CID_LEN, manifest::FileRef, ChunkToken, Cid, Seed};
 
 use crate::{SlabStore, StoreError};
 
@@ -265,13 +265,25 @@ impl SlabStore {
         Ok(woke)
     }
 
-    /// Whether `prefix` (the first bytes of a CID) is served under `token_id`.
-    pub fn served_prefix(&self, token_id: &[u8; 16], prefix: &[u8]) -> Result<bool, StoreError> {
-        let start = pair(token_id, prefix);
-        let end = range_end(&start);
+    /// The served chunk whose CID starts with `prefix`: its CID, its access
+    /// token (own writes), and whether it's published.
+    pub fn served_by_prefix(&self, prefix: &[u8]) -> Result<Option<(Cid, Option<ChunkToken>, bool)>, StoreError> {
+        let end = range_end(prefix);
         let r = self.db.begin_read()?;
-        let t = r.open_table(crate::SERVE)?;
-        let hit = t.range(start.as_slice()..end.as_slice())?.next().is_some();
-        Ok(hit)
+        let serve = r.open_table(crate::SERVE)?;
+        let published = r.open_table(crate::PUBLISHED)?;
+        if let Some(e) = serve.range(prefix..end.as_slice())?.next() {
+            let (k, v) = e?;
+            let cid = Cid::from_bytes(k.value().try_into().expect("CID key")).expect("CID version");
+            let token = v.value().try_into().ok().map(ChunkToken);
+            let public = published.get(k.value())?.is_some();
+            return Ok(Some((cid, token, public)));
+        }
+        if let Some(e) = published.range(prefix..end.as_slice())?.next() {
+            let (k, _) = e?;
+            let cid = Cid::from_bytes(k.value().try_into().expect("CID key")).expect("CID version");
+            return Ok(Some((cid, None, true)));
+        }
+        Ok(None)
     }
 }

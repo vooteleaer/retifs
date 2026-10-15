@@ -56,3 +56,11 @@ Still missing: cross-implementation manifest vectors.
 ## Blocking acceptance
 - ~~Inline tiny files~~: **added (2026-10-14)** as node kind 2: `version ‖ 2 ‖ u16_be len ‖ data`, allowed only as the root, for files of at most `INLINE_MAX` = 951 bytes. The root then fits the 1 KiB class, so a tiny file is one blob and one fetch instead of two ([ADR-0013](0013-slow-links.md)).
 - **Full replicas vs erasure coding** ([ADR-0011](0011-redundancy-by-default.md)).
+
+## Padding (2026-10-15)
+- **PADMÉ over the chunk count.** After the real data chunks, writers append padding chunks until the number of data chunks reaches `padme(n)`. A padding chunk is a full piece (16 KiB class) of keyed pseudo-random bytes: `HMAC(secret, "retifs/v1/pad" ‖ SHA-256(real CIDs) ‖ index)` expanded by HMAC counter blocks. Padding chunks are distinct per file and index (no dedup tell), and deterministic for the same data and secret (public files still converge).
+- **True size in the read-cap.** `FileRef::size` is the real size; the tree covers the padded size. Only the root's span may exceed the file size (`decode_root`); inner nodes are checked exactly.
+- **Readers fetch padding like real data** (the network fetcher requests every leaf), and strip it after the true size. A local range read skips it, since nobody observes it.
+- **Not padded:** inline files (≤ 951 B are one 1 KiB blob, which reveals only "tiny") and writes with `WriteOpts { pad: false }`.
+- Tests: PADMÉ values and the ≤ 12 % bound; a padded ~76-chunk file has exactly `padme(76)` data chunks, reads back byte-exact and keeps its true size; equal public files converge.
+

@@ -1,7 +1,10 @@
 //! retifs CLI (prototype): a thin client of the local retifsd (libretifs).
 //!
 //!     retifs [--store DIR] ping
-//!     retifs [--store DIR] put FILE [--public] [--compress] [--publish]
+//!     retifs [--store DIR] put FILE [--public] [--compress] [--publish] [--record NAME | --one-off]
+//!
+//! `put` treats the file's absolute path as its record by default, so putting
+//! an edited file again stores only the changed chunks (ADR-0008).
 //!     retifs [--store DIR] get READ-CAP [--from NODE]... [-o OUT] [--links N] [--batch N]
 //!     retifs [--store DIR] status READ-CAP
 //!     retifs [--store DIR] want READ-CAP [--from NODE]...
@@ -16,7 +19,7 @@ use libretifs::{default_store_dir, Client};
 fn usage() -> ! {
     eprintln!(
         "retifs [--store DIR] ping\n\
-         retifs [--store DIR] put FILE [--public] [--compress] [--publish]\n\
+         retifs [--store DIR] put FILE [--public] [--compress] [--publish] [--record NAME | --one-off]\n\
          retifs [--store DIR] get READ-CAP [--from NODE]... [-o OUT] [--links N] [--batch N]\n\
          retifs [--store DIR] status READ-CAP\n\
          retifs [--store DIR] want READ-CAP [--from NODE]..."
@@ -55,8 +58,15 @@ async fn main() {
             let public = flags.iter().any(|a| a == "--public");
             let compress = flags.iter().any(|a| a == "--compress");
             let publish = flags.iter().any(|a| a == "--publish");
+            let record = if flags.iter().any(|a| a == "--one-off") {
+                None
+            } else if let Some(i) = flags.iter().position(|a| a == "--record") {
+                Some(flags.get(i + 1).cloned().unwrap_or_else(|| usage()))
+            } else {
+                Some(std::path::absolute(&path).unwrap_or_else(|_| path.clone()).to_string_lossy().into_owned())
+            };
             let data = std::fs::read(&path).unwrap_or_else(|e| fail(format!("{}: {e}", path.display())));
-            let cap = client.put(data, public, compress, publish).await.unwrap_or_else(|e| fail(e));
+            let cap = client.put(data, public, compress, publish, record).await.unwrap_or_else(|e| fail(e));
             println!("{cap}");
         }
         "get" => {

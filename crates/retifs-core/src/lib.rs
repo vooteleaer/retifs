@@ -10,7 +10,7 @@ pub mod cid;
 pub mod manifest;
 pub mod secret;
 
-pub use access::ServeToken;
+pub use access::ChunkToken;
 pub use chunk::{open, seal, seal_with, ChunkError, Compression, Sealed, Seed};
 pub use cid::Cid;
 pub use manifest::{FileRef, ManifestError, Store};

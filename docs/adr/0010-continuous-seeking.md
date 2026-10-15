@@ -64,13 +64,21 @@ There may be hundreds of copies of a chunk online. The daemon keeps a living **h
 ### Who may ask: RNS style (anonymous by default)
 As in RNS, where a NomadNet page or LXMF delivery doesn't learn who's asking unless the requester chooses to `identify`, **access is proven by knowing a secret, not by revealing who you are.** Answering `have`/`get` reveals holdings, so an attacker who knows CIDs (honeypot chunks, or CIDs computed from a known public file) must not be able to probe ([threat model](../04-threat-model.md#holder-privacy-tracking-and-honeypot-attacks)).
 - **Fetchers are anonymous by default:** ephemeral links, no `identify`.
-- **Proof of access:** each file or lease has a **serve token**, carried in the read-cap (and given to holders with the lease). Requests carry `HMAC(token, link_id ‖ request)`. The link ID is a free, replay-proof nonce, so there's no extra round trip. The holder verifies the proof and learns nothing about the requester. Without a valid proof the response is "don't have", indistinguishable in content and timing.
+- **Proof of access, per chunk (revised 2026-10-15):** each item in a request carries its own proof, `HMAC(chunk_token, label ‖ link_id ‖ cid or prefix)`, where `chunk_token = HKDF(chunk seed)`. The requester knows each seed from the manifest, so no token has to be shared. There is **no file-level token on the wire**, so a holder can't link items of one file by token. The link ID is a free, replay-proof nonce, so there's no extra round trip. The holder verifies each proof and learns nothing about the requester. Without a valid proof an item gets "don't have", indistinguishable in content and timing. (The first slice used one serve token per file; that linked every request for a file and was replaced.)
 - **Identity only where policy needs it:** own nodes, quotas and volunteer-storage accounting use RNS `identify`, like restricted NomadNet pages. Ordinary reading never does.
 - **Publishing is deliberate:** content explicitly **published or seeded** is served to anonymous requesters without proof, like hosting a micron page. Being seen holding it reveals nothing private.
 - **The cache tier is never served** (with or without proof) except to own nodes. A honeypot creator knows the seed and the token, but still can't see reading history.
 - **No public holdings summaries** in announces. Generation counters go to proven or own peers only.
 - **Rate limits and stamps** for non-own requesters.
 - **Option (later):** per-file serving destinations derived from the read-cap, so only cap holders can even find where a file is served.
+
+### Request-pattern leaks (2026-10-15)
+What a holder holds reveals little: chunks are equal-sized blobs with no visible grouping. What it is **asked** reveals more:
+- **Grouping by token:** removed by per-chunk proofs (above).
+- **Grouping by request:** a batched request shows that its items belong together. Requests can carry a single item (one packet each: `get` 49 B, `have` 24 B), so a peer can't group by request either. `retifsd --private-requests` seeks one item per request; the fetcher's `batch: 1` does the same. On own nodes and LANs, batching stays the default for speed.
+- **Telling a peer the size:** a `have` over all wanted chunks tells even a one-chunk holder the file's chunk count. Mitigations, not yet implemented: ask each peer about a slice; add decoy prefixes.
+- **Padding:** readers fetch padding chunks like real ones, so the number of requests matches the padded size (ADR-0008/0009).
+- **Residual:** requests on one link are visibly one session, and bursts are visible in timing. Spreading requests over several links with jitter reduces this; a global passive observer is out of scope, as for RNS.
 
 ### Holder hints
 A read-cap may carry hints: `retifs:1:<root>:<seed>:<size>@<node>,<node>`. Hints say where to ask; integrity always comes from the CID. The read-cap also carries the file's serve token (format to be fixed together with the lease format, decision 6).
@@ -84,8 +92,8 @@ A read-cap may carry hints: `retifs:1:<root>:<seed>:<size>@<node>,<node>`. Hints
 ### Endpoints
 | Endpoint | Request | Response |
 |---|---|---|
-| `/retifs/have` | CID prefixes | bitmap |
-| `/retifs/get` | CIDs | ciphertexts (existing) |
+| `/retifs/have` | items of CID prefix (8) ‖ proof (16), ≤ 16 | bitmap |
+| `/retifs/get` | items of CID (33) ‖ proof (16), ≤ 64 | ciphertexts |
 | `/retifs/put` | lease id + ciphertexts | per-chunk accept/reject |
 | `/retifs/lease` | signed lease | accept (with quota) or reject |
 | `/retifs/receipt` | lease id | signed receipt, or progress |

@@ -5,6 +5,7 @@ use sha2::{Digest, Sha256};
 
 const PUBLIC_LABEL: &[u8] = b"retifs/v1/public";
 const RESTRICTED_SALT: &[u8] = b"retifs/v1/restricted";
+const RECORD_SALT: &[u8] = b"retifs/v1/record";
 
 /// Keys the per-chunk seed: `seed = HMAC-SHA256(secret, frame)`.
 #[derive(Clone, PartialEq, Eq)]
@@ -31,7 +32,18 @@ impl ConvergenceSecret {
         ConvergenceSecret(out)
     }
 
-    /// Personal content: a random secret per namespace or file, so no dedup.
+    /// Personal content, one secret per record (ADR-0008): stable across the
+    /// record's versions, so an edit stores only changed chunks, but different
+    /// records never share CIDs, so a holder can't tell that two files share content.
+    pub fn for_record(namespace_key: &[u8; 32], record_id: &[u8]) -> Self {
+        let mut out = [0u8; 32];
+        Hkdf::<Sha256>::new(Some(RECORD_SALT), namespace_key)
+            .expand(record_id, &mut out)
+            .expect("32 bytes is a valid HKDF output length");
+        ConvergenceSecret(out)
+    }
+
+    /// Personal content with an explicit secret (e.g. random for a one-off file).
     pub fn personal(random: [u8; 32]) -> Self {
         ConvergenceSecret(random)
     }

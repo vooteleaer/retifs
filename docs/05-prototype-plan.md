@@ -27,6 +27,8 @@ Prototypes are throwaway. They're for learning, not for locking in the format. T
 - [ ] Spare tier: fill free space with replicas by need score (rarest first), evicted first, idle bandwidth only.
 - [x] Want-list in the store (readable wants); `/retifs/have`; event-driven seeker woken by announces; `retifs want`; partial `status` ([ADR-0010](adr/0010-continuous-seeking.md), implementation status).
 - [ ] Blind wants (for leases), range reads of partially available files.
+- [x] Request privacy: per-chunk access proofs (no file token on the wire), one-item requests (`--private-requests`, `batch: 1`), PADMÉ padding with padding fetched like data, per-record personal secrets (versions dedup) ([ADR-0008](adr/0008-chunk-encryption-and-cid.md), [ADR-0010](adr/0010-continuous-seeking.md)).
+- [ ] Request privacy, continued: sliced `have` per peer, decoy prefixes, several links with jitter.
 - [ ] Holder map: per-chunk/per-group holders from receipts, `have` answers, hints and announces; source ranking, load spreading, failover, measured copy counts.
 - [ ] Holder hints in read-caps; store generation counter in announces.
 - [ ] Leases, `/retifs/put`, receipts (with test vectors: decision 6).

@@ -20,10 +20,12 @@ Every crypto decision is checked against this.
 - Chunk count and size class, request timing.
 - Public content under a convergent key: anyone can compute the CIDs of a known file. That the file exists somewhere is accepted, since the content is public. **Who holds it is not**: see "Holder privacy" below.
 - Lease renewal timing (mitigation: delegated renewal).
+- **Request patterns:** requests on one link are visibly one session, and bursts are visible in timing. Token linking is removed (per-chunk proofs), request grouping is avoidable (one item per request), and padding hides file size to a PADMÉ bucket; what remains is link/timing correlation ([ADR-0010](adr/0010-continuous-seeking.md)).
+- **File size** to a PADMÉ bucket (O(log log n) bits), not exactly ([ADR-0008](adr/0008-chunk-encryption-and-cid.md)).
 
 ## Holder privacy (tracking and honeypot attacks)
 An attacker who knows CIDs (because it created distinctive chunks and got people to fetch them, or computed them from a known public file) could ask nodes "do you have these?" and learn who read what. Rules:
-1. **Anonymous by default, access by possession (RNS style).** Requesters don't identify; they prove knowledge of a per-file or per-lease serve token from the read-cap (`HMAC(token, link_id ‖ request)`). Without a valid proof the response is indistinguishable from "don't have", in content and timing. Identity (`identify`) is used only where policy needs it: own nodes, quotas, volunteer accounting. Explicitly published or seeded content is served to anyone, like a micron page.
+1. **Anonymous by default, access by possession (RNS style).** Requesters don't identify; each item proves knowledge of that chunk's seed (`HMAC(chunk_token, link_id ‖ cid)`), so nothing links items of one file by token. Without a valid proof the response is indistinguishable from "don't have", in content and timing. Identity (`identify`) is used only where policy needs it: own nodes, quotas, volunteer accounting. Explicitly published or seeded content is served to anyone, like a micron page.
 2. **The cache is never served to others.** Cached chunks are the user's reading history; only the user's own nodes may see them. Serving public content to strangers ("seeding") is an explicit opt-in per content class, never a side effect of reading.
 3. **Proofs stop CID-only probing.** Parties who only saw CIDs (pinning nodes, observers) can't produce proofs. A honeypot creator can (it knows the token), so rule 2 protects reading history.
 4. **No public summaries of holdings.** Announces carry no Bloom filters of held chunks. Store generation counters go only to authorized peers.

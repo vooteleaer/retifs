@@ -2,17 +2,22 @@
 //! (`/retifs/have`, CID prefixes, packet-sized), then fetch what it holds
 //! (`/retifs/get`). Missing chunks are normal: they stay wanted and are
 //! sought again from other peers or later.
+//!
+//! Every item carries a proof derived from that chunk's seed, so a peer can't
+//! link the items to one file by token. With `per_item`, every request holds
+//! a single item (one packet each): slower, but a peer also can't group items
+//! by request.
 
 use std::time::Duration;
 
-use retifs_core::{open, Cid, Seed, ServeToken};
+use retifs_core::{open, ChunkToken, Cid, Seed};
 
 use crate::{
     protocol::{decode_bitmap, decode_response, encode_have, encode_request, GET_ENDPOINT, HAVE_ENDPOINT, HAVE_PREFIX, MAX_HAVE},
     transport::Transport,
 };
 
-/// CIDs per `get` in a seeking round.
+/// Items per `get` in a seeking round when batching.
 pub const SEEK_GET_BATCH: usize = 32;
 
 /// What a round brought: (index into the wanted list, ciphertext, plaintext).
@@ -29,36 +34,42 @@ pub struct SeekRound {
 pub async fn seek_round<T: Transport>(
     transport: &T,
     link: T::Link,
-    token: &ServeToken,
     wanted: &[(Cid, Seed)],
+    per_item: bool,
     timeout: Duration,
 ) -> Result<SeekRound, String> {
     let nonce = transport.link_nonce(link);
+    let tokens: Vec<ChunkToken> = wanted.iter().map(|(_, s)| ChunkToken::for_seed(s)).collect();
     let mut round = SeekRound::default();
+    let (have_batch, get_batch) = if per_item { (1, 1) } else { (MAX_HAVE, SEEK_GET_BATCH) };
 
+    let indices: Vec<usize> = (0..wanted.len()).collect();
     let mut held = Vec::new();
-    for (batch_no, batch) in wanted.chunks(MAX_HAVE).enumerate() {
-        let prefixes: Vec<[u8; HAVE_PREFIX]> = batch.iter().map(|(c, _)| c.as_bytes()[..HAVE_PREFIX].try_into().unwrap()).collect();
-        let refs: Vec<&[u8]> = prefixes.iter().map(|p| p.as_slice()).collect();
-        let body = encode_have(&token.id(), &token.have_proof(&nonce, &refs), &prefixes);
+    for batch in indices.chunks(have_batch) {
+        let items: Vec<([u8; HAVE_PREFIX], [u8; 16])> = batch
+            .iter()
+            .map(|&i| {
+                let prefix: [u8; HAVE_PREFIX] = wanted[i].0.as_bytes()[..HAVE_PREFIX].try_into().unwrap();
+                (prefix, tokens[i].have_proof(&nonce, &prefix))
+            })
+            .collect();
         round.requests += 1;
-        let resp = tokio::time::timeout(timeout, transport.request(link, HAVE_ENDPOINT, body))
+        let resp = tokio::time::timeout(timeout, transport.request(link, HAVE_ENDPOINT, encode_have(&items)))
             .await
             .map_err(|_| "have: timed out".to_string())??;
         let bits = decode_bitmap(&resp, batch.len()).map_err(|e| e.to_string())?;
-        held.extend(bits.iter().enumerate().filter(|(_, h)| **h).map(|(i, _)| batch_no * MAX_HAVE + i));
+        held.extend(batch.iter().zip(bits).filter(|(_, h)| *h).map(|(&i, _)| i));
     }
     round.held = held.len();
 
-    for batch in held.chunks(SEEK_GET_BATCH) {
-        let cids: Vec<Cid> = batch.iter().map(|&i| wanted[i].0).collect();
-        let body = encode_request(&token.id(), &token.proof(&nonce, &cids), &cids);
+    for batch in held.chunks(get_batch) {
+        let items: Vec<(Cid, [u8; 16])> = batch.iter().map(|&i| (wanted[i].0, tokens[i].get_proof(&nonce, &wanted[i].0))).collect();
         round.requests += 1;
-        let resp = tokio::time::timeout(timeout, transport.request(link, GET_ENDPOINT, body))
+        let resp = tokio::time::timeout(timeout, transport.request(link, GET_ENDPOINT, encode_request(&items)))
             .await
             .map_err(|_| "get: timed out".to_string())??;
-        let items = decode_response(&resp, cids.len()).map_err(|e| e.to_string())?;
-        for (&i, item) in batch.iter().zip(items) {
+        let got = decode_response(&resp, items.len()).map_err(|e| e.to_string())?;
+        for (&i, item) in batch.iter().zip(got) {
             if let Some(ct) = item {
                 let (cid, seed) = wanted[i];
                 if let Ok(pt) = open(&cid, &seed, &ct) {

@@ -48,6 +48,10 @@ pub enum Request {
         /// holders of the read-cap can fetch it from this node.
         #[serde(default)]
         publish: bool,
+        /// Record this file is a version of (ADR-0008: one secret per record, so
+        /// versions dedup and different records never share CIDs). None: one-off.
+        #[serde(default)]
+        record: Option<String>,
     },
     /// Read the file behind `cap`: local store first, then the given nodes.
     Get {
@@ -274,8 +278,15 @@ impl Client {
         }
     }
 
-    pub async fn put(&mut self, data: Vec<u8>, public: bool, compress: bool, publish: bool) -> Result<String, ClientError> {
-        match self.call(Request::Put { data, public, compress, publish }).await? {
+    pub async fn put(
+        &mut self,
+        data: Vec<u8>,
+        public: bool,
+        compress: bool,
+        publish: bool,
+        record: Option<String>,
+    ) -> Result<String, ClientError> {
+        match self.call(Request::Put { data, public, compress, publish, record }).await? {
             Response::Put { cap } => Ok(cap),
             _ => Err(ClientError::Unexpected),
         }

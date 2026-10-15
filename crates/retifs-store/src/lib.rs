@@ -27,19 +27,14 @@ use std::{
     io::{self, Read, Seek, SeekFrom, Write},
     path::{Path, PathBuf},
     sync::{Mutex, RwLock},
-    time::{SystemTime, UNIX_EPOCH},
+    time::{Duration, Instant, SystemTime, UNIX_EPOCH},
 };
 
 mod wants;
 pub use wants::{Hint, PeerId, Want};
 
 use redb::{Database, ReadableTable, ReadableTableMetadata, TableDefinition};
-use retifs_core::{
-    access::{PUBLIC_ID, TOKEN_ID_LEN},
-    chunk::CLASSES,
-    cid::CID_LEN,
-    Cid, ServeToken, Store,
-};
+use retifs_core::{chunk::CLASSES, ChunkToken, Cid, Store};
 
 /// CID → (class index, segment, slot, tier flags)
 const INDEX: TableDefinition<&[u8], (u8, u32, u32, u8)> = TableDefinition::new("index");
@@ -47,11 +42,12 @@ const INDEX: TableDefinition<&[u8], (u8, u32, u32, u8)> = TableDefinition::new("
 const FREE: TableDefinition<(u8, u32, u32), ()> = TableDefinition::new("free");
 /// Next never-used slot number per class index
 const NEXT: TableDefinition<u8, u64> = TableDefinition::new("next");
-/// Serving index: token_id ‖ CID → (). Only chunks registered here are served
-/// to others; fetched/cached chunks never are (holder privacy, ADR-0010).
-pub(crate) const SERVE: TableDefinition<&[u8], ()> = TableDefinition::new("serve");
-/// token_id → serve token, for verifying proofs.
-const TOKENS: TableDefinition<&[u8], &[u8]> = TableDefinition::new("tokens");
+/// Serving index: CID → chunk access token. Only chunks registered here (own
+/// writes) are served, to requesters proving the chunk's seed; fetched/cached
+/// chunks never are (holder privacy, ADR-0010).
+pub(crate) const SERVE: TableDefinition<&[u8], &[u8]> = TableDefinition::new("serve");
+/// Published CIDs: served to anyone without proof.
+pub(crate) const PUBLISHED: TableDefinition<&[u8], ()> = TableDefinition::new("published");
 /// Effective tier → bytes stored in it.
 const USAGE: TableDefinition<u8, u64> = TableDefinition::new("usage");
 /// CID → last access (ms since epoch), for LRU eviction of elastic tiers.
@@ -205,7 +201,13 @@ pub struct SlabStore {
     budget: RwLock<Budget>,
     /// Recent accesses not yet written to the ACCESS table.
     touched: Mutex<HashMap<Cid, u64>>,
+    /// Last volume sample: (when, total, available, store bytes at that time).
+    /// Asking the OS costs ~2 ms on Windows, so it's sampled at most once per
+    /// DISK_SAMPLE and adjusted by what the store wrote or freed since.
+    disk: Mutex<Option<(Instant, u64, u64, u64)>>,
 }
+
+const DISK_SAMPLE: Duration = Duration::from_secs(1);
 
 impl SlabStore {
     pub fn open(root: impl AsRef<Path>) -> Result<Self, StoreError> {
@@ -217,18 +219,30 @@ impl SlabStore {
         w.open_table(FREE)?;
         w.open_table(NEXT)?;
         w.open_table(SERVE)?;
-        w.open_table(TOKENS)?;
+        w.open_table(PUBLISHED)?;
         w.open_table(USAGE)?;
         w.open_table(ACCESS)?;
         wants::open_tables(&w)?;
         w.commit()?;
-        Ok(SlabStore { root, db, sync: true, budget: RwLock::new(Budget::default()), touched: Mutex::new(HashMap::new()) })
+        Ok(SlabStore {
+            root,
+            db,
+            sync: true,
+            budget: RwLock::new(Budget::default()),
+            touched: Mutex::new(HashMap::new()),
+            disk: Mutex::new(None),
+        })
     }
 
     /// fsync each pinned slot (default on). Cache and serving tiers are never
     /// fsynced, since they can be refetched. Off only for tests and benchmarks.
     pub fn set_sync(&mut self, on: bool) {
         self.sync = on;
+    }
+
+    /// The directory the store lives in.
+    pub fn root(&self) -> &Path {
+        &self.root
     }
 
     pub fn set_budget(&self, budget: Budget) {
@@ -349,7 +363,7 @@ impl SlabStore {
         let b = self.budget.read().unwrap().clone();
         let (total, available) = match b.simulate_free {
             Some(free) => (free.max(1), free.saturating_sub(usage.total())),
-            None => (fs4::total_space(&self.root)?, fs4::available_space(&self.root)?),
+            None => self.disk_sample(usage.total())?,
         };
         let hard_max = b.max_store.unwrap_or(total / 2);
         Ok(Limits {
@@ -359,6 +373,27 @@ impl SlabStore {
             disk_total: total,
             disk_available: available,
         })
+    }
+
+    /// Volume (total, available), sampled at most once per DISK_SAMPLE and
+    /// adjusted by the store's own growth or shrinkage since the sample.
+    fn disk_sample(&self, store_bytes: u64) -> Result<(u64, u64), StoreError> {
+        let mut disk = self.disk.lock().unwrap();
+        match *disk {
+            Some((at, total, avail, at_bytes)) if at.elapsed() < DISK_SAMPLE => {
+                let avail = if store_bytes >= at_bytes {
+                    avail.saturating_sub(store_bytes - at_bytes)
+                } else {
+                    avail + (at_bytes - store_bytes)
+                };
+                Ok((total, avail))
+            }
+            _ => {
+                let (total, avail) = (fs4::total_space(&self.root)?, fs4::available_space(&self.root)?);
+                *disk = Some((Instant::now(), total, avail, store_bytes));
+                Ok((total, avail))
+            }
+        }
     }
 
     /// Brings the store back within budget: trims the cache to its cap and, if
@@ -401,15 +436,13 @@ impl SlabStore {
         Ok(())
     }
 
-    /// Serves `cids` to anyone who proves possession of `token` (a file's read-cap).
-    pub fn register_serving(&self, token: &ServeToken, cids: &[Cid]) -> Result<(), StoreError> {
-        let id = token.id();
+    /// Serves these chunks to anyone proving their seed (own writes).
+    pub fn register_serving(&self, chunks: &[(Cid, ChunkToken)]) -> Result<(), StoreError> {
         let w = self.db.begin_write()?;
         {
-            w.open_table(TOKENS)?.insert(id.as_slice(), token.0.as_slice())?;
             let mut serve = w.open_table(SERVE)?;
-            for cid in cids {
-                serve.insert(serve_key(&id, cid).as_slice(), ())?;
+            for (cid, token) in chunks {
+                serve.insert(cid.as_bytes().as_slice(), token.0.as_slice())?;
             }
         }
         w.commit()?;
@@ -420,25 +453,40 @@ impl SlabStore {
     pub fn publish(&self, cids: &[Cid]) -> Result<(), StoreError> {
         let w = self.db.begin_write()?;
         {
-            let mut serve = w.open_table(SERVE)?;
+            let mut published = w.open_table(PUBLISHED)?;
             for cid in cids {
-                serve.insert(serve_key(&PUBLIC_ID, cid).as_slice(), ())?;
+                published.insert(cid.as_bytes().as_slice(), ())?;
             }
         }
         w.commit()?;
         Ok(())
     }
 
-    pub fn serve_token(&self, token_id: &[u8; TOKEN_ID_LEN]) -> Result<Option<ServeToken>, StoreError> {
+    /// The access token under which `cid` is served, if it is.
+    pub fn serving_token(&self, cid: &Cid) -> Result<Option<ChunkToken>, StoreError> {
         let r = self.db.begin_read()?;
-        let tokens = r.open_table(TOKENS)?;
-        Ok(tokens.get(token_id.as_slice())?.and_then(|g| g.value().try_into().ok()).map(ServeToken))
+        let serve = r.open_table(SERVE)?;
+        Ok(serve.get(cid.as_bytes().as_slice())?.and_then(|g| g.value().try_into().ok()).map(ChunkToken))
     }
 
-    /// Whether `cid` is registered for serving under `token_id` (or published, for [`PUBLIC_ID`]).
-    pub fn is_served(&self, token_id: &[u8; TOKEN_ID_LEN], cid: &Cid) -> Result<bool, StoreError> {
+    /// For each CID: its access token (if served) and whether it's published,
+    /// in one read transaction (the serving hot path).
+    pub fn serving_info(&self, cids: &[Cid]) -> Result<Vec<(Option<ChunkToken>, bool)>, StoreError> {
         let r = self.db.begin_read()?;
-        Ok(r.open_table(SERVE)?.get(serve_key(token_id, cid).as_slice())?.is_some())
+        let serve = r.open_table(SERVE)?;
+        let published = r.open_table(PUBLISHED)?;
+        cids.iter()
+            .map(|c| {
+                let key = c.as_bytes().as_slice();
+                let token = serve.get(key)?.and_then(|g| g.value().try_into().ok()).map(ChunkToken);
+                Ok((token, published.get(key)?.is_some()))
+            })
+            .collect()
+    }
+
+    pub fn is_published(&self, cid: &Cid) -> Result<bool, StoreError> {
+        let r = self.db.begin_read()?;
+        Ok(r.open_table(PUBLISHED)?.get(cid.as_bytes().as_slice())?.is_some())
     }
 
     pub fn len(&self) -> Result<u64, StoreError> {
@@ -613,13 +661,6 @@ fn move_usage(w: &redb::WriteTransaction, from: Tier, to: Tier, bytes: u64) -> R
         add_usage(w, to, bytes as i64)?;
     }
     Ok(())
-}
-
-fn serve_key(token_id: &[u8; TOKEN_ID_LEN], cid: &Cid) -> [u8; TOKEN_ID_LEN + CID_LEN] {
-    let mut key = [0u8; TOKEN_ID_LEN + CID_LEN];
-    key[..TOKEN_ID_LEN].copy_from_slice(token_id);
-    key[TOKEN_ID_LEN..].copy_from_slice(cid.as_bytes());
-    key
 }
 
 fn class_index(len: usize) -> Result<u8, StoreError> {

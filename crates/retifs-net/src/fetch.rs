@@ -22,8 +22,8 @@ use std::{
 };
 
 use retifs_core::{
-    manifest::{decode_node, NodeEntry},
-    open, Cid, FileRef, ManifestError, ServeToken, Store,
+    manifest::{decode_node, decode_root, NodeEntry},
+    open, ChunkToken, Cid, FileRef, ManifestError, Store,
 };
 use tokio::{sync::Notify, task::JoinSet};
 
@@ -34,7 +34,8 @@ use crate::{
 
 #[derive(Debug, Clone, Copy)]
 pub struct FetchOpts {
-    /// CIDs per request.
+    /// Chunks per request. 1 = one chunk per request (one packet each): a peer
+    /// then can't group chunks by request either (privacy mode, ADR-0010).
     pub batch: usize,
     /// Requests in flight per link.
     ///
@@ -109,16 +110,20 @@ pub async fn fetch_file<T: Transport>(
         return Err(FetchError::TooManyLinks);
     }
     let mut stats = FetchStats::default();
-    let token = ServeToken::for_file(file);
     let mut level = vec![NodeEntry { cid: file.root, seed: file.seed, span: file.size }];
 
     let chunks = loop {
         stats.tree_levels += 1;
-        let opened = fetch_level(transport, links, &token, &level, opts, cache, &mut stats).await?;
+        let opened = fetch_level(transport, links, &level, opts, cache, &mut stats).await?;
         let mut next = Vec::new();
         let mut leaves = None;
         for (entry, plaintext) in level.iter().zip(opened) {
-            let node = decode_node(&plaintext, entry.span).map_err(FetchError::Manifest)?;
+            let node = if stats.tree_levels == 1 {
+                decode_root(&plaintext, entry.span) // a padded tree may cover more than the file
+            } else {
+                decode_node(&plaintext, entry.span)
+            }
+            .map_err(FetchError::Manifest)?;
             if let Some(data) = node.inline {
                 // A tiny file lives entirely in its root node (ADR-0013).
                 if stats.tree_levels != 1 || level.len() != 1 {
@@ -138,7 +143,9 @@ pub async fn fetch_file<T: Transport>(
         level = next;
     };
 
-    let data = fetch_level(transport, links, &token, &chunks, opts, cache, &mut stats).await?;
+    // Padding chunks are fetched like real ones, so request volume matches the
+    // padded size and reveals only the PADMÉ bucket (ADR-0008).
+    let data = fetch_level(transport, links, &chunks, opts, cache, &mut stats).await?;
     let mut out = Vec::with_capacity(file.size as usize);
     for (entry, piece) in chunks.iter().zip(data) {
         if piece.len() as u64 != entry.span {
@@ -146,6 +153,7 @@ pub async fn fetch_file<T: Transport>(
         }
         out.extend_from_slice(&piece);
     }
+    out.truncate(file.size as usize);
     stats.chunks += chunks.len();
     Ok((out, stats))
 }
@@ -154,7 +162,6 @@ pub async fn fetch_file<T: Transport>(
 async fn fetch_level<T: Transport>(
     transport: &T,
     links: &[T::Link],
-    token: &ServeToken,
     entries: &[NodeEntry],
     opts: FetchOpts,
     cache: &mut impl Store,
@@ -174,7 +181,7 @@ async fn fetch_level<T: Transport>(
     }
 
     if !needed.is_empty() {
-        let mut fetched = fetch_remote(transport, links, token, needed, opts, stats).await?.into_iter();
+        let mut fetched = fetch_remote(transport, links, needed, opts, stats).await?.into_iter();
         for (slot, e) in opened.iter_mut().zip(entries) {
             if slot.is_none() {
                 let (ct, pt) = fetched.next().expect("one result per needed entry");
@@ -235,7 +242,6 @@ impl Shared {
 async fn fetch_remote<T: Transport>(
     transport: &T,
     links: &[T::Link],
-    token: &ServeToken,
     entries: Vec<NodeEntry>,
     opts: FetchOpts,
     stats: &mut FetchStats,
@@ -266,7 +272,7 @@ async fn fetch_remote<T: Transport>(
     let mut workers = JoinSet::new();
     for (me, &link) in links.iter().enumerate() {
         for _ in 0..opts.inflight_per_link.max(1) {
-            workers.spawn(worker(transport.clone(), link, me, all, token.clone(), shared.clone(), opts.timeout));
+            workers.spawn(worker(transport.clone(), link, me, all, shared.clone(), opts.timeout));
         }
     }
     while workers.join_next().await.is_some() {}
@@ -286,7 +292,6 @@ async fn worker<T: Transport>(
     link: T::Link,
     me: usize,
     all: u64,
-    token: ServeToken,
     shared: Arc<Shared>,
     timeout: Duration,
 ) {
@@ -308,7 +313,16 @@ async fn worker<T: Transport>(
 
         let cids: Vec<Cid> = job.indices.iter().map(|&i| shared.entries[i].cid).collect();
         shared.requests.fetch_add(1, Ordering::Relaxed);
-        let body = encode_request(&token.id(), &token.proof(&nonce, &cids), &cids);
+        // Each item proves access with its own chunk's seed: no file token on the wire.
+        let items: Vec<(Cid, [u8; 16])> = job
+            .indices
+            .iter()
+            .map(|&i| {
+                let e = shared.entries[i];
+                (e.cid, ChunkToken::for_seed(&e.seed).get_proof(&nonce, &e.cid))
+            })
+            .collect();
+        let body = encode_request(&items);
         let response = tokio::time::timeout(timeout, transport.request(link, GET_ENDPOINT, body)).await;
         let tried = job.tried | bit;
         let items = match response {

@@ -1,7 +1,7 @@
 //! retifsd (prototype): the retifs shared instance.
 //!
 //!     retifsd [--store DIR] [--max-store SIZE] [--min-free SIZE] [--cache-max SIZE]
-//!             [--public] [--put FILE]...
+//!             [--private-requests] [--public] [--put FILE]...
 //!
 //! SIZE: bytes, or with a K/M/G/T suffix (powers of 1024). Defaults (ADR-0012):
 //! store limit 50 % of the volume, reserve max(10 %, 5 GiB), cache 20 % of the limit.
@@ -24,9 +24,8 @@ use std::{
 use libretifs::{read_frame, write_frame, Envelope, GetStats, Request, Response, Status, PROTOCOL_VERSION};
 use personal_rns::prelude::*;
 use retifs_core::{
-    access::PUBLIC_ID,
-    manifest::{self, decode_node, NodeEntry, Recording},
-    open, ConvergenceSecret, FileRef, ServeToken,
+    manifest::{self, decode_node, decode_root, NodeEntry},
+    open, ChunkToken, ConvergenceSecret, FileRef,
 };
 use personal_rns::routing::links::LinkId;
 use retifs_net::{
@@ -46,33 +45,29 @@ impl RequestEndpoint<Arc<SlabStore>> for Get {
     const ENDPOINT_ID: &'static str = GET_ENDPOINT;
     const POLICY: RequestEndpointPolicy = RequestEndpointPolicy::AllowAll;
 
-    /// Anonymous requesters prove possession of the file's read-cap (serve
-    /// token bound to this link); published chunks need no proof. Anything
-    /// else gets the same answer as "don't have" (holder privacy, ADR-0010).
+    /// Anonymous requesters prove, per item, that they know the chunk's seed;
+    /// published chunks need no proof. Anything else gets the same answer as
+    /// "don't have" (holder privacy, ADR-0010). Fetched/cached chunks are never
+    /// in the serving index, so they're never served.
     async fn handle(mut context: RequestContext<'_, Arc<SlabStore>>) -> Result<(), Decline> {
-        let Ok(req) = decode_request(context.data) else {
+        let Ok(items) = decode_request(context.data) else {
             return Err(Decline::Ignore);
         };
         let store = context.state;
         let nonce = context.respond_token().link_id.as_bytes().to_vec();
-        let authorized = if req.token_id == PUBLIC_ID {
-            true // published content only: is_served() below checks PUBLIC_ID entries
-        } else {
-            match store.serve_token(&req.token_id) {
-                Ok(Some(token)) => token.verify(&nonce, &req.cids, &req.proof),
-                _ => false,
-            }
-        };
-        // Same lookups on every path, so a refusal doesn't stand out by timing.
-        let items: Vec<Option<Vec<u8>>> = req
-            .cids
+        // One lookup for all items; same work on every path, so a refusal
+        // doesn't stand out by timing.
+        let cids: Vec<_> = items.iter().map(|(c, _)| *c).collect();
+        let info = store.serving_info(&cids).unwrap_or_else(|_| vec![(None, false); cids.len()]);
+        let out: Vec<Option<Vec<u8>>> = items
             .iter()
-            .map(|c| {
-                let served = store.is_served(&req.token_id, c).unwrap_or(false);
-                if authorized && served { store.fetch(c).ok().flatten() } else { None }
+            .zip(info)
+            .map(|((cid, proof), (token, published))| {
+                let ok = published || token.is_some_and(|t| t.verify_get(&nonce, cid, proof));
+                if ok { store.fetch(cid).ok().flatten() } else { None }
             })
             .collect();
-        context.respond(encode_response(&items))
+        context.respond(encode_response(&out))
     }
 }
 
@@ -84,20 +79,16 @@ impl RequestEndpoint<Arc<SlabStore>> for Have {
     const POLICY: RequestEndpointPolicy = RequestEndpointPolicy::AllowAll;
 
     async fn handle(mut context: RequestContext<'_, Arc<SlabStore>>) -> Result<(), Decline> {
-        let Ok(req) = decode_have(context.data) else {
+        let Ok(items) = decode_have(context.data) else {
             return Err(Decline::Ignore);
         };
         let store = context.state;
         let nonce = context.respond_token().link_id.as_bytes().to_vec();
-        let refs: Vec<&[u8]> = req.prefixes.iter().map(|p| p.as_slice()).collect();
-        let authorized = req.token_id == PUBLIC_ID
-            || matches!(store.serve_token(&req.token_id), Ok(Some(t)) if t.verify_have(&nonce, &refs, &req.proof));
-        let bits: Vec<bool> = req
-            .prefixes
+        let bits: Vec<bool> = items
             .iter()
-            .map(|p| {
-                let served = store.served_prefix(&req.token_id, p).unwrap_or(false);
-                authorized && served
+            .map(|(prefix, proof)| match store.served_by_prefix(prefix) {
+                Ok(Some((_, token, published))) => published || token.is_some_and(|t| t.verify_have(&nonce, prefix, proof)),
+                _ => false,
             })
             .collect();
         context.respond(encode_bitmap(&bits))
@@ -109,6 +100,7 @@ struct Args {
     public: bool,
     put: Vec<PathBuf>,
     budget: retifs_store::Budget,
+    private_requests: bool,
 }
 
 fn size(s: &str) -> u64 {
@@ -125,7 +117,13 @@ fn size(s: &str) -> u64 {
 }
 
 fn args() -> Args {
-    let mut a = Args { store: libretifs::default_store_dir(), public: false, put: Vec::new(), budget: Default::default() };
+    let mut a = Args {
+        store: libretifs::default_store_dir(),
+        public: false,
+        put: Vec::new(),
+        budget: Default::default(),
+        private_requests: false,
+    };
     let mut it = std::env::args().skip(1);
     while let Some(arg) = it.next() {
         match arg.as_str() {
@@ -135,6 +133,7 @@ fn args() -> Args {
             "--max-store" => a.budget.max_store = Some(size(&it.next().expect("--max-store SIZE"))),
             "--min-free" => a.budget.min_free = Some(size(&it.next().expect("--min-free SIZE"))),
             "--cache-max" => a.budget.cache_max = Some(size(&it.next().expect("--cache-max SIZE"))),
+            "--private-requests" => a.private_requests = true,
             "-h" | "--help" => {
                 println!("retifsd [--store DIR] [--max-store SIZE] [--min-free SIZE] [--cache-max SIZE] [--public] [--put FILE]...");
                 std::process::exit(0);
@@ -145,14 +144,34 @@ fn args() -> Args {
     a
 }
 
-fn secret(public: bool) -> ConvergenceSecret {
+/// Public: convergent. With a record: one secret per record from the store's
+/// namespace key (versions dedup, records don't share CIDs). Otherwise a fresh
+/// random secret (a one-off file).
+fn secret(store: &SlabStore, public: bool, record: Option<&str>) -> ConvergenceSecret {
     if public {
-        ConvergenceSecret::public()
-    } else {
-        let mut random = [0u8; 32];
-        getrandom::fill(&mut random).expect("OS entropy");
-        ConvergenceSecret::personal(random)
+        return ConvergenceSecret::public();
     }
+    match record {
+        Some(r) => ConvergenceSecret::for_record(&namespace_key(store), r.as_bytes()),
+        None => {
+            let mut random = [0u8; 32];
+            getrandom::fill(&mut random).expect("OS entropy");
+            ConvergenceSecret::personal(random)
+        }
+    }
+}
+
+/// The store's namespace key (created on first use). Prototype stand-in for
+/// real namespaces (phase 2): one personal namespace per store.
+fn namespace_key(store: &SlabStore) -> [u8; 32] {
+    let path = store.root().join("namespace_key");
+    if let Some(k) = std::fs::read(&path).ok().and_then(|b| b.try_into().ok()) {
+        return k;
+    }
+    let mut k = [0u8; 32];
+    getrandom::fill(&mut k).expect("OS entropy");
+    std::fs::write(&path, k).expect("write namespace key");
+    k
 }
 
 fn main() {
@@ -171,13 +190,15 @@ fn main() {
     };
     for path in &args.put {
         let data = std::fs::read(path).unwrap_or_else(|e| panic!("{}: {e}", path.display()));
-        let file = store_file(&store, &data, args.public, false, manifest::WriteOpts::default()).expect("store file");
+        let record = std::path::absolute(path).unwrap_or_else(|_| path.clone()).to_string_lossy().into_owned();
+        let file = store_file(&store, &data, args.public, false, Some(&record), manifest::WriteOpts::default()).expect("store file");
         println!("put {}  {}", path.display(), file);
     }
     let identity = load_or_create_identity(&args.store.join("node_identity")).expect("node identity");
     let endpoint = libretifs::endpoint(&args.store);
     let store = Arc::new(store);
-    block_on(move || serve(store, identity, endpoint));
+    let private_requests = args.private_requests;
+    block_on(move || serve(store, identity, endpoint, private_requests));
 }
 
 struct Daemon {
@@ -188,9 +209,12 @@ struct Daemon {
     wake: Arc<Notify>,
     /// Open links the seeker reuses, per peer.
     links: Mutex<HashMap<PeerId, LinkId>>,
+    /// One item per `have`/`get` request when seeking: slower, but a peer
+    /// can't group chunks by request (ADR-0010, request-pattern leaks).
+    private_requests: bool,
 }
 
-async fn serve(store: Arc<SlabStore>, identity: node::IdentitySecret, endpoint: String) {
+async fn serve(store: Arc<SlabStore>, identity: node::IdentitySecret, endpoint: String, private_requests: bool) {
     let dest = destination(identity, true);
     let dest_hash = dest.destination_hash().expect("valid destination");
     let (heard_tx, heard_rx) = mpsc::unbounded_channel::<PeerId>();
@@ -216,6 +240,7 @@ async fn serve(store: Arc<SlabStore>, identity: node::IdentitySecret, endpoint: 
         node_hex: destination_hex(&dest_hash),
         wake: Arc::new(Notify::new()),
         links: Mutex::new(HashMap::new()),
+        private_requests,
     });
     println!("attached to shared instance {of}");
     println!("serving {} chunks as retifs.node <{}>", store.len().unwrap_or(0), daemon.node_hex);
@@ -335,12 +360,13 @@ async fn handle(d: &Daemon, req: Request) -> Result<Response, String> {
             })
         }
 
-        Request::Put { data, public, compress, publish } => {
+        Request::Put { data, public, compress, publish, record } => {
             let store = d.store.clone();
             let opts = manifest::WriteOpts {
                 compression: if compress { retifs_core::Compression::Zstd } else { retifs_core::Compression::Off },
+                ..Default::default()
             };
-            let file = tokio::task::spawn_blocking(move || store_file(&store, &data, public, publish, opts))
+            let file = tokio::task::spawn_blocking(move || store_file(&store, &data, public, publish, record.as_deref(), opts))
                 .await
                 .map_err(|e| e.to_string())??;
             Ok(Response::Put { cap: file.to_string() })
@@ -405,22 +431,28 @@ async fn handle(d: &Daemon, req: Request) -> Result<Response, String> {
 
 /// Writes `data` as pinned own data and registers it for serving: to holders
 /// of its read-cap (serve token), and to anyone if `publish`.
-fn store_file(store: &SlabStore, data: &[u8], public: bool, publish: bool, opts: manifest::WriteOpts) -> Result<FileRef, String> {
+fn store_file(
+    store: &SlabStore,
+    data: &[u8],
+    public: bool,
+    publish: bool,
+    record: Option<&str>,
+    opts: manifest::WriteOpts,
+) -> Result<FileRef, String> {
+    let secret = secret(store, public, record);
     let mut pinned = retifs_store::TrackedPinned::new(store);
-    let mut rec = Recording::new(&mut pinned);
-    let written = manifest::write_opts(&mut rec, &secret(public), data, opts);
-    let cids = rec.cids;
-    let file = match written {
-        Ok(f) => f,
+    let (file, blobs) = match manifest::write_tracked(&mut pinned, &secret, data, opts) {
+        Ok(written) => written,
         Err(e) => {
             // Don't leave half a file pinned (and eating the budget).
             let _ = pinned.roll_back();
             return Err(e.to_string());
         }
     };
-    store.register_serving(&ServeToken::for_file(&file), &cids).map_err(|e| e.to_string())?;
+    let tokens: Vec<_> = blobs.iter().map(|(c, s)| (*c, ChunkToken::for_seed(s))).collect();
+    store.register_serving(&tokens).map_err(|e| e.to_string())?;
     if publish {
-        store.publish(&cids).map_err(|e| e.to_string())?;
+        store.publish(&blobs.iter().map(|(c, _)| *c).collect::<Vec<_>>()).map_err(|e| e.to_string())?;
     }
     Ok(file)
 }
@@ -468,7 +500,6 @@ async fn seek_pass(d: &Daemon) -> Result<(), String> {
             println!("seeker: {root} complete");
             continue;
         }
-        let token = ServeToken::for_file(&file);
         for hint in store.hints(&root).map_err(|e| e.to_string())? {
             if hint.next_try_ms > now_ms() {
                 continue;
@@ -500,7 +531,7 @@ async fn seek_pass(d: &Daemon) -> Result<(), String> {
                     break;
                 }
                 let pairs: Vec<(retifs_core::Cid, retifs_core::Seed)> = wants.iter().map(|w| (w.cid, w.seed)).collect();
-                let round = match seek_round(&transport, link, &token, &pairs, Duration::from_secs(60)).await {
+                let round = match seek_round(&transport, link, &pairs, d.private_requests, Duration::from_secs(60)).await {
                     Ok(r) => r,
                     Err(e) => {
                         eprintln!("seeker: {peer_hex}: {e}");
@@ -536,7 +567,8 @@ fn arrived(store: &SlabStore, root: &retifs_core::Cid, want: &Want, ct: &[u8], p
         Err(e) => return Err(e.to_string()),
     }
     if want.node {
-        let node = decode_node(pt, want.span).map_err(|e| e.to_string())?;
+        let node = if want.cid == *root { decode_root(pt, want.span) } else { decode_node(pt, want.span) }
+            .map_err(|e| e.to_string())?;
         let children: Vec<Want> = node
             .entries
             .iter()
@@ -577,12 +609,13 @@ fn local_status(store: &SlabStore, file: &FileRef) -> Status {
     while !level.is_empty() {
         let mut next = Vec::new();
         for e in level {
+            let is_root = e.cid == file.root;
             let node = store
                 .fetch(&e.cid)
                 .ok()
                 .flatten()
                 .and_then(|ct| open(&e.cid, &e.seed, &ct).ok())
-                .and_then(|pt| decode_node(&pt, e.span).ok());
+                .and_then(|pt| if is_root { decode_root(&pt, e.span) } else { decode_node(&pt, e.span) }.ok());
             match node {
                 Some(n) if n.leaf => {
                     for c in &n.entries {

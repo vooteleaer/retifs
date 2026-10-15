@@ -10,10 +10,21 @@
 //!   kind 2  inline:    n bytes of file data (only as the root, n ≤ INLINE_MAX)
 //! ```
 //! Inline roots make a tiny file one blob and one fetch instead of two (ADR-0013).
+//!
+//! **Padding (PADMÉ over the chunk count, ADR-0008):** writers add padding
+//! chunks until the number of data chunks reaches the next PADMÉ value, so
+//! chunk and node counts reveal only a coarse size bucket. Padding chunks are
+//! full 16 KiB pieces of keyed pseudo-random data, indistinguishable from real
+//! ones. The tree then covers more than the file; `FileRef::size` is the true
+//! size, and readers stop there. Only the root's span may exceed the file
+//! size; inner nodes are checked exactly.
 //! A fixed binary layout is canonical by construction: equal trees give equal
 //! bytes, and so equal CIDs.
 
 use std::{fmt, ops::Range, str::FromStr};
+
+use hmac::{Hmac, Mac};
+use sha2::{Digest, Sha256};
 
 use crate::{
     chunk::{self, ChunkError, Compression, Seed, FRAME_HEADER, MAX_DATA, OVERHEAD},
@@ -122,9 +133,19 @@ pub struct NodeEntry {
     pub span: u64,
 }
 
-/// Decodes and validates an opened manifest node. `expected_span` is the
-/// span its parent claimed (the file size for the root).
+/// Decodes and validates an opened inner manifest node: its children must
+/// add up to `expected_span`, the span its parent claimed.
 pub fn decode_node(plaintext: &[u8], expected_span: u64) -> Result<Node, ManifestError> {
+    decode_checked(plaintext, expected_span, false)
+}
+
+/// Decodes and validates a root node for a file of `file_size` bytes. A
+/// padded tree may cover more than the file (padding chunks at the end).
+pub fn decode_root(plaintext: &[u8], file_size: u64) -> Result<Node, ManifestError> {
+    decode_checked(plaintext, file_size, true)
+}
+
+fn decode_checked(plaintext: &[u8], expected_span: u64, root: bool) -> Result<Node, ManifestError> {
     match decode(plaintext)? {
         Decoded::Inline(data) => {
             if data.len() as u64 != expected_span {
@@ -133,7 +154,8 @@ pub fn decode_node(plaintext: &[u8], expected_span: u64) -> Result<Node, Manifes
             Ok(Node { leaf: true, entries: Vec::new(), inline: Some(data) })
         }
         Decoded::Entries(kind, entries) => {
-            if entries.iter().map(|e| e.span).sum::<u64>() != expected_span {
+            let sum = entries.iter().map(|e| e.span).sum::<u64>();
+            if sum != expected_span && !(root && sum > expected_span) {
                 return Err(ManifestError::Malformed("spans don't add up to the parent's span"));
             }
             Ok(Node {
@@ -177,11 +199,54 @@ struct Entry {
 }
 
 /// Options for [`write_opts`].
-#[derive(Debug, Clone, Copy, Default)]
+#[derive(Debug, Clone, Copy)]
 pub struct WriteOpts {
     /// Compress data chunks before encryption (off by default: a compressed
     /// chunk's size class reveals compressibility). Manifest nodes are never compressed.
     pub compression: Compression,
+    /// Pad the chunk count up to the next PADMÉ value (on by default).
+    pub pad: bool,
+}
+
+impl Default for WriteOpts {
+    fn default() -> Self {
+        WriteOpts { compression: Compression::Off, pad: true }
+    }
+}
+
+/// PADMÉ (Nikitin et al., PETS 2019): rounds `n` up so that only about
+/// log2(log2 n) + 1 significant bits remain. Overhead ≤ 12 %; the value leaks
+/// O(log log n) bits instead of O(log n).
+pub fn padme(n: u64) -> u64 {
+    if n < 2 {
+        return n;
+    }
+    let e = 63 - n.leading_zeros() as u64; // floor(log2 n)
+    let s = (63 - e.leading_zeros() as u64) + 1; // floor(log2 e) + 1
+    let z = e.saturating_sub(s);
+    let mask = (1u64 << z) - 1;
+    (n + mask) & !mask
+}
+
+/// The `index`-th padding piece of a file: keyed pseudo-random bytes, distinct
+/// per file and index (distinct CIDs), and deterministic for the same data and
+/// secret (so equal public files still converge).
+fn padding_piece(secret: &ConvergenceSecret, digest: &[u8; 32], index: u64, len: usize) -> Vec<u8> {
+    let mut k = Hmac::<Sha256>::new_from_slice(secret.as_bytes()).expect("HMAC takes any key length");
+    k.update(b"retifs/v1/pad");
+    k.update(digest);
+    k.update(&index.to_be_bytes());
+    let key = k.finalize().into_bytes();
+    let mut out = Vec::with_capacity(len + 32);
+    let mut block = 0u64;
+    while out.len() < len {
+        let mut m = Hmac::<Sha256>::new_from_slice(&key).expect("HMAC takes any key length");
+        m.update(&block.to_be_bytes());
+        out.extend_from_slice(&m.finalize().into_bytes());
+        block += 1;
+    }
+    out.truncate(len);
+    out
 }
 
 /// Chunks, seals and stores `data`, and returns its read capability.
@@ -195,7 +260,20 @@ pub fn write_opts(
     data: &[u8],
     opts: WriteOpts,
 ) -> Result<FileRef, ManifestError> {
-    write_with_fanout(store, secret, data, FANOUT, opts)
+    write_tracked(store, secret, data, opts).map(|(file, _)| file)
+}
+
+/// Like [`write_opts`], but also returns the CID and seed of every blob written
+/// (data, padding and nodes), e.g. to register per-chunk access tokens.
+pub fn write_tracked(
+    store: &mut impl Store,
+    secret: &ConvergenceSecret,
+    data: &[u8],
+    opts: WriteOpts,
+) -> Result<(FileRef, Vec<(Cid, Seed)>), ManifestError> {
+    let mut blobs = Vec::new();
+    let file = write_with_fanout(store, secret, data, FANOUT, opts, &mut blobs)?;
+    Ok((file, blobs))
 }
 
 fn write_with_fanout(
@@ -204,21 +282,40 @@ fn write_with_fanout(
     data: &[u8],
     fanout: usize,
     opts: WriteOpts,
+    blobs: &mut Vec<(Cid, Seed)>,
 ) -> Result<FileRef, ManifestError> {
+    let mut put = |store: &mut _, s: chunk::Sealed| -> Result<(Cid, Seed), ManifestError> {
+        Store::put(store, s.cid, s.ciphertext).map_err(store_err)?;
+        blobs.push((s.cid, s.seed));
+        Ok((s.cid, s.seed))
+    };
+
     if data.len() <= INLINE_MAX {
         let mut node = vec![VERSION, KIND_INLINE];
         node.extend_from_slice(&(data.len() as u16).to_be_bytes());
         node.extend_from_slice(data);
-        let s = seal(secret, &node).expect("an inline node fits the 1 KiB class");
-        store.put(s.cid, s.ciphertext).map_err(store_err)?;
-        return Ok(FileRef { root: s.cid, seed: s.seed, size: data.len() as u64 });
+        let (cid, seed) = put(store, seal(secret, &node).expect("an inline node fits the 1 KiB class"))?;
+        return Ok(FileRef { root: cid, seed, size: data.len() as u64 });
     }
 
     let mut level = Vec::new();
     for piece in chunker::split(data) {
-        let s = seal_with(secret, piece, opts.compression).expect("chunker output fits a chunk");
-        store.put(s.cid, s.ciphertext).map_err(store_err)?;
-        level.push(Entry { cid: s.cid, seed: s.seed, span: piece.len() as u64 });
+        let (cid, seed) = put(store, seal_with(secret, piece, opts.compression).expect("chunker output fits a chunk"))?;
+        level.push(Entry { cid, seed, span: piece.len() as u64 });
+    }
+
+    if opts.pad {
+        let real = level.len() as u64;
+        let mut h = Sha256::new();
+        for e in &level {
+            h.update(e.cid.as_bytes());
+        }
+        let digest: [u8; 32] = h.finalize().into();
+        for i in 0..padme(real) - real {
+            let piece = padding_piece(secret, &digest, i, chunker::MAX_SIZE as usize);
+            let (cid, seed) = put(store, seal(secret, &piece).expect("a padding piece fits a chunk"))?;
+            level.push(Entry { cid, seed, span: piece.len() as u64 });
+        }
     }
 
     let mut kind = KIND_LEAF;
@@ -226,13 +323,12 @@ fn write_with_fanout(
         let groups: Vec<&[Entry]> = level.chunks(fanout).collect();
         let mut parents = Vec::with_capacity(groups.len());
         for group in groups {
-            let s = seal(secret, &encode(kind, group)).expect("a node fits a chunk");
-            store.put(s.cid, s.ciphertext).map_err(store_err)?;
-            parents.push(Entry { cid: s.cid, seed: s.seed, span: group.iter().map(|e| e.span).sum() });
+            let (cid, seed) = put(store, seal(secret, &encode(kind, group)).expect("a node fits a chunk"))?;
+            parents.push(Entry { cid, seed, span: group.iter().map(|e| e.span).sum() });
         }
         if parents.len() == 1 {
             let root = parents[0];
-            return Ok(FileRef { root: root.cid, seed: root.seed, size: root.span });
+            return Ok(FileRef { root: root.cid, seed: root.seed, size: data.len() as u64 });
         }
         level = parents;
         kind = KIND_INTERNAL;
@@ -246,7 +342,7 @@ pub fn read_range(store: &impl Store, file: &FileRef, range: Range<u64>) -> Resu
     }
     let mut out = Vec::with_capacity((range.end - range.start) as usize);
     if range.start < range.end {
-        read_node(store, file.root, file.seed, file.size, 0, &range, &mut out)?;
+        read_node(store, file.root, file.seed, file.size, true, 0, &range, &mut out)?;
     }
     Ok(out)
 }
@@ -255,11 +351,13 @@ pub fn read_all(store: &impl Store, file: &FileRef) -> Result<Vec<u8>, ManifestE
     read_range(store, file, 0..file.size)
 }
 
+#[allow(clippy::too_many_arguments)]
 fn read_node(
     store: &impl Store,
     cid: Cid,
     seed: Seed,
     expected_span: u64,
+    root: bool,
     base: u64,
     want: &Range<u64>,
     out: &mut Vec<u8>,
@@ -274,7 +372,8 @@ fn read_node(
         }
         Decoded::Entries(kind, entries) => (kind, entries),
     };
-    if entries.iter().map(|e| e.span).sum::<u64>() != expected_span {
+    let sum = entries.iter().map(|e| e.span).sum::<u64>();
+    if sum != expected_span && !(root && sum > expected_span) {
         return Err(ManifestError::Malformed("spans don't add up to the parent's span"));
     }
     let mut start = base;
@@ -290,7 +389,7 @@ fn read_node(
                 let to = (want.end.min(end) - start) as usize;
                 out.extend_from_slice(&data[from..to]);
             } else {
-                read_node(store, e.cid, e.seed, e.span, start, want, out)?;
+                read_node(store, e.cid, e.seed, e.span, false, start, want, out)?;
             }
         }
         if end >= want.end {
@@ -408,7 +507,7 @@ mod tests {
         // Fanout 2 forces a deep tree from a small file.
         let data = noise(600_000, 42);
         let mut store = CountingStore::default();
-        let f = write_with_fanout(&mut store, &ConvergenceSecret::personal([1; 32]), &data, 2, WriteOpts::default()).unwrap();
+        let f = write_with_fanout(&mut store, &ConvergenceSecret::personal([1; 32]), &data, 2, WriteOpts::default(), &mut Vec::new()).unwrap();
         assert_eq!(read_all(&store, &f).unwrap(), data);
         for (a, b) in [(0, 1), (12_345, 99_999), (299_000, 300_001), (599_999, 600_000)] {
             assert_eq!(read_range(&store, &f, a..b).unwrap(), &data[a as usize..b as usize]);
@@ -419,7 +518,7 @@ mod tests {
     fn one_byte_read_touches_one_path() {
         let data = noise(600_000, 7);
         let mut store = CountingStore::default();
-        let f = write_with_fanout(&mut store, &ConvergenceSecret::personal([2; 32]), &data, 2, WriteOpts::default()).unwrap();
+        let f = write_with_fanout(&mut store, &ConvergenceSecret::personal([2; 32]), &data, 2, WriteOpts::default(), &mut Vec::new()).unwrap();
         let chunks = chunker::split(&data).count();
         let depth = (chunks as f64).log2().ceil() as usize + 1; // node levels incl. leaves
         store.gets.set(0);

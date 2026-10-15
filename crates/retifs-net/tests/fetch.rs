@@ -11,7 +11,7 @@ use std::{
     time::Duration,
 };
 
-use retifs_core::{manifest, Cid, ConvergenceSecret, FileRef, ServeToken, Store};
+use retifs_core::{manifest, ChunkToken, Cid, ConvergenceSecret, FileRef, Store};
 use retifs_net::{
     fetch::{fetch_file, FetchError, FetchOpts, NoCache},
     protocol::{decode_have, decode_request, encode_bitmap, encode_response, HAVE_ENDPOINT},
@@ -45,8 +45,8 @@ struct Peer {
     behaviour: Behaviour,
     delay: Duration,
     requests: AtomicUsize,
-    /// If set, serve only to requests carrying a valid proof for this token.
-    token: Option<ServeToken>,
+    /// If set, serve only items carrying a valid proof for their chunk's token.
+    tokens: Option<HashMap<Cid, ChunkToken>>,
 }
 
 #[derive(Clone)]
@@ -74,32 +74,32 @@ impl Transport for MemTransport {
             if peer.behaviour == Behaviour::FailAll {
                 return Err("link broke".into());
             }
+            let nonce = format!("link-{link}").into_bytes();
             if endpoint == HAVE_ENDPOINT {
-                let req = decode_have(&body).map_err(|e| e.to_string())?;
-                let refs: Vec<&[u8]> = req.prefixes.iter().map(|p| p.as_slice()).collect();
-                let authorized = match &peer.token {
-                    None => true,
-                    Some(t) => req.token_id == t.id() && t.verify_have(format!("link-{link}").as_bytes(), &refs, &req.proof),
-                };
-                let bits: Vec<bool> = req
-                    .prefixes
+                let items = decode_have(&body).map_err(|e| e.to_string())?;
+                let bits: Vec<bool> = items
                     .iter()
-                    .map(|p| authorized && peer.chunks.keys().any(|c| &c.as_bytes()[..8] == p.as_slice()))
+                    .map(|(p, proof)| {
+                        peer.chunks.keys().any(|c| {
+                            &c.as_bytes()[..8] == p.as_slice()
+                                && match &peer.tokens {
+                                    None => true,
+                                    Some(t) => t.get(c).is_some_and(|t| t.verify_have(&nonce, p, proof)),
+                                }
+                        })
+                    })
                     .collect();
                 return Ok(encode_bitmap(&bits));
             }
             let req = decode_request(&body).map_err(|e| e.to_string())?;
-            let authorized = match &peer.token {
-                None => true,
-                Some(t) => req.token_id == t.id() && t.verify(format!("link-{link}").as_bytes(), &req.cids, &req.proof),
-            };
-            if !authorized {
-                return Ok(encode_response(&vec![None; req.cids.len()]));
-            }
-            let items: Vec<Option<Vec<u8>>> = req.cids
+            let items: Vec<Option<Vec<u8>>> = req
                 .iter()
-                .map(|c| {
-                    peer.chunks.get(c).cloned().map(|mut ct| {
+                .map(|(c, proof)| {
+                    let ok = match &peer.tokens {
+                        None => true,
+                        Some(t) => t.get(c).is_some_and(|t| t.verify_get(&nonce, c, proof)),
+                    };
+                    peer.chunks.get(c).filter(|_| ok).cloned().map(|mut ct| {
                         if peer.behaviour == Behaviour::Corrupt {
                             ct[20] ^= 1;
                         }
@@ -130,8 +130,16 @@ fn file(len: usize) -> (Vec<u8>, FileRef, MemStore) {
     (data, f, store)
 }
 
+/// The access tokens an owner registers for every blob of a file.
+fn tokens_for(data: &[u8]) -> HashMap<Cid, ChunkToken> {
+    let mut scratch = MemStore::default();
+    let (_, blobs) =
+        manifest::write_tracked(&mut scratch, &ConvergenceSecret::personal([7; 32]), data, Default::default()).unwrap();
+    blobs.into_iter().map(|(c, s)| (c, ChunkToken::for_seed(&s))).collect()
+}
+
 fn peer(chunks: HashMap<Cid, Vec<u8>>, behaviour: Behaviour, delay_ms: u64) -> Peer {
-    Peer { chunks, behaviour, delay: Duration::from_millis(delay_ms), requests: AtomicUsize::new(0), token: None }
+    Peer { chunks, behaviour, delay: Duration::from_millis(delay_ms), requests: AtomicUsize::new(0), tokens: None }
 }
 
 fn opts() -> FetchOpts {
@@ -223,26 +231,44 @@ async fn local_cache_is_used_first_and_filled() {
 #[tokio::test]
 async fn peers_serve_only_with_a_valid_proof() {
     let (data, f, store) = file(300_000);
-    let right = ServeToken::for_file(&f);
-    let wrong = ServeToken::for_file(&FileRef { seed: retifs_core::Seed([0xEE; 32]), ..f });
-
     let mut strict = peer(store.0.clone(), Behaviour::Good, 1);
-    strict.token = Some(right);
+    strict.tokens = Some(tokens_for(&data));
     let net = MemTransport(Arc::new(vec![strict]));
     let (out, _) = fetch_file(&net, &[0], &f, opts(), &mut NoCache).await.unwrap();
-    assert_eq!(out, data, "the read-cap holder proves possession and is served");
+    assert_eq!(out, data, "the read-cap holder proves each chunk and is served");
 
-    let mut other = peer(store.0, Behaviour::Good, 1);
-    other.token = Some(wrong);
-    let net = MemTransport(Arc::new(vec![other]));
-    let err = fetch_file(&net, &[0], &f, opts(), &mut NoCache).await.unwrap_err();
-    assert!(matches!(err, FetchError::Unavailable { .. }), "a node serving another file's token looks like it has nothing: {err}");
+    // A forged read-cap (right root CID, wrong seed) yields wrong per-chunk proofs.
+    let mut strict = peer(store.0, Behaviour::Good, 1);
+    strict.tokens = Some(tokens_for(&data));
+    let net = MemTransport(Arc::new(vec![strict]));
+    let forged = FileRef { seed: retifs_core::Seed([0xEE; 32]), ..f };
+    let err = fetch_file(&net, &[0], &forged, opts(), &mut NoCache).await.unwrap_err();
+    assert!(matches!(err, FetchError::Unavailable { .. }), "without the seed, a node looks like it has nothing: {err}");
+}
+
+#[tokio::test]
+async fn padding_is_fetched_and_stripped() {
+    let (data, f, store) = file(1_100_000);
+    let net = MemTransport(Arc::new(vec![peer(store.0.clone(), Behaviour::Good, 1)]));
+    let (out, stats) = fetch_file(&net, &[0], &f, opts(), &mut NoCache).await.unwrap();
+    assert_eq!(out, data, "exactly the file, no padding bytes");
+    let data_blobs = store.0.values().filter(|c| c.len() == 16_384).count();
+    assert_eq!(stats.chunks, data_blobs, "padding chunks were requested like real ones");
+}
+
+#[tokio::test]
+async fn one_chunk_per_request_works() {
+    let (data, f, store) = file(400_000);
+    let net = MemTransport(Arc::new(vec![peer(store.0, Behaviour::Good, 1)]));
+    let (out, stats) = fetch_file(&net, &[0], &f, FetchOpts { batch: 1, ..opts() }, &mut NoCache).await.unwrap();
+    assert_eq!(out, data);
+    assert_eq!(stats.requests, stats.chunks + 1, "one request per blob: every chunk plus the root node");
 }
 
 /// The (CID, seed) of every data chunk of a small file (its root is a leaf).
 fn leaves(f: &FileRef, store: &MemStore) -> Vec<(Cid, retifs_core::Seed)> {
     let root = retifs_core::open(&f.root, &f.seed, &store.0[&f.root]).unwrap();
-    let node = retifs_core::manifest::decode_node(&root, f.size).unwrap();
+    let node = retifs_core::manifest::decode_root(&root, f.size).unwrap();
     assert!(node.leaf);
     node.entries.iter().map(|e| (e.cid, e.seed)).collect()
 }
@@ -258,16 +284,15 @@ async fn seeking_rounds_fill_gaps_from_whichever_peer_has_them() {
     };
     let mut p0 = peer(half(0..n / 2), Behaviour::Good, 1);
     let mut p1 = peer(half(n / 2..n), Behaviour::Good, 1);
-    p0.token = Some(ServeToken::for_file(&f));
-    p1.token = Some(ServeToken::for_file(&f));
+    p0.tokens = Some(tokens_for(&data));
+    p1.tokens = Some(tokens_for(&data));
     let net = MemTransport(Arc::new(vec![p0, p1]));
-    let token = ServeToken::for_file(&f);
     let t = Duration::from_secs(5);
 
-    let r0 = seek_round(&net, 0, &token, &want, t).await.unwrap();
+    let r0 = seek_round(&net, 0, &want, false, t).await.unwrap();
     assert_eq!((r0.held, r0.got.len()), (n / 2, n / 2));
     let still: Vec<_> = want.iter().enumerate().filter(|(i, _)| !r0.got.iter().any(|g| g.0 == *i)).map(|(_, w)| *w).collect();
-    let r1 = seek_round(&net, 1, &token, &still, t).await.unwrap();
+    let r1 = seek_round(&net, 1, &still, true, t).await.unwrap(); // one item per request
     assert_eq!(r1.got.len(), n - n / 2, "the second peer fills the rest");
 
     // Reassemble from both rounds and compare.
@@ -279,18 +304,19 @@ async fn seeking_rounds_fill_gaps_from_whichever_peer_has_them() {
         by_cid.insert(still[*i].0, pt.clone());
     }
     let joined: Vec<u8> = want.iter().flat_map(|(c, _)| by_cid[c].clone()).collect();
-    assert_eq!(joined, data);
+    assert_eq!(&joined[..data.len()], &data[..], "data, then padding");
 }
 
 #[tokio::test]
 async fn have_reveals_nothing_without_the_read_cap() {
-    let (_, f, store) = file(300_000);
+    let (data, f, store) = file(300_000);
     let want = leaves(&f, &store);
     let mut p = peer(store.0.clone(), Behaviour::Good, 1);
-    p.token = Some(ServeToken::for_file(&f));
+    p.tokens = Some(tokens_for(&data));
     let net = MemTransport(Arc::new(vec![p]));
-    let stranger = ServeToken::for_file(&FileRef { seed: retifs_core::Seed([0x42; 32]), ..f });
-    let r = seek_round(&net, 0, &stranger, &want, Duration::from_secs(5)).await.unwrap();
+    // A prober knows the CIDs but not the seeds.
+    let probe: Vec<_> = want.iter().map(|(c, _)| (*c, retifs_core::Seed([0x42; 32]))).collect();
+    let r = seek_round(&net, 0, &probe, false, Duration::from_secs(5)).await.unwrap();
     assert_eq!((r.held, r.got.len()), (0, 0), "a prober learns nothing from have or get");
 }
 

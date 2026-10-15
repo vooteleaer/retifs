@@ -126,21 +126,26 @@ fn files_roundtrip_through_the_slab_store() {
 }
 
 #[test]
-fn serving_index_is_per_token_and_publish_is_separate() {
-    use retifs_core::{access::PUBLIC_ID, ServeToken};
+fn serving_index_is_per_chunk_and_publish_is_separate() {
+    use retifs_core::{manifest::write_tracked, ChunkToken};
     let dir = tempfile::tempdir().unwrap();
     let st = SlabStore::open(dir.path()).unwrap();
-    let file = manifest::write(&mut retifs_store::PinnedTier(&st), &ConvergenceSecret::personal([1; 32]), &noise(50_000, 5)).unwrap();
-    let token = ServeToken::for_file(&file);
-    let other = ServeToken::for_file(&retifs_core::FileRef { seed: retifs_core::Seed([9; 32]), ..file });
+    let (file, blobs) = write_tracked(
+        &mut retifs_store::PinnedTier(&st),
+        &ConvergenceSecret::personal([1; 32]),
+        &noise(50_000, 5),
+        Default::default(),
+    )
+    .unwrap();
 
-    assert!(!st.is_served(&token.id(), &file.root).unwrap(), "nothing is served until registered");
-    st.register_serving(&token, &[file.root]).unwrap();
-    assert!(st.is_served(&token.id(), &file.root).unwrap());
-    assert!(!st.is_served(&other.id(), &file.root).unwrap(), "another token doesn't open it");
-    assert!(!st.is_served(&PUBLIC_ID, &file.root).unwrap(), "not public unless published");
-    assert_eq!(st.serve_token(&token.id()).unwrap(), Some(token.clone()));
+    assert_eq!(st.serving_token(&file.root).unwrap(), None, "nothing is served until registered");
+    let tokens: Vec<_> = blobs.iter().map(|(c, s)| (*c, ChunkToken::for_seed(s))).collect();
+    st.register_serving(&tokens).unwrap();
+    assert_eq!(st.serving_token(&file.root).unwrap(), Some(ChunkToken::for_seed(&file.seed)));
+    assert!(!st.is_published(&file.root).unwrap(), "not public unless published");
+    let hit = st.served_by_prefix(&file.root.as_bytes()[..8]).unwrap().unwrap();
+    assert_eq!((hit.0, hit.2), (file.root, false));
 
     st.publish(&[file.root]).unwrap();
-    assert!(st.is_served(&PUBLIC_ID, &file.root).unwrap());
+    assert!(st.is_published(&file.root).unwrap());
 }
