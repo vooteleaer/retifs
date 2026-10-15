@@ -1,6 +1,6 @@
 # Prns: path requests for known routes never settle
 
-> Found 2026-10-15 while testing automatic placement ([ADR-0014](../adr/0014-placement-follows-need.md)). Workaround in `retifs-net` (`PrnsTransport::ensure_path`); upstream issue drafted below, **not posted yet**.
+> Found 2026-10-15 while testing automatic placement ([ADR-0014](../adr/0014-placement-follows-need.md)). Workaround in `retifs-net` (`PrnsTransport::ensure_path`); posted 2026-10-15 as [KenAKAFrosty/Prns#287](https://github.com/KenAKAFrosty/Prns/issues/287); the text is below.
 
 ## Symptom
 Between daemons attached to one local `prnsd`, `ensure_path` regularly failed with "no path within 20s", even though the peer was up and had announced. In placement runs, one of three peers was unreachable in almost every run; seeking and lease pulls lost 15–150 s to it.
@@ -25,7 +25,7 @@ Python RNS doesn't hit this: `Transport.request_path` doesn't settle anything, a
 ## Workaround (retifs)
 `ensure_path` checks the route table first (`NodeIntrospection::route`) and requests a path only when there is none, like `has_path` in Python. If a link over a known route fails, `retifsd` requests a fresh path and retries once. The four-daemon placement test went from one unreachable peer per run to none; placing 2 MB on the nearest nodes took 13.5 s instead of 44.5 s, and a reader's seek plus placement 7 s instead of 56 s.
 
-## Draft upstream issue
+## Upstream issue (as posted)
 
 **Title:** `request_path` never settles for a destination whose route is already known (0.3.7)
 
