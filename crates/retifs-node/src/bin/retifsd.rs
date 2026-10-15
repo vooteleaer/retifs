@@ -220,14 +220,13 @@ impl RequestEndpoint<Arc<Shared>> for PutEndpoint {
 }
 
 impl Shared {
-    /// Default: what's already held for others plus what still fits, i.e.
-    /// within both the store limit and the free-space reserve, so a lease is
-    /// never accepted that the disk can't take.
+    /// What's already held for others plus what still fits (within the store
+    /// limit and above the free-space reserve), capped by `--hold-for-others`:
+    /// a lease the disk can't take is never accepted.
     fn hold_limit(&self) -> u64 {
-        self.hold_limit.unwrap_or_else(|| {
-            let (Ok(u), Ok(l)) = (self.store.usage(), self.store.limits()) else { return 0 };
-            u.leased + l.room().min(l.hard_max.saturating_sub(u.hard()))
-        })
+        let (Ok(u), Ok(l)) = (self.store.usage(), self.store.limits()) else { return 0 };
+        let fits = u.leased + l.room().min(l.hard_max.saturating_sub(u.hard()));
+        self.hold_limit.map_or(fits, |cap| cap.min(fits))
     }
 }
 
@@ -1037,6 +1036,11 @@ async fn upkeep_one(d: &Daemon, o: &mut OwnLease, proved: &mut HashMap<LeaseId, 
             ReceiptReply::Progress { held, total } => {
                 let sent = push(d, link, &o.lease).await?;
                 println!("lease {}: <{}> had {held}/{total}, pushed {sent}", hex(&id), hex(&o.holder));
+                if sent == 0 {
+                    // It answers but takes nothing (full, or broken): a failed contact,
+                    // so its loss estimate rises and placement looks elsewhere.
+                    return Err("holder accepted none of the pushed chunks".into());
+                }
             }
             ReceiptReply::Unknown => {
                 println!("lease {}: <{}> lost the lease, offering it again", hex(&id), hex(&o.holder));
