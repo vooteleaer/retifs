@@ -979,14 +979,23 @@ async fn push(d: &Daemon, link: LinkId, l: &Lease) -> Result<usize, String> {
         let bits = decode_bitmap(&d.ask(link, HAVE_ENDPOINT, encode_have(&items)).await?, batch.len()).map_err(|e| e.to_string())?;
         missing.extend(batch.iter().zip(bits).filter(|(_, held)| !held).map(|((cid, _), _)| *cid));
     }
-    let mut sent = 0;
-    for batch in missing.chunks(MAX_PUT) {
-        let cts: Vec<Vec<u8>> = batch.iter().filter_map(|c| d.store.fetch(c).ok().flatten()).collect();
-        if cts.is_empty() {
-            continue;
+    // Start with full batches; on a timeout (slow or long paths), halve the
+    // batch and resend the same chunks, down to one chunk per request.
+    let (mut sent, mut at, mut batch) = (0, 0, MAX_PUT);
+    while at < missing.len() {
+        let end = (at + batch).min(missing.len());
+        let cts: Vec<Vec<u8>> = missing[at..end].iter().filter_map(|c| d.store.fetch(c).ok().flatten()).collect();
+        if !cts.is_empty() {
+            match d.ask(link, PUT_ENDPOINT, encode_put(&l.id, &cts)).await {
+                Ok(reply) => sent += decode_bitmap(&reply, cts.len()).map_err(|e| e.to_string())?.iter().filter(|&&b| b).count(),
+                Err(e) if batch > 1 && (e.contains("Timeout") || e.contains("timed out")) => {
+                    batch /= 2;
+                    continue;
+                }
+                Err(e) => return Err(e),
+            }
         }
-        let bits = decode_bitmap(&d.ask(link, PUT_ENDPOINT, encode_put(&l.id, &cts)).await?, cts.len()).map_err(|e| e.to_string())?;
-        sent += bits.iter().filter(|&&b| b).count();
+        at = end;
     }
     Ok(sent)
 }
