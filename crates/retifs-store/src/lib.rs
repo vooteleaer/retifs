@@ -31,8 +31,10 @@ use std::{
 };
 
 mod leases;
+mod placement;
 mod wants;
 pub use leases::{Accept, BlindWants, HeldLease, OwnLease, ProofState, LEASE_CHUNK_ESTIMATE};
+pub use placement::{HolderStats, StorageNode};
 pub use wants::{Hint, PeerId, Want};
 
 use redb::{Database, ReadableTable, ReadableTableMetadata, TableDefinition};
@@ -226,6 +228,7 @@ impl SlabStore {
         w.open_table(ACCESS)?;
         wants::open_tables(&w)?;
         leases::open_tables(&w)?;
+        placement::open_tables(&w)?;
         w.commit()?;
         Ok(SlabStore {
             root,

@@ -73,3 +73,14 @@ See the [threat model](../04-threat-model.md).
   - Readers sign and renew leases too, so every daemon runs lease upkeep.
   - Ranking needs link-rate estimates per path, not just hops.
   - Popular data may end up with many copies (one set per site that uses it). That is the intended trade.
+
+## Implementation status (2026-10-15)
+- **Every node holds for others by default,** up to its store limit (`--hold-for-others SIZE` caps it, `0` opts out).
+- **Storage nodes are recognised without announce data:** Prns passes announce events with hops but not app data, so `retifsd` looks up the announced identity and checks that it hashes to `retifs.node`. The offer in the announce (capacity, term) waits for app data access; a full node answers a lease with "no room" instead, and is avoided for an hour.
+- **Need:** a file is needed by the node that wrote it and by every node whose want for it completed.
+- **Dynamic copy count:** each copy has a loss estimate. The local copy counts 0.1 if pinned, 0.5 if only cached; a holder counts `(failures + 1) / (contacts + 10)` from its upkeep record (new holders 0.1; 100 good contacts bring it under 0.01), and 1 once its receipt ran out or a storage proof failed. Placement adds the nearest storage nodes (fewest hops, then most recently heard) until the product is below `--loss-target` (default 0.001): two new holders at first, fewer as they prove reliable. An unreachable holder only worsens its record (lazy repair); its copy counts again when it answers.
+- **Push:** after a lease is accepted, the leaser asks `have` and sends only missing chunks with `/retifs/put` (16 per request). Placement leases name no source, so holders don't learn where data came from; a holder that reports progress short of complete gets the rest pushed during upkeep.
+- **`have` answers only for chunks present:** leased chunks are in the serving index before they arrive, so a bare token match isn't enough.
+- **Live, four daemons on one machine:** A wrote 2 MB and, with no configuration, leased it to the two nearest nodes and pushed 148 chunks to each; the estimate went 0.1 → 0.01 → 0.001 and placement stopped; both holders returned receipts and passed proofs. D then sought the file with its read-cap; once complete it placed copies near itself, and its lease to a node already holding A's copy pushed **0 of 148 chunks**. An unreachable node (flaky Prns path requests) was skipped and avoided for 10 minutes.
+- **Not yet:** link cost beyond hops (rates, LoRa), the slow-link cost check, the offer in announces, ending need (`forget`), bundling control traffic per holder, stamps.
+

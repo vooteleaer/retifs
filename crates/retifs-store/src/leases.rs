@@ -236,6 +236,13 @@ impl SlabStore {
         Ok(true)
     }
 
+    /// Whether lease `id` lists `cid` (pushed chunks must belong to the lease they come with).
+    pub fn lease_covers(&self, id: &LeaseId, cid: &Cid) -> Result<bool, StoreError> {
+        let r = self.db.begin_read()?;
+        let key = [cid.as_bytes().as_slice(), id].concat();
+        Ok(r.open_table(LEASE_CHUNKS)?.get(key.as_slice())?.is_some())
+    }
+
     pub fn is_leased(&self, cid: &Cid) -> Result<bool, StoreError> {
         let r = self.db.begin_read()?;
         let t = r.open_table(LEASE_CHUNKS)?;

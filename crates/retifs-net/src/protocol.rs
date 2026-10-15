@@ -14,6 +14,8 @@
 //! receipt response = 0x00 ‖ receipt (185) | 0x01 ‖ held (u16) ‖ total (u16) | 0x02 (unknown lease)
 //! prove request    = lease_id (16) ‖ nonce (16) ‖ index (u16) × n      1..=MAX_PROVE indices
 //! prove response   = (0x00 ‖ answer (16) | 0x01) × n
+//! put request      = lease_id (16) ‖ (u32_be len ‖ ciphertext) × n     1..=MAX_PUT chunks of that lease
+//! put response     = bitmap (n bits): stored
 //! ```
 //! Lease formats: retifs_core::lease (decision 6).
 //! Every item carries its own proof of access, derived from that chunk's seed
@@ -47,6 +49,9 @@ pub const LEASE_ENDPOINT: &str = "/retifs/lease";
 pub const RECEIPT_ENDPOINT: &str = "/retifs/receipt";
 pub const PROVE_ENDPOINT: &str = "/retifs/prove";
 pub const MAX_PROVE: usize = 16;
+pub const PUT_ENDPOINT: &str = "/retifs/put";
+/// 16 chunks of up to 16 KiB: one resource of about 256 KiB.
+pub const MAX_PUT: usize = 16;
 
 const OFFER: u8 = 1;
 const RENEW: u8 = 2;
@@ -307,6 +312,33 @@ pub fn decode_prove_reply(mut bytes: &[u8], expected: usize) -> Result<Vec<Optio
     Ok(out)
 }
 
+pub fn encode_put(id: &LeaseId, chunks: &[Vec<u8>]) -> Vec<u8> {
+    let mut out = id.to_vec();
+    for ct in chunks {
+        out.extend_from_slice(&(ct.len() as u32).to_be_bytes());
+        out.extend_from_slice(ct);
+    }
+    out
+}
+
+pub fn decode_put(bytes: &[u8]) -> Result<(LeaseId, Vec<Vec<u8>>), ProtocolError> {
+    let (id, mut rest) = bytes.split_first_chunk::<16>().ok_or(ProtocolError("put needs a lease id"))?;
+    let mut chunks = Vec::new();
+    while !rest.is_empty() {
+        let (len, tail) = rest.split_first_chunk::<4>().ok_or(ProtocolError("truncated length"))?;
+        let len = u32::from_be_bytes(*len) as usize;
+        if tail.len() < len || chunks.len() == MAX_PUT {
+            return Err(ProtocolError("put needs 1..=16 whole chunks"));
+        }
+        chunks.push(tail[..len].to_vec());
+        rest = &tail[len..];
+    }
+    if chunks.is_empty() {
+        return Err(ProtocolError("put needs 1..=16 whole chunks"));
+    }
+    Ok((*id, chunks))
+}
+
 #[cfg(test)]
 mod tests {
     #[test]
@@ -333,6 +365,11 @@ mod tests {
         assert_eq!((id, nonce, idx), ([1; 16], [2; 16], vec![0, 7, 65535]));
         let answers = vec![Some([9; PROVE_LEN]), None];
         assert_eq!(decode_prove_reply(&encode_prove_reply(&answers), 2).unwrap(), answers);
+
+        let chunks = vec![vec![1u8; 1024], vec![2u8; 4096]];
+        assert_eq!(decode_put(&encode_put(&[7; 16], &chunks)).unwrap(), ([7; 16], chunks));
+        assert!(decode_put(&[7; 16]).is_err(), "no chunks");
+        assert!(decode_put(&encode_put(&[7; 16], &vec![vec![0u8; 8]; MAX_PUT + 1])).is_err());
     }
 
     use super::*;

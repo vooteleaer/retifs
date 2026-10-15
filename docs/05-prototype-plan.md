@@ -33,7 +33,8 @@ Prototypes are throwaway. They're for learning, not for locking in the format. T
 - [ ] Holder map: per-chunk/per-group holders from receipts, `have` answers, hints and announces; source ranking, load spreading, failover, measured copy counts.
 - [ ] Holder hints in read-caps; store generation counter in announces.
 - [x] Leases, renewals, receipts, storage proofs; `retifsd --hold-for-others`, `retifs replicate`; vectors verified against RNS (decision 6, [ADR-0010](adr/0010-continuous-seeking.md)).
-- [ ] Placement follows need ([ADR-0014](adr/0014-placement-follows-need.md)): `retifs.store` announces on by default and a storage-node list (hops, link type); push after lease with `have` first; automatic leases to the nearest nodes by owners and readers; holder reliability record; lazy repair; cost check for slow links.
+- [x] Placement follows need, first slice ([ADR-0014](adr/0014-placement-follows-need.md)): every node holds for others by default; storage nodes recognised from announces (hops); push after lease with `have` first; automatic leases to the nearest nodes by writers and readers until a loss target is met; holder reliability record; lazy repair.
+- [ ] Placement, continued: link cost beyond hops and the slow-link cost check, offer in announces (needs announce app data from Prns), ending need, per-holder bundling, stamps.
 - [ ] Own-node pool on a LAN, replication target, repair, storage proofs ([ADR-0011](adr/0011-redundancy-by-default.md)).
 - [ ] Volunteer storage offers (`retifs.store`).
 - [ ] Diffuse mode: anonymous push seeding, epidemic re-replication with jitter, cover holdings ([ADR-0011](adr/0011-redundancy-by-default.md)).

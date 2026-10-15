@@ -1,12 +1,15 @@
 //! retifsd (prototype): the retifs shared instance.
 //!
 //!     retifsd [--store DIR] [--max-store SIZE] [--min-free SIZE] [--cache-max SIZE]
-//!             [--private-requests] [--hold-for-others SIZE] [--lease-term DURATION]
+//!             [--private-requests] [--hold-for-others SIZE] [--lease-term DURATION] [--loss-target P]
 //!             [--public] [--put FILE]...
 //!
 //! SIZE: bytes, or with a K/M/G/T suffix (powers of 1024). Defaults (ADR-0012):
 //! store limit 50 % of the volume, reserve max(10 %, 5 GiB), cache 20 % of the limit.
-//! `--hold-for-others`: accept leases from others up to SIZE (default 0: refuse).
+//! `--hold-for-others`: hold leased data for others up to SIZE (default: up to the
+//! store limit; 0 opts out). Every node is a storage node by default (ADR-0014).
+//! `--loss-target`: keep adding nearby holders for each needed file until the
+//! estimated chance of losing every copy is below P (default 0.001).
 //! `--lease-term`: how long leases this node gives out run before renewal is
 //! due (seconds, or with an s/m/h/d suffix; default 30d). They're renewed at half-term.
 //!
@@ -32,6 +35,7 @@ use retifs_core::{
     manifest::{self, decode_node, decode_root, NodeEntry},
     open, ChunkToken, Cid, ConvergenceSecret, FileRef,
 };
+use personal_rns::node_introspection::DestinationIdentityQuery;
 use personal_rns::routing::links::LinkId;
 use retifs_net::{
     fetch::{fetch_file, FetchOpts},
@@ -40,7 +44,8 @@ use retifs_net::{
         decode_have, decode_lease_request, decode_lease_status, decode_prove, decode_prove_reply, decode_receipt_reply,
         decode_request, encode_bitmap, encode_lease_request, encode_prove, encode_prove_reply, encode_receipt_reply,
         encode_response, LeaseRequest, LeaseStatus, ReceiptReply, GET_ENDPOINT, HAVE_ENDPOINT, LEASE_ENDPOINT,
-        PROVE_ENDPOINT, RECEIPT_ENDPOINT,
+        PROVE_ENDPOINT, RECEIPT_ENDPOINT, decode_bitmap, decode_put, encode_have, encode_put, HAVE_PREFIX, MAX_HAVE,
+        MAX_PUT, PUT_ENDPOINT,
     },
     seek::{pull_round, seek_round},
     transport::{PrnsTransport, Transport},
@@ -55,8 +60,9 @@ struct Shared {
     store: Arc<SlabStore>,
     /// The node's RNS identity secret (X25519 ‖ Ed25519): signs receipts.
     identity: [u8; 64],
-    /// Bytes of leased chunks this node keeps for others (0: refuse leases).
-    hold_limit: u64,
+    /// Bytes of leased chunks this node keeps for others (0: refuse leases;
+    /// None: up to the store limit, the default, ADR-0014).
+    hold_limit: Option<u64>,
     /// Wakes the lease puller (a lease was accepted).
     pull_wake: Notify,
 }
@@ -108,7 +114,11 @@ impl RequestEndpoint<Arc<Shared>> for Have {
         let bits: Vec<bool> = items
             .iter()
             .map(|(prefix, proof)| match store.served_by_prefix(prefix) {
-                Ok(Some((_, token, published))) => published || token.is_some_and(|t| t.verify_have(&nonce, prefix, proof)),
+                // Leased chunks are in the serving index before they arrive: answer only for what's here.
+                Ok(Some((cid, token, published))) => {
+                    (published || token.is_some_and(|t| t.verify_have(&nonce, prefix, proof)))
+                        && store.tier(&cid).ok().flatten().is_some()
+                }
                 _ => false,
             })
             .collect();
@@ -128,7 +138,7 @@ impl RequestEndpoint<Arc<Shared>> for LeaseEndpoint {
         let status = match decode_lease_request(context.data) {
             Err(_) => LeaseStatus::Invalid,
             Ok(LeaseRequest::Offer { lease, .. }) if lease.expires <= now_s() => LeaseStatus::Invalid,
-            Ok(LeaseRequest::Offer { lease, sources }) => match s.store.accept_lease(&lease, &sources, s.hold_limit) {
+            Ok(LeaseRequest::Offer { lease, sources }) => match s.store.accept_lease(&lease, &sources, s.hold_limit()) {
                 Ok(Accept::Accepted) => {
                     println!("lease {}: keeping {} chunk(s) for someone until {}", hex(&lease.id), lease.entries.len(), lease.expires);
                     s.pull_wake.notify_one();
@@ -186,14 +196,44 @@ impl RequestEndpoint<Arc<Shared>> for ProveEndpoint {
     }
 }
 
+/// `/retifs/put`: chunks pushed by whoever holds a lease here (ADR-0014). Only
+/// chunks that lease lists are stored; the pusher stays anonymous.
+struct PutEndpoint;
+impl RequestEndpoint<Arc<Shared>> for PutEndpoint {
+    const ENDPOINT_ID: &'static str = PUT_ENDPOINT;
+    const POLICY: RequestEndpointPolicy = RequestEndpointPolicy::AllowAll;
+
+    async fn handle(mut context: RequestContext<'_, Arc<Shared>>) -> Result<(), Decline> {
+        let Ok((id, chunks)) = decode_put(context.data) else {
+            return Err(Decline::Ignore);
+        };
+        let store = &context.state.store;
+        let stored: Vec<bool> = chunks
+            .iter()
+            .map(|ct| {
+                let cid = Cid::of(ct);
+                store.lease_covers(&id, &cid).unwrap_or(false) && store.lease_arrived(&cid, ct).unwrap_or(false)
+            })
+            .collect();
+        context.respond(encode_bitmap(&stored))
+    }
+}
+
+impl Shared {
+    fn hold_limit(&self) -> u64 {
+        self.hold_limit.unwrap_or_else(|| self.store.limits().map(|l| l.hard_max).unwrap_or(0))
+    }
+}
+
 struct Args {
     store: PathBuf,
     public: bool,
     put: Vec<PathBuf>,
     budget: retifs_store::Budget,
     private_requests: bool,
-    hold_limit: u64,
+    hold_limit: Option<u64>,
     lease_term: u64,
+    loss_target: f64,
 }
 
 fn duration_secs(s: &str) -> u64 {
@@ -228,8 +268,9 @@ fn args() -> Args {
         put: Vec::new(),
         budget: Default::default(),
         private_requests: false,
-        hold_limit: 0,
+        hold_limit: None,
         lease_term: 30 * 86_400,
+        loss_target: 1e-3,
     };
     let mut it = std::env::args().skip(1);
     while let Some(arg) = it.next() {
@@ -241,12 +282,13 @@ fn args() -> Args {
             "--min-free" => a.budget.min_free = Some(size(&it.next().expect("--min-free SIZE"))),
             "--cache-max" => a.budget.cache_max = Some(size(&it.next().expect("--cache-max SIZE"))),
             "--private-requests" => a.private_requests = true,
-            "--hold-for-others" => a.hold_limit = size(&it.next().expect("--hold-for-others SIZE")),
+            "--hold-for-others" => a.hold_limit = Some(size(&it.next().expect("--hold-for-others SIZE"))),
+            "--loss-target" => a.loss_target = it.next().and_then(|v| v.parse().ok()).expect("--loss-target P (e.g. 0.001)"),
             "--lease-term" => a.lease_term = duration_secs(&it.next().expect("--lease-term DURATION")).max(60),
             "-h" | "--help" => {
                 println!(
                     "retifsd [--store DIR] [--max-store SIZE] [--min-free SIZE] [--cache-max SIZE] [--private-requests]
-                             [--hold-for-others SIZE] [--lease-term DURATION] [--public] [--put FILE]..."
+                             [--hold-for-others SIZE] [--lease-term DURATION] [--loss-target P] [--public] [--put FILE]..."
                 );
                 std::process::exit(0);
             }
@@ -304,6 +346,7 @@ fn main() {
         let data = std::fs::read(path).unwrap_or_else(|e| panic!("{}: {e}", path.display()));
         let record = std::path::absolute(path).unwrap_or_else(|_| path.clone()).to_string_lossy().into_owned();
         let file = store_file(&store, &data, args.public, false, Some(&record), manifest::WriteOpts::default()).expect("store file");
+        store.need_file(&file).expect("record need");
         println!("put {}  {}", path.display(), file);
     }
     let identity = load_or_create_identity(&args.store.join("node_identity")).expect("node identity");
@@ -327,8 +370,9 @@ struct Daemon {
     /// Derives per-lease signing keys (prototype: one namespace per store).
     namespace_key: [u8; 32],
     lease_term: u64,
-    /// Wakes lease upkeep (receipts, renewals, proofs) after new leases.
+    /// Wakes lease upkeep (receipts, renewals, proofs, placement) after new leases or needs.
     upkeep_wake: Notify,
+    loss_target: f64,
 }
 
 impl Daemon {
@@ -377,16 +421,17 @@ async fn serve(store: Arc<SlabStore>, identity: node::IdentitySecret, endpoint: 
         hold_limit: args.hold_limit,
         pull_wake: Notify::new(),
     });
-    let (heard_tx, heard_rx) = mpsc::unbounded_channel::<PeerId>();
+    let (heard_tx, mut heard_rx) = mpsc::unbounded_channel::<(PeerId, u8)>();
+    let (seek_tx, seek_rx) = mpsc::unbounded_channel::<PeerId>();
     let node = PrnsNode::new(PrnsNodeRecipe {
         transport_identity: None,
         pre_configured_destinations: [dest],
         app_state: shared.clone(),
         storage: GrowableHeap,
-        request_endpoints: request_endpoints![Get, Have, LeaseEndpoint, ReceiptEndpoint, ProveEndpoint],
+        request_endpoints: request_endpoints![Get, Have, LeaseEndpoint, ReceiptEndpoint, ProveEndpoint, PutEndpoint],
         on_event: move |event, _state| {
-            if let PrnsEvent::Diagnostic(Diagnostic::AnnounceHeard { destination, .. }) = event {
-                let _ = heard_tx.send(*destination.as_bytes());
+            if let PrnsEvent::Diagnostic(Diagnostic::AnnounceHeard { destination, hops, .. }) = event {
+                let _ = heard_tx.send((*destination.as_bytes(), hops));
             }
         },
         interfaces: ManuallyAttached,
@@ -405,19 +450,48 @@ async fn serve(store: Arc<SlabStore>, identity: node::IdentitySecret, endpoint: 
         namespace_key: namespace_key(&store),
         lease_term: args.lease_term,
         upkeep_wake: Notify::new(),
+        loss_target: args.loss_target,
     });
     println!("attached to shared instance {of}");
     println!("serving {} chunks as retifs.node <{}>", store.len().unwrap_or(0), daemon.node_hex);
     println!("local API at {endpoint}");
 
-    if args.hold_limit > 0 {
-        println!("holding up to {} bytes for others", args.hold_limit);
+    match args.hold_limit {
+        Some(0) => println!("not holding data for others"),
+        Some(n) => println!("holding up to {n} bytes for others"),
+        None => println!("holding data for others up to the store limit"),
     }
 
     tokio::spawn(local_api(endpoint, daemon.clone()));
     tokio::spawn(lease_puller(daemon.clone(), shared.clone()));
     tokio::spawn(lease_upkeep(daemon.clone()));
-    tokio::spawn(seeker(daemon, heard_rx));
+    let watcher = daemon.clone();
+    tokio::spawn(async move {
+        // Every retifs node is a storage node (ADR-0014). Prns doesn't pass
+        // announce app data on, so recognise retifs.node by its identity.
+        let mut not_retifs = std::collections::HashSet::new();
+        while let Some((peer, hops)) = heard_rx.recv().await {
+            let _ = seek_tx.send(peer);
+            if peer == watcher.node_id || not_retifs.contains(&peer) {
+                continue;
+            }
+            let dest = parse_destination(&hex(&peer)).expect("destination hash");
+            match watcher.transport.handle.destination_identity(DestinationIdentityQuery::Destination(dest)).await {
+                Some(id) if node_destination(id.public.as_bytes()) == peer => {
+                    let known = watcher.store.storage_nodes().map(|n| n.iter().any(|n| n.peer == peer)).unwrap_or(true);
+                    if watcher.store.heard_storage_node(&peer, hops, now_ms()).is_ok() && !known {
+                        println!("storage node <{}> heard, {hops} hop(s) away", hex(&peer));
+                        watcher.upkeep_wake.notify_one();
+                    }
+                }
+                Some(_) => {
+                    not_retifs.insert(peer);
+                }
+                None => {}
+            }
+        }
+    });
+    tokio::spawn(seeker(daemon, seek_rx));
 
     // Keep within the disk budget even when other programs fill the volume (ADR-0012).
     let budget_store = store.clone();
@@ -539,6 +613,8 @@ async fn handle(d: &Daemon, req: Request) -> Result<Response, String> {
             let file = tokio::task::spawn_blocking(move || store_file(&store, &data, public, publish, record.as_deref(), opts))
                 .await
                 .map_err(|e| e.to_string())??;
+            d.store.need_file(&file).map_err(|e| e.to_string())?;
+            d.upkeep_wake.notify_one();
             Ok(Response::Put { cap: file.to_string() })
         }
 
@@ -593,23 +669,11 @@ async fn handle(d: &Daemon, req: Request) -> Result<Response, String> {
             d.store.register_serving(&chunks).map_err(|e| e.to_string())?;
             for h in &to {
                 let peer = *parse_destination(h).ok_or_else(|| format!("bad node hash {h}"))?.as_bytes();
-                let link = d.link_to(&peer).await.map_err(|e| format!("{h}: {e}"))?;
-                for part in chunks.chunks(lease::MAX_CHUNKS) {
-                    let mut id = [0u8; lease::ID_LEN];
-                    getrandom::fill(&mut id).expect("OS entropy");
-                    let l = d.sign_lease(id, now_s() + d.lease_term, part.to_vec());
-                    let req = LeaseRequest::Offer { lease: l.clone(), sources: vec![d.node_id] };
-                    let reply = d.ask(link, LEASE_ENDPOINT, encode_lease_request(&req)).await;
-                    match reply.and_then(|r| decode_lease_status(&r).map_err(|e| e.to_string())) {
-                        Ok(LeaseStatus::Accepted) => d.store.record_own_lease(&l, &peer, &cap.root).map_err(|e| e.to_string())?,
-                        Ok(other) => return Err(format!("{h} refused the lease: {other:?}")),
-                        Err(e) => {
-                            d.drop_link(&peer);
-                            return Err(format!("{h}: {e}"));
-                        }
-                    }
+                // Also name this node as a source, so the holder can pull what a push missed.
+                match lease_to(d, &peer, &cap, &chunks, &[d.node_id]).await.map_err(|e| format!("{h}: {e}"))? {
+                    true => println!("replicate: leased {} chunk(s) of {} to <{h}>", chunks.len(), cap.root),
+                    false => return Err(format!("{h} refused the lease: NoRoom")),
                 }
-                println!("replicate: leased {} chunk(s) of {} to <{h}>", chunks.len(), cap.root);
             }
             d.upkeep_wake.notify_one();
             Ok(Response::Status(full_status(&d.store, &cap)))
@@ -771,15 +835,146 @@ async fn lease_upkeep(d: Arc<Daemon>) {
         }
         let Ok(leases) = d.store.own_leases() else { continue };
         for mut o in leases {
-            if let Err(e) = upkeep_one(&d, &mut o, &mut proved).await {
-                eprintln!("lease {} at <{}>: {e}", hex(&o.lease.id), hex(&o.holder));
-                d.drop_link(&o.holder);
+            match upkeep_one(&d, &mut o, &mut proved).await {
+                Ok(true) => {
+                    let _ = d.store.holder_result(&o.holder, o.proof != ProofState::Failed, now_ms());
+                }
+                Ok(false) => {}
+                Err(e) => {
+                    eprintln!("lease {} at <{}>: {e}", hex(&o.lease.id), hex(&o.holder));
+                    let _ = d.store.holder_result(&o.holder, false, now_ms());
+                    d.drop_link(&o.holder);
+                }
+            }
+        }
+        if let Ok(files) = d.store.needed_files() {
+            for f in files {
+                if let Err(e) = place(&d, &f).await {
+                    eprintln!("placement {}: {e}", f.root);
+                }
             }
         }
     }
 }
 
-async fn upkeep_one(d: &Daemon, o: &mut OwnLease, proved: &mut HashMap<LeaseId, Instant>) -> Result<(), String> {
+/// Estimated chance of losing every copy of `file` (ADR-0014): the local copy
+/// times each holder's loss estimate from its record. A holder whose receipt
+/// ran out counts as lost; one that is only unreachable just gets a worse
+/// record (lazy repair: it may come back with the data).
+fn loss_now(d: &Daemon, file: &FileRef) -> (f64, std::collections::BTreeSet<PeerId>) {
+    let pinned = d.store.tier(&file.root).ok().flatten().is_some_and(|f| f & tier::PINNED != 0);
+    let mut risk = if pinned { 0.1 } else { 0.5 };
+    let now = now_s();
+    let mut worst: std::collections::BTreeMap<PeerId, f64> = Default::default();
+    for o in d.store.own_leases().unwrap_or_default().into_iter().filter(|o| o.root == file.root) {
+        let lapsed = o.receipt_until > 0 && o.receipt_until < now;
+        let p = if lapsed || o.proof == ProofState::Failed {
+            1.0
+        } else {
+            d.store.holder_stats(&o.holder).map(|s| s.loss()).unwrap_or(1.0)
+        };
+        let w = worst.entry(o.holder).or_insert(0.0);
+        *w = w.max(p);
+    }
+    for p in worst.values() {
+        risk *= p;
+    }
+    (risk, worst.into_keys().collect())
+}
+
+/// Adds the nearest storage nodes as holders of `file` until the loss estimate
+/// is below the target. Data goes by push, so readers' copies (cache, never
+/// served) can be placed too, and holders don't learn who sent it.
+async fn place(d: &Daemon, file: &FileRef) -> Result<(), String> {
+    let (mut risk, holders) = loss_now(d, file);
+    if risk <= d.loss_target {
+        return Ok(());
+    }
+    let chunks = file_chunks(&d.store, file)?;
+    for n in d.store.storage_nodes().map_err(|e| e.to_string())? {
+        if risk <= d.loss_target {
+            break;
+        }
+        if n.peer == d.node_id || holders.contains(&n.peer) || n.avoid_until_ms > now_ms() {
+            continue;
+        }
+        match lease_to(d, &n.peer, file, &chunks, &[]).await {
+            Ok(true) => {
+                risk *= d.store.holder_stats(&n.peer).map(|s| s.loss()).unwrap_or(1.0);
+                println!("placement: {} kept at <{}> ({} hop(s)), loss estimate now {risk:.1e}", file.root, hex(&n.peer), n.hops);
+            }
+            Ok(false) => d.store.avoid_storage_node(&n.peer, now_ms() + 3_600_000).map_err(|e| e.to_string())?,
+            Err(e) => {
+                eprintln!("placement: <{}>: {e}", hex(&n.peer));
+                d.store.avoid_storage_node(&n.peer, now_ms() + 600_000).map_err(|e| e.to_string())?;
+            }
+        }
+    }
+    Ok(())
+}
+
+/// Offers `peer` leases over all of `chunks` and pushes what it lacks.
+/// Ok(false): it has no room.
+async fn lease_to(d: &Daemon, peer: &PeerId, file: &FileRef, chunks: &[(Cid, ChunkToken)], sources: &[PeerId]) -> Result<bool, String> {
+    let link = d.link_to(peer).await?;
+    for part in chunks.chunks(lease::MAX_CHUNKS) {
+        let mut id = [0u8; lease::ID_LEN];
+        getrandom::fill(&mut id).expect("OS entropy");
+        let l = d.sign_lease(id, now_s() + d.lease_term, part.to_vec());
+        let req = LeaseRequest::Offer { lease: l.clone(), sources: sources.to_vec() };
+        let reply = d.ask(link, LEASE_ENDPOINT, encode_lease_request(&req)).await;
+        match reply.and_then(|r| decode_lease_status(&r).map_err(|e| e.to_string())) {
+            Ok(LeaseStatus::Accepted) => {
+                d.store.record_own_lease(&l, peer, &file.root).map_err(|e| e.to_string())?;
+                match push(d, link, &l).await {
+                    Ok(sent) => println!("lease {}: pushed {sent} of {} chunk(s) to <{}>", hex(&l.id), l.entries.len(), hex(peer)),
+                    Err(e) => {
+                        d.drop_link(peer);
+                        return Err(format!("push: {e}"));
+                    }
+                }
+            }
+            Ok(LeaseStatus::NoRoom) => return Ok(false),
+            Ok(other) => return Err(format!("lease refused: {other:?}")),
+            Err(e) => {
+                d.drop_link(peer);
+                return Err(e);
+            }
+        }
+    }
+    Ok(true)
+}
+
+/// Sends the holder the chunks of `l` it doesn't have yet (asks with `have`
+/// first, so shared chunks and earlier versions never travel twice).
+async fn push(d: &Daemon, link: LinkId, l: &Lease) -> Result<usize, String> {
+    let nonce = d.transport.link_nonce(link);
+    let mut missing = Vec::new();
+    for batch in l.entries.chunks(MAX_HAVE) {
+        let items: Vec<([u8; HAVE_PREFIX], [u8; 16])> = batch
+            .iter()
+            .map(|(cid, token)| {
+                let prefix: [u8; HAVE_PREFIX] = cid.as_bytes()[..HAVE_PREFIX].try_into().unwrap();
+                (prefix, token.have_proof(&nonce, &prefix))
+            })
+            .collect();
+        let bits = decode_bitmap(&d.ask(link, HAVE_ENDPOINT, encode_have(&items)).await?, batch.len()).map_err(|e| e.to_string())?;
+        missing.extend(batch.iter().zip(bits).filter(|(_, held)| !held).map(|((cid, _), _)| *cid));
+    }
+    let mut sent = 0;
+    for batch in missing.chunks(MAX_PUT) {
+        let cts: Vec<Vec<u8>> = batch.iter().filter_map(|c| d.store.fetch(c).ok().flatten()).collect();
+        if cts.is_empty() {
+            continue;
+        }
+        let bits = decode_bitmap(&d.ask(link, PUT_ENDPOINT, encode_put(&l.id, &cts)).await?, cts.len()).map_err(|e| e.to_string())?;
+        sent += bits.iter().filter(|&&b| b).count();
+    }
+    Ok(sent)
+}
+
+/// Ok(true) if the holder was contacted (and answered).
+async fn upkeep_one(d: &Daemon, o: &mut OwnLease, proved: &mut HashMap<LeaseId, Instant>) -> Result<bool, String> {
     let now = now_s();
     let id = o.lease.id;
     let due_proof = |o: &OwnLease, proved: &HashMap<LeaseId, Instant>| {
@@ -787,7 +982,7 @@ async fn upkeep_one(d: &Daemon, o: &mut OwnLease, proved: &mut HashMap<LeaseId, 
     };
     let renew = o.expires < now + d.lease_term / 2;
     if !renew && o.receipt_until >= o.expires && !due_proof(o, proved) {
-        return Ok(());
+        return Ok(false);
     }
     let link = d.link_to(&o.holder).await?;
     let before = (o.expires, o.receipt_until, o.proof);
@@ -820,7 +1015,10 @@ async fn upkeep_one(d: &Daemon, o: &mut OwnLease, proved: &mut HashMap<LeaseId, 
                 o.receipt_until = r.holds_until.min(o.expires);
                 println!("lease {}: receipt from <{}>, held until {}", hex(&id), hex(&o.holder), o.receipt_until);
             }
-            ReceiptReply::Progress { held, total } => println!("lease {}: <{}> has {held}/{total}", hex(&id), hex(&o.holder)),
+            ReceiptReply::Progress { held, total } => {
+                let sent = push(d, link, &o.lease).await?;
+                println!("lease {}: <{}> had {held}/{total}, pushed {sent}", hex(&id), hex(&o.holder));
+            }
             ReceiptReply::Unknown => {
                 println!("lease {}: <{}> lost the lease, offering it again", hex(&id), hex(&o.holder));
                 let expires = o.expires.max(now + d.lease_term / 2);
@@ -854,7 +1052,7 @@ async fn upkeep_one(d: &Daemon, o: &mut OwnLease, proved: &mut HashMap<LeaseId, 
     if (o.expires, o.receipt_until, o.proof) != before {
         d.store.update_own_lease(o).map_err(|e| e.to_string())?;
     }
-    Ok(())
+    Ok(true)
 }
 
 /// The holder lost a lease (restart without it, expiry): offer it again under
@@ -904,6 +1102,8 @@ async fn seek_pass(d: &Daemon) -> Result<(), String> {
         expand_local(store, &root)?;
         if store.wants(&root, 1).map_err(|e| e.to_string())?.is_empty() {
             store.finish_file(&root).map_err(|e| e.to_string())?;
+            store.need_file(&file).map_err(|e| e.to_string())?;
+            d.upkeep_wake.notify_one();
             println!("seeker: {root} complete");
             continue;
         }
@@ -948,6 +1148,8 @@ async fn seek_pass(d: &Daemon) -> Result<(), String> {
             expand_local(store, &root)?;
             if store.wants(&root, 1).map_err(|e| e.to_string())?.is_empty() {
                 store.finish_file(&root).map_err(|e| e.to_string())?;
+                store.need_file(&file).map_err(|e| e.to_string())?;
+                d.upkeep_wake.notify_one();
                 println!("seeker: {root} complete");
                 break;
             }

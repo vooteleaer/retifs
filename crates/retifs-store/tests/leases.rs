@@ -114,3 +114,29 @@ fn owner_counts_holders_with_valid_receipts() {
     assert_eq!(st.confirmed_holders(&root, 10).unwrap(), vec![holder_ok]);
     assert!(st.confirmed_holders(&root, 1001).unwrap().is_empty(), "receipts ran out");
 }
+
+#[test]
+fn placement_state_ranks_nodes_and_learns_reliability() {
+    let (_d, st) = store();
+    st.heard_storage_node(&[1; 16], 3, 100).unwrap();
+    st.heard_storage_node(&[2; 16], 1, 50).unwrap();
+    st.heard_storage_node(&[3; 16], 1, 90).unwrap();
+    st.avoid_storage_node(&[3; 16], 500).unwrap();
+    st.heard_storage_node(&[3; 16], 1, 95).unwrap();
+    let nodes = st.storage_nodes().unwrap();
+    assert_eq!(nodes.iter().map(|n| n.peer[0]).collect::<Vec<_>>(), vec![3, 2, 1], "nearest, then freshest");
+    assert_eq!(nodes[0].avoid_until_ms, 500, "hearing a node again keeps its back-off");
+
+    let fresh = st.holder_stats(&[9; 16]).unwrap();
+    assert!((fresh.loss() - 0.1).abs() < 1e-9, "a new holder counts as 10 %");
+    for _ in 0..100 {
+        st.holder_result(&[9; 16], true, 1).unwrap();
+    }
+    assert!(st.holder_stats(&[9; 16]).unwrap().loss() < 0.01, "a reliable record lowers it");
+    let flaky = st.holder_result(&[8; 16], false, 1).unwrap();
+    assert!(flaky.loss() > 0.1);
+
+    let file = retifs_core::FileRef { root: chunk(1).cid, seed: chunk(1).seed, size: 3000 };
+    st.need_file(&file).unwrap();
+    assert_eq!(st.needed_files().unwrap(), vec![file]);
+}
