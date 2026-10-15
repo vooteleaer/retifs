@@ -440,6 +440,9 @@ fn store_file(
     opts: manifest::WriteOpts,
 ) -> Result<FileRef, String> {
     let secret = secret(store, public, record);
+    // A per-record secret belongs to one record: padding may then be stable
+    // across its versions (ADR-0009), so an edit doesn't re-store all padding.
+    let opts = manifest::WriteOpts { stable_padding: record.is_some() && !public, ..opts };
     let mut pinned = retifs_store::TrackedPinned::new(store);
     let (file, blobs) = match manifest::write_tracked(&mut pinned, &secret, data, opts) {
         Ok(written) => written,

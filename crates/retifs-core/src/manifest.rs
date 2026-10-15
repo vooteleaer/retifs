@@ -206,11 +206,18 @@ pub struct WriteOpts {
     pub compression: Compression,
     /// Pad the chunk count up to the next PADMÉ value (on by default).
     pub pad: bool,
+    /// Derive padding from the secret and index only, not the content. Use it
+    /// when the secret belongs to one record (`ConvergenceSecret::for_record`):
+    /// versions then reuse the same padding chunks (an edit stays cheap), and
+    /// other records still never share them. Leave it off for secrets shared
+    /// by many files (public, restricted), where index-only padding would be
+    /// identical across files and so recognisable.
+    pub stable_padding: bool,
 }
 
 impl Default for WriteOpts {
     fn default() -> Self {
-        WriteOpts { compression: Compression::Off, pad: true }
+        WriteOpts { compression: Compression::Off, pad: true, stable_padding: false }
     }
 }
 
@@ -306,11 +313,15 @@ fn write_with_fanout(
 
     if opts.pad {
         let real = level.len() as u64;
-        let mut h = Sha256::new();
-        for e in &level {
-            h.update(e.cid.as_bytes());
-        }
-        let digest: [u8; 32] = h.finalize().into();
+        let digest: [u8; 32] = if opts.stable_padding {
+            [0; 32] // per-record secret: padding depends on the index only
+        } else {
+            let mut h = Sha256::new();
+            for e in &level {
+                h.update(e.cid.as_bytes());
+            }
+            h.finalize().into()
+        };
         for i in 0..padme(real) - real {
             let piece = padding_piece(secret, &digest, i, chunker::MAX_SIZE as usize);
             let (cid, seed) = put(store, seal(secret, &piece).expect("a padding piece fits a chunk"))?;

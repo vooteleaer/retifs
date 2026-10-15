@@ -202,3 +202,23 @@ fn records_dedup_across_versions_but_not_across_records() {
     write(&mut s2, &other, &v1).unwrap();
     assert!(s2.0.keys().all(|c| !s1.0.contains_key(c)), "another record shares no CIDs, even with equal content");
 }
+
+#[test]
+fn stable_padding_keeps_versions_cheap() {
+    use retifs_core::manifest::{padme, WriteOpts};
+    let rec = ConvergenceSecret::for_record(&[9u8; 32], b"big.bin");
+    let v1 = noise(1_100_000, 8); // needs padding (~76 real chunks)
+    let mut v2 = v1.clone();
+    v2[600_000] ^= 0xff;
+    let stable = WriteOpts { stable_padding: true, ..Default::default() };
+
+    let mut s = MemStore::default();
+    retifs_core::manifest::write_opts(&mut s, &rec, &v1, stable).unwrap();
+    let before = s.0.len();
+    let f2 = retifs_core::manifest::write_opts(&mut s, &rec, &v2, stable).unwrap();
+    let added = s.0.len() - before;
+    assert!(added <= 4, "an edit costs a chunk or two plus nodes, not new padding: {added}");
+    assert_eq!(read_all(&s, &f2).unwrap(), v2);
+    assert!(padme(76) > 76);
+}
+
