@@ -149,7 +149,9 @@ async fn single_link_roundtrip() {
 }
 
 /// On a high-latency path, links multiply throughput (decryption is not the bottleneck).
-#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+/// Runs on paused (virtual) time so only link latency is measured, not CPU load from
+/// other tests running in parallel.
+#[tokio::test(start_paused = true)]
 async fn more_links_are_faster() {
     let (data, f, store) = file(2_000_000);
     let net = MemTransport(Arc::new((0..4).map(|_| peer(store.0.clone(), Behaviour::Good, 80)).collect()));
