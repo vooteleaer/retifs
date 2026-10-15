@@ -33,7 +33,7 @@ Prototypes are throwaway. They're for learning, not for locking in the format. T
 - [ ] Holder map: per-chunk/per-group holders from receipts, `have` answers, hints and announces; source ranking, load spreading, failover, measured copy counts.
 - [ ] Holder hints in read-caps; store generation counter in announces.
 - [x] Leases, renewals, receipts, storage proofs; `retifsd --hold-for-others`, `retifs replicate`; vectors verified against RNS (decision 6, [ADR-0010](adr/0010-continuous-seeking.md)).
-- [ ] `/retifs/put` (push to holders).
+- [ ] Placement follows need ([ADR-0014](adr/0014-placement-follows-need.md)): `retifs.store` announces on by default and a storage-node list (hops, link type); push after lease with `have` first; automatic leases to the nearest nodes by owners and readers; holder reliability record; lazy repair; cost check for slow links.
 - [ ] Own-node pool on a LAN, replication target, repair, storage proofs ([ADR-0011](adr/0011-redundancy-by-default.md)).
 - [ ] Volunteer storage offers (`retifs.store`).
 - [ ] Diffuse mode: anonymous push seeding, epidemic re-replication with jitter, cover holdings ([ADR-0011](adr/0011-redundancy-by-default.md)).

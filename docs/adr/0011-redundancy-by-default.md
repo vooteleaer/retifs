@@ -4,6 +4,8 @@
 - **Date:** 2026-10-14
 - **Irreversible:** partly. The choice between full replicas and erasure-coded shares affects the content format and **blocks acceptance of [ADR-0008](0008-chunk-encryption-and-cid.md) and [ADR-0009](0009-manifest-format.md)**.
 
+> **Refined by [ADR-0014](0014-placement-follows-need.md):** every node holds for others by default; whoever needs the data (not only the owner) issues leases to the nearest storage nodes; the copy count follows need and holder reliability instead of a fixed target.
+
 ## Context
 With wants alone ([ADR-0010](0010-continuous-seeking.md)), replication is demand-driven: popular data spreads, and data nobody else reads stays on one node. For your own data, that's the wrong default. retifs should be usable as a self-healing store for servers and NAS-like setups (a few nodes on a LAN acting as a redundant pool), as well as across sites and mesh links. That makes redundancy a core property ([vision](../00-vision.md), principle 8), not an add-on.
 

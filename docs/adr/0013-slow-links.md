@@ -14,8 +14,8 @@ Supports 4 (local-first: the network is for syncing, and slow links sync what ma
 
 ### Control plane over LoRa, bulk only on explicit request
 - **Over LoRa by default:** wants, `have` queries, leases, receipts, commits and small manifest nodes.
-- **Bulk chunks:** only for explicit user fetches of specific data, within an airtime budget.
-- **Never over LoRa:** spare filling, diffusion, redundancy replication.
+- **Bulk chunks:** data someone needs crosses once and stays on the far side, **if the estimated transfer time fits the interface's airtime budget**; larger wants wait for a fast path, and parts (manifests, previews, ranges) can still cross ([ADR-0014](0014-placement-follows-need.md)).
+- **Never over LoRa:** spare filling, diffusion, replication for durability.
 
 ### Airtime-aware, prioritised sending per interface
 Priority order:
