@@ -136,3 +136,32 @@ fn removed_slots_read_as_holes_and_neighbours_survive() {
     assert!(seg[..4096].iter().all(|&x| x == 0), "the freed slot was punched out (zeroed)");
     assert_eq!(st.fetch(&b.cid).unwrap().unwrap(), b.ciphertext);
 }
+
+/// On Linux a punched slot gives its disk blocks back, not just zeroes.
+#[cfg(target_os = "linux")]
+#[test]
+fn removed_slots_free_disk_blocks() {
+    use std::os::unix::fs::MetadataExt;
+    let (dir, st) = store(Budget::default());
+    let chunks: Vec<Sealed> = (0..64).map(chunk).collect();
+    for c in &chunks {
+        st.insert(&c.cid, &c.ciphertext, tier::PINNED).unwrap();
+    }
+    let seg = dir.path().join("slabs/c4k/seg-000000");
+    let allocated = || {
+        std::fs::File::open(&seg).unwrap().sync_all().unwrap();
+        std::fs::metadata(&seg).unwrap().blocks() * 512
+    };
+    let full = allocated();
+    for c in chunks.iter().step_by(2) {
+        st.remove(&c.cid).unwrap();
+    }
+    let after = allocated();
+    assert!(full >= 64 * K4, "the slab was allocated: {full}");
+    // 32 slots come back; ext4 keeps a block or two for the extent tree the
+    // holes split the file into (tmpfs gives back exactly 32).
+    assert!(full - after >= 30 * K4, "32 removed slots gave back their blocks: {full} -> {after}");
+    for c in chunks.iter().skip(1).step_by(2) {
+        assert_eq!(st.fetch(&c.cid).unwrap().unwrap(), c.ciphertext);
+    }
+}

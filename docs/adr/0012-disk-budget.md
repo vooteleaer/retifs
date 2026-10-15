@@ -97,7 +97,7 @@ In `retifs-store` and `retifsd`:
   - Hard tiers are never evicted; a write beyond the budget fails with "disk budget reached".
   - A failed own write rolls back the chunks it newly added (`TrackedPinned`), so half a file doesn't eat the budget.
 - **LRU:** accesses are tracked in memory and written to the index lazily (non-durable).
-- **Space back to the OS:** removed slots are hole-punched (Linux `fallocate(PUNCH_HOLE)`, Windows sparse files with `FSCTL_SET_ZERO_DATA`) and reused.
+- **Space back to the OS:** removed slots are hole-punched (Linux `fallocate(PUNCH_HOLE)`, Windows sparse files with `FSCTL_SET_ZERO_DATA`) and reused. Verified on Linux (2026-10-15) with a test that checks allocated blocks, not just zeroes: on tmpfs 32 removed 4 KiB slots give back exactly 32 blocks; on ext4 (also under overlayfs) 31, because the holes split the file into more extents than fit in the inode and ext4 spends one block on the extent tree. Plain `fallocate -p` behaves the same, so it's the filesystem, not the store.
 - **Background:** `enforce()` every 30 s trims the cache to its cap and restores the reserve when other programs fill the volume.
 - **Visibility:** `retifs ping` shows usage per tier, the limits and the volume.
 - **Tests:** usage accounting, cache LRU at its cap, eviction order under disk pressure (pinned never dropped), store limit for hard tiers only, `enforce` after others fill the disk, and holes (freed slot reads as zeros, neighbours intact). Plus a live daemon check: a put over the limit is refused and leaves nothing behind.
