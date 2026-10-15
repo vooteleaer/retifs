@@ -17,12 +17,60 @@ use crate::{wants::PeerId, SlabStore, StoreError};
 const STORAGE_NODES: TableDefinition<&[u8], &[u8]> = TableDefinition::new("storage_nodes");
 const HOLDER_STATS: TableDefinition<&[u8], &[u8]> = TableDefinition::new("holder_stats");
 const NEEDED: TableDefinition<&[u8], &[u8]> = TableDefinition::new("needed");
+/// peer (16) → rtt_ms (4) ‖ rate_bps (4) ‖ samples (4)
+const LINK_QUALITY: TableDefinition<&[u8], &[u8]> = TableDefinition::new("link_quality");
 
 pub(crate) fn open_tables(w: &redb::WriteTransaction) -> Result<(), StoreError> {
     w.open_table(STORAGE_NODES)?;
     w.open_table(HOLDER_STATS)?;
     w.open_table(NEEDED)?;
+    w.open_table(LINK_QUALITY)?;
     Ok(())
+}
+
+/// A link that takes this long to set up is treated as slow (LoRa-class)
+/// until transfers show otherwise.
+pub const SLOW_RTT_MS: u32 = 1500;
+/// Measured throughput below this is slow.
+pub const SLOW_RATE: f64 = 2048.0;
+/// Assumed for a slow link before anything was measured: about what LoRa
+/// carries within a 10 % duty cycle (~0.5 MB per hour).
+pub const SLOW_DEFAULT_RATE: f64 = 150.0;
+/// Assumed for other links before anything was measured.
+pub const FAST_DEFAULT_RATE: f64 = 50_000.0;
+
+/// What this node has seen of the path to a peer (ADR-0014: link cost). A
+/// client of the shared instance can't see the interfaces behind it, so
+/// quality is measured: link setup RTT, and throughput of real transfers.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct LinkQuality {
+    /// Last link setup round trip (0: never linked).
+    pub rtt_ms: u32,
+    /// Moving average of measured throughput in bytes per second (0: none yet).
+    pub rate_bps: u32,
+    pub samples: u32,
+}
+
+impl LinkQuality {
+    /// Throughput to plan with: measured if there is any, else a guess from the RTT.
+    pub fn rate(&self) -> f64 {
+        if self.rate_bps > 0 {
+            self.rate_bps as f64
+        } else if self.rtt_ms >= SLOW_RTT_MS {
+            SLOW_DEFAULT_RATE
+        } else {
+            FAST_DEFAULT_RATE
+        }
+    }
+
+    pub fn slow(&self) -> bool {
+        self.rate() < SLOW_RATE
+    }
+
+    /// Estimated seconds to move `bytes` over this path.
+    pub fn transfer_secs(&self, bytes: u64) -> f64 {
+        self.rtt_ms as f64 / 1000.0 + bytes as f64 / self.rate()
+    }
 }
 
 /// A node that can hold data for others, as last heard.
@@ -62,6 +110,11 @@ fn parse_node(peer: PeerId, v: &[u8]) -> StorageNode {
 
 fn node_value(n: &StorageNode) -> Vec<u8> {
     [&[n.hops][..], &n.last_heard_ms.to_be_bytes(), &n.avoid_until_ms.to_be_bytes()].concat()
+}
+
+fn parse_quality(v: &[u8]) -> LinkQuality {
+    let u32_at = |i: usize| u32::from_be_bytes(v[i..i + 4].try_into().unwrap());
+    LinkQuality { rtt_ms: u32_at(0), rate_bps: u32_at(4), samples: u32_at(8) }
 }
 
 fn parse_stats(v: &[u8]) -> HolderStats {
@@ -136,6 +189,43 @@ impl SlabStore {
     pub fn holder_stats(&self, peer: &PeerId) -> Result<HolderStats, StoreError> {
         let r = self.db.begin_read()?;
         Ok(r.open_table(HOLDER_STATS)?.get(peer.as_slice())?.map(|v| parse_stats(v.value())).unwrap_or_default())
+    }
+
+    pub fn link_quality(&self, peer: &PeerId) -> Result<LinkQuality, StoreError> {
+        let r = self.db.begin_read()?;
+        Ok(r.open_table(LINK_QUALITY)?.get(peer.as_slice())?.map(|v| parse_quality(v.value())).unwrap_or_default())
+    }
+
+    /// A link to `peer` was set up in `rtt_ms`.
+    pub fn record_rtt(&self, peer: &PeerId, rtt_ms: u64) -> Result<(), StoreError> {
+        self.update_quality(peer, |q| q.rtt_ms = rtt_ms.min(u32::MAX as u64) as u32)
+    }
+
+    /// `bytes` moved to or from `peer` in `millis`: folds into the moving average.
+    /// Tiny transfers are dominated by round trips and say little about throughput.
+    pub fn record_transfer(&self, peer: &PeerId, bytes: u64, millis: u64) -> Result<(), StoreError> {
+        if bytes < 4096 {
+            return Ok(());
+        }
+        let sample = bytes as f64 * 1000.0 / millis.max(1) as f64;
+        self.update_quality(peer, |q| {
+            let avg = if q.samples == 0 { sample } else { 0.7 * q.rate_bps as f64 + 0.3 * sample };
+            q.rate_bps = avg.clamp(1.0, u32::MAX as f64) as u32;
+            q.samples = q.samples.saturating_add(1);
+        })
+    }
+
+    fn update_quality(&self, peer: &PeerId, f: impl FnOnce(&mut LinkQuality)) -> Result<(), StoreError> {
+        let w = self.db.begin_write()?;
+        {
+            let mut t = w.open_table(LINK_QUALITY)?;
+            let mut q = t.get(peer.as_slice())?.map(|v| parse_quality(v.value())).unwrap_or_default();
+            f(&mut q);
+            let v = [&q.rtt_ms.to_be_bytes()[..], &q.rate_bps.to_be_bytes(), &q.samples.to_be_bytes()].concat();
+            t.insert(peer.as_slice(), v.as_slice())?;
+        }
+        w.commit()?;
+        Ok(())
     }
 
     /// This node needs `file` kept (it wrote or sought it).

@@ -140,3 +140,26 @@ fn placement_state_ranks_nodes_and_learns_reliability() {
     st.need_file(&file).unwrap();
     assert_eq!(st.needed_files().unwrap(), vec![file]);
 }
+
+#[test]
+fn link_quality_from_rtt_then_measurements() {
+    use retifs_store::LinkQuality;
+    let (_d, st) = store();
+    let fast = [1u8; 16];
+    let lora = [2u8; 16];
+    st.record_rtt(&fast, 40).unwrap();
+    st.record_rtt(&lora, 2500).unwrap();
+    assert!(!st.link_quality(&fast).unwrap().slow());
+    let q = st.link_quality(&lora).unwrap();
+    assert!(q.slow(), "a slow round trip means LoRa-class until measured");
+    assert!(q.transfer_secs(1 << 30) > 80.0 * 86_400.0, "1 GiB over LoRa: months");
+    assert!(q.transfer_secs(900) < 10.0, "a tiny file still crosses quickly");
+
+    // A slow round trip but a fast measured transfer (a busy long path, not LoRa).
+    st.record_transfer(&lora, 256 * 1024, 2000).unwrap();
+    assert!(!st.link_quality(&lora).unwrap().slow());
+    // Tiny transfers don't count.
+    st.record_transfer(&fast, 100, 10_000).unwrap();
+    assert_eq!(st.link_quality(&fast).unwrap().samples, 0);
+    assert!(!LinkQuality::default().slow(), "never linked: no reason to call it slow");
+}

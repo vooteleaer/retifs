@@ -153,6 +153,11 @@ pub struct Status {
     /// storage proof: confirmed copies besides this one.
     #[serde(default)]
     pub replicas: usize,
+    /// The only known holders are behind slow links (LoRa) and the rest would
+    /// take about this many seconds over them: only manifest nodes are fetched,
+    /// the rest waits for a faster path (ADR-0014).
+    #[serde(default)]
+    pub slow_link_wait_secs: Option<u64>,
 }
 
 impl Status {

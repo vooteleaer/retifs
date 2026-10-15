@@ -34,7 +34,7 @@ mod leases;
 mod placement;
 mod wants;
 pub use leases::{Accept, BlindWants, HeldLease, OwnLease, ProofState, LEASE_CHUNK_ESTIMATE};
-pub use placement::{HolderStats, StorageNode};
+pub use placement::{HolderStats, LinkQuality, StorageNode, SLOW_DEFAULT_RATE, SLOW_RTT_MS};
 pub use wants::{Hint, PeerId, Want};
 
 use redb::{Database, ReadableTable, ReadableTableMetadata, TableDefinition};

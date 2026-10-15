@@ -141,8 +141,20 @@ fn print_status(s: &libretifs::Status) {
         if s.complete() { " (complete, readable offline)" } else { "" },
         if s.seeking { format!(", seeking ({} holder(s) known)", s.holders_known) } else { String::new() }
     );
+    if let Some(secs) = s.slow_link_wait_secs {
+        println!("  rest waits for a faster path (about {} over the slow link)", duration(secs));
+    }
     if s.leased_to > 0 {
         println!("  leased to {} node(s), {} confirmed by receipt", s.leased_to, s.replicas);
+    }
+}
+
+fn duration(secs: u64) -> String {
+    match secs {
+        s if s < 120 => format!("{s} s"),
+        s if s < 7200 => format!("{} min", s / 60),
+        s if s < 172_800 => format!("{} h", s / 3600),
+        s => format!("{} days", s / 86_400),
     }
 }
 

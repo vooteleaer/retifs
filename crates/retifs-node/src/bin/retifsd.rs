@@ -8,6 +8,9 @@
 //! store limit 50 % of the volume, reserve max(10 %, 5 GiB), cache 20 % of the limit.
 //! `--hold-for-others`: hold leased data for others up to SIZE (default: up to the
 //! store limit; 0 opts out). Every node is a storage node by default (ADR-0014).
+//! `--slow-link-budget`: the most a file may take over a slow link (LoRa class) before
+//! only its manifest is fetched and the rest waits for a faster path (default 10m).
+//! `--treat-as-slow NODE`: testing only; plan as if NODE were behind LoRa.
 //! `--loss-target`: keep adding nearby holders for each needed file until the
 //! estimated chance of losing every copy is below P (default 0.001).
 //! `--lease-term`: how long leases this node gives out run before renewal is
@@ -239,6 +242,8 @@ struct Args {
     hold_limit: Option<u64>,
     lease_term: u64,
     loss_target: f64,
+    slow_budget: u64,
+    treat_as_slow: Vec<PeerId>,
 }
 
 fn duration_secs(s: &str) -> u64 {
@@ -276,6 +281,8 @@ fn args() -> Args {
         hold_limit: None,
         lease_term: 30 * 86_400,
         loss_target: 1e-3,
+        slow_budget: 600,
+        treat_as_slow: Vec::new(),
     };
     let mut it = std::env::args().skip(1);
     while let Some(arg) = it.next() {
@@ -288,12 +295,14 @@ fn args() -> Args {
             "--cache-max" => a.budget.cache_max = Some(size(&it.next().expect("--cache-max SIZE"))),
             "--private-requests" => a.private_requests = true,
             "--hold-for-others" => a.hold_limit = Some(size(&it.next().expect("--hold-for-others SIZE"))),
+            "--slow-link-budget" => a.slow_budget = duration_secs(&it.next().expect("--slow-link-budget DURATION")),
+            "--treat-as-slow" => a.treat_as_slow.push(*parse_destination(&it.next().expect("--treat-as-slow NODE")).expect("node hash").as_bytes()),
             "--loss-target" => a.loss_target = it.next().and_then(|v| v.parse().ok()).expect("--loss-target P (e.g. 0.001)"),
             "--lease-term" => a.lease_term = duration_secs(&it.next().expect("--lease-term DURATION")).max(60),
             "-h" | "--help" => {
                 println!(
                     "retifsd [--store DIR] [--max-store SIZE] [--min-free SIZE] [--cache-max SIZE] [--private-requests]
-                             [--hold-for-others SIZE] [--lease-term DURATION] [--loss-target P] [--public] [--put FILE]..."
+                             [--hold-for-others SIZE] [--lease-term DURATION] [--loss-target P] [--slow-link-budget DURATION] [--public] [--put FILE]..."
                 );
                 std::process::exit(0);
             }
@@ -378,6 +387,10 @@ struct Daemon {
     /// Wakes lease upkeep (receipts, renewals, proofs, placement) after new leases or needs.
     upkeep_wake: Notify,
     loss_target: f64,
+    slow_budget: u64,
+    treat_as_slow: Vec<PeerId>,
+    /// Files whose rest waits for a faster path, with the estimate over the slow link.
+    deferred: Mutex<HashMap<Cid, u64>>,
 }
 
 impl Daemon {
@@ -390,16 +403,27 @@ impl Daemon {
         let mut t = self.transport.clone();
         t.path_timeout = Duration::from_secs(20);
         t.ensure_path(dest).await?;
-        let link = match t.link(dest).await {
+        let (link, rtt) = match t.link_with_rtt(dest).await {
             Ok(l) => l,
             // The known route may be stale: ask for a fresh path and try once more.
             Err(_) => {
                 t.request_path(dest).await?;
-                t.link(dest).await?
+                t.link_with_rtt(dest).await?
             }
         };
+        let _ = self.store.record_rtt(peer, rtt);
         self.links.lock().unwrap().insert(*peer, link);
         Ok(link)
+    }
+
+    /// What this node knows of the path to `peer` (measured; see LinkQuality).
+    fn quality(&self, peer: &PeerId) -> retifs_store::LinkQuality {
+        let mut q = self.store.link_quality(peer).unwrap_or_default();
+        if self.treat_as_slow.contains(peer) {
+            q.rtt_ms = q.rtt_ms.max(retifs_store::SLOW_RTT_MS * 2);
+            q.rate_bps = retifs_store::SLOW_DEFAULT_RATE as u32;
+        }
+        q
     }
 
     fn drop_link(&self, peer: &PeerId) {
@@ -463,6 +487,9 @@ async fn serve(store: Arc<SlabStore>, identity: node::IdentitySecret, endpoint: 
         lease_term: args.lease_term,
         upkeep_wake: Notify::new(),
         loss_target: args.loss_target,
+        slow_budget: args.slow_budget,
+        treat_as_slow: args.treat_as_slow.clone(),
+        deferred: Mutex::new(HashMap::new()),
     });
     println!("attached to shared instance {of}");
     println!("serving {} chunks as retifs.node <{}>", store.len().unwrap_or(0), daemon.node_hex);
@@ -671,7 +698,7 @@ async fn handle(d: &Daemon, req: Request) -> Result<Response, String> {
 
         Request::Status { cap } => {
             let cap: FileRef = cap.parse().map_err(|e: retifs_core::ManifestError| e.to_string())?;
-            Ok(Response::Status(full_status(&d.store, &cap)))
+            Ok(Response::Status(full_status(d, &cap)))
         }
 
         Request::Replicate { cap, to } => {
@@ -688,7 +715,7 @@ async fn handle(d: &Daemon, req: Request) -> Result<Response, String> {
                 }
             }
             d.upkeep_wake.notify_one();
-            Ok(Response::Status(full_status(&d.store, &cap)))
+            Ok(Response::Status(full_status(d, &cap)))
         }
 
         Request::Want { cap, from } => {
@@ -699,7 +726,7 @@ async fn handle(d: &Daemon, req: Request) -> Result<Response, String> {
                 .collect::<Result<_, _>>()?;
             d.store.want_file(&cap, &peers).map_err(|e| e.to_string())?;
             d.wake.notify_one();
-            Ok(Response::Status(full_status(&d.store, &cap)))
+            Ok(Response::Status(full_status(d, &cap)))
         }
     }
 }
@@ -735,8 +762,10 @@ fn store_file(
     Ok(file)
 }
 
-fn full_status(store: &SlabStore, cap: &FileRef) -> Status {
+fn full_status(d: &Daemon, cap: &FileRef) -> Status {
+    let store = &d.store;
     let mut s = local_status(store, cap);
+    s.slow_link_wait_secs = d.deferred.lock().unwrap().get(&cap.root).copied();
     s.seeking = store.is_wanted(&cap.root).unwrap_or(false);
     s.holders_known = store.hints(&cap.root).map(|h| h.len()).unwrap_or(0);
     let own = store.own_leases().unwrap_or_default();
@@ -909,13 +938,37 @@ async fn place(d: &Daemon, file: &FileRef) -> Result<(), String> {
         return Ok(());
     }
     let chunks = file_chunks(&d.store, file)?;
+    let bytes = chunks.len() as u64 * 16 * 1024;
+    // The nearest few by hops, measured by linking (RTT) and earlier transfers,
+    // then ranked by estimated transfer time. Placement is never worth a slow
+    // link: copies for durability don't cross LoRa (ADR-0013/0014).
+    let mut candidates = Vec::new();
     for n in d.store.storage_nodes().map_err(|e| e.to_string())? {
-        if met(risk, d.loss_target) {
+        if candidates.len() == 8 {
             break;
         }
         if n.peer == d.node_id || holders.contains(&n.peer) || n.avoid_until_ms > now_ms() {
             continue;
         }
+        if let Err(e) = d.link_to(&n.peer).await {
+            eprintln!("placement: <{}>: {e}", hex(&n.peer));
+            d.store.avoid_storage_node(&n.peer, now_ms() + 600_000).map_err(|e| e.to_string())?;
+            continue;
+        }
+        let q = d.quality(&n.peer);
+        if q.slow() {
+            println!("placement: <{}> is behind a slow link ({} ms, ~{:.0} B/s): not placing there", hex(&n.peer), q.rtt_ms, q.rate());
+            d.store.avoid_storage_node(&n.peer, now_ms() + 6 * 3_600_000).map_err(|e| e.to_string())?;
+            continue;
+        }
+        candidates.push((q.transfer_secs(bytes), n));
+    }
+    candidates.sort_by(|a, b| a.0.total_cmp(&b.0).then(a.1.hops.cmp(&b.1.hops)));
+    for (secs, n) in candidates {
+        if met(risk, d.loss_target) {
+            break;
+        }
+        println!("placement: candidate <{}>, {} hop(s), est. {secs:.1} s", hex(&n.peer), n.hops);
         match lease_to(d, &n.peer, file, &chunks, &[]).await {
             Ok(true) => {
                 risk *= d.store.holder_stats(&n.peer).map(|s| s.loss()).unwrap_or(1.0);
@@ -944,7 +997,7 @@ async fn lease_to(d: &Daemon, peer: &PeerId, file: &FileRef, chunks: &[(Cid, Chu
         match reply.and_then(|r| decode_lease_status(&r).map_err(|e| e.to_string())) {
             Ok(LeaseStatus::Accepted) => {
                 d.store.record_own_lease(&l, peer, &file.root).map_err(|e| e.to_string())?;
-                match push(d, link, &l).await {
+                match push(d, link, &l, Some(peer)).await {
                     Ok(sent) => println!("lease {}: pushed {sent} of {} chunk(s) to <{}>", hex(&l.id), l.entries.len(), hex(peer)),
                     Err(e) => {
                         d.drop_link(peer);
@@ -965,7 +1018,7 @@ async fn lease_to(d: &Daemon, peer: &PeerId, file: &FileRef, chunks: &[(Cid, Chu
 
 /// Sends the holder the chunks of `l` it doesn't have yet (asks with `have`
 /// first, so shared chunks and earlier versions never travel twice).
-async fn push(d: &Daemon, link: LinkId, l: &Lease) -> Result<usize, String> {
+async fn push(d: &Daemon, link: LinkId, l: &Lease, peer: Option<&PeerId>) -> Result<usize, String> {
     let nonce = d.transport.link_nonce(link);
     let mut missing = Vec::new();
     for batch in l.entries.chunks(MAX_HAVE) {
@@ -986,8 +1039,15 @@ async fn push(d: &Daemon, link: LinkId, l: &Lease) -> Result<usize, String> {
         let end = (at + batch).min(missing.len());
         let cts: Vec<Vec<u8>> = missing[at..end].iter().filter_map(|c| d.store.fetch(c).ok().flatten()).collect();
         if !cts.is_empty() {
+            let t0 = Instant::now();
             match d.ask(link, PUT_ENDPOINT, encode_put(&l.id, &cts)).await {
-                Ok(reply) => sent += decode_bitmap(&reply, cts.len()).map_err(|e| e.to_string())?.iter().filter(|&&b| b).count(),
+                Ok(reply) => {
+                    if let Some(peer) = peer {
+                        let bytes = cts.iter().map(|c| c.len() as u64).sum();
+                        let _ = d.store.record_transfer(peer, bytes, t0.elapsed().as_millis() as u64);
+                    }
+                    sent += decode_bitmap(&reply, cts.len()).map_err(|e| e.to_string())?.iter().filter(|&&b| b).count()
+                }
                 Err(e) if batch > 1 && (e.contains("Timeout") || e.contains("timed out")) => {
                     batch /= 2;
                     continue;
@@ -1043,7 +1103,7 @@ async fn upkeep_one(d: &Daemon, o: &mut OwnLease, proved: &mut HashMap<LeaseId, 
                 println!("lease {}: receipt from <{}>, held until {}", hex(&id), hex(&o.holder), o.receipt_until);
             }
             ReceiptReply::Progress { held, total } => {
-                let sent = push(d, link, &o.lease).await?;
+                let sent = push(d, link, &o.lease, Some(&o.holder)).await?;
                 println!("lease {}: <{}> had {held}/{total}, pushed {sent}", hex(&id), hex(&o.holder));
                 if sent == 0 {
                     // It answers but takes nothing (full, or broken): a failed contact,
@@ -1134,6 +1194,7 @@ async fn seek_pass(d: &Daemon) -> Result<(), String> {
         expand_local(store, &root)?;
         if store.wants(&root, 1).map_err(|e| e.to_string())?.is_empty() {
             store.finish_file(&root).map_err(|e| e.to_string())?;
+            d.deferred.lock().unwrap().remove(&root);
             store.need_file(&file).map_err(|e| e.to_string())?;
             d.upkeep_wake.notify_one();
             println!("seeker: {root} complete");
@@ -1152,13 +1213,31 @@ async fn seek_pass(d: &Daemon) -> Result<(), String> {
                     continue;
                 }
             };
+            // Over a slow link (LoRa class), fetch it all only if it fits the budget;
+            // otherwise only manifest nodes (the file is browsable, small parts
+            // cross), and the rest waits for a faster path (ADR-0014).
+            let q = d.quality(&hint.peer);
+            let local = local_status(store, &file).local_chunks as u64 * 16 * 1024;
+            let est = q.transfer_secs(file.size.saturating_sub(local));
+            let nodes_only = q.slow() && est > d.slow_budget as f64;
+            if nodes_only {
+                if d.deferred.lock().unwrap().insert(root, est as u64).is_none() {
+                    println!("seeker: {root}: ~{est:.0} s over the slow link to <{peer_hex}>; fetching the manifest only, the rest waits for a faster path");
+                }
+            } else {
+                d.deferred.lock().unwrap().remove(&root);
+            }
             // Rounds until this peer has nothing more for us (nodes reveal more wants).
             let mut progressed = false;
             for _ in 0..64 {
-                let wants = store.wants(&root, 512).map_err(|e| e.to_string())?;
+                let mut wants = store.wants(&root, 512).map_err(|e| e.to_string())?;
+                if nodes_only {
+                    wants.retain(|w| w.node);
+                }
                 if wants.is_empty() {
                     break;
                 }
+                let t0 = Instant::now();
                 let pairs: Vec<(retifs_core::Cid, retifs_core::Seed)> = wants.iter().map(|w| (w.cid, w.seed)).collect();
                 let round = match seek_round(&d.transport, link, &pairs, d.private_requests, Duration::from_secs(60)).await {
                     Ok(r) => r,
@@ -1168,6 +1247,8 @@ async fn seek_pass(d: &Daemon) -> Result<(), String> {
                         break;
                     }
                 };
+                let bytes: u64 = round.got.iter().map(|(_, ct, _)| ct.len() as u64).sum();
+                let _ = store.record_transfer(&hint.peer, bytes, t0.elapsed().as_millis() as u64);
                 if round.got.is_empty() {
                     break;
                 }
@@ -1180,6 +1261,7 @@ async fn seek_pass(d: &Daemon) -> Result<(), String> {
             expand_local(store, &root)?;
             if store.wants(&root, 1).map_err(|e| e.to_string())?.is_empty() {
                 store.finish_file(&root).map_err(|e| e.to_string())?;
+                d.deferred.lock().unwrap().remove(&root);
                 store.need_file(&file).map_err(|e| e.to_string())?;
                 d.upkeep_wake.notify_one();
                 println!("seeker: {root} complete");

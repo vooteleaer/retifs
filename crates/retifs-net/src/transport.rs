@@ -77,7 +77,17 @@ impl PrnsTransport {
 
     /// Opens a link to a peer whose path is already known.
     pub async fn link(&self, peer: DestinationHash) -> Result<LinkId, String> {
-        self.handle.establish_link(peer).await.map_err(|e| format!("link failed: {e:?}"))
+        self.link_with_rtt(peer).await.map(|(link, _)| link)
+    }
+
+    /// Like [`link`](Self::link), also returning the link setup round trip in
+    /// milliseconds: the first measure of the path (LoRa takes seconds).
+    pub async fn link_with_rtt(&self, peer: DestinationHash) -> Result<(LinkId, u64), String> {
+        self.handle
+            .establish_link_with_rtt(peer)
+            .await
+            .map(|l| (l.link_id, l.rtt_millis))
+            .map_err(|e| format!("link failed: {e:?}"))
     }
 }
 
