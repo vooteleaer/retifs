@@ -220,8 +220,14 @@ impl RequestEndpoint<Arc<Shared>> for PutEndpoint {
 }
 
 impl Shared {
+    /// Default: what's already held for others plus what still fits, i.e.
+    /// within both the store limit and the free-space reserve, so a lease is
+    /// never accepted that the disk can't take.
     fn hold_limit(&self) -> u64 {
-        self.hold_limit.unwrap_or_else(|| self.store.limits().map(|l| l.hard_max).unwrap_or(0))
+        self.hold_limit.unwrap_or_else(|| {
+            let (Ok(u), Ok(l)) = (self.store.usage(), self.store.limits()) else { return 0 };
+            u.leased + l.room().min(l.hard_max.saturating_sub(u.hard()))
+        })
     }
 }
 
