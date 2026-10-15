@@ -385,7 +385,14 @@ impl Daemon {
         let mut t = self.transport.clone();
         t.path_timeout = Duration::from_secs(20);
         t.ensure_path(dest).await?;
-        let link = t.link(dest).await?;
+        let link = match t.link(dest).await {
+            Ok(l) => l,
+            // The known route may be stale: ask for a fresh path and try once more.
+            Err(_) => {
+                t.request_path(dest).await?;
+                t.link(dest).await?
+            }
+        };
         self.links.lock().unwrap().insert(*peer, link);
         Ok(link)
     }
@@ -882,17 +889,23 @@ fn loss_now(d: &Daemon, file: &FileRef) -> (f64, std::collections::BTreeSet<Peer
     (risk, worst.into_keys().collect())
 }
 
+/// Whether a loss estimate meets the target. A relative tolerance keeps
+/// rounding (0.1 × 0.1 × 0.1 = 0.0010000000000000002) from costing an extra copy.
+fn met(risk: f64, target: f64) -> bool {
+    risk <= target * (1.0 + 1e-9)
+}
+
 /// Adds the nearest storage nodes as holders of `file` until the loss estimate
 /// is below the target. Data goes by push, so readers' copies (cache, never
 /// served) can be placed too, and holders don't learn who sent it.
 async fn place(d: &Daemon, file: &FileRef) -> Result<(), String> {
     let (mut risk, holders) = loss_now(d, file);
-    if risk <= d.loss_target {
+    if met(risk, d.loss_target) {
         return Ok(());
     }
     let chunks = file_chunks(&d.store, file)?;
     for n in d.store.storage_nodes().map_err(|e| e.to_string())? {
-        if risk <= d.loss_target {
+        if met(risk, d.loss_target) {
             break;
         }
         if n.peer == d.node_id || holders.contains(&n.peer) || n.avoid_until_ms > now_ms() {

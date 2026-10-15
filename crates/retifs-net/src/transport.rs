@@ -7,6 +7,7 @@
 
 use std::{future::Future, time::Duration};
 
+use personal_rns::node_introspection::NodeIntrospection;
 use personal_rns::prelude::*;
 use personal_rns::routing::links::LinkId;
 
@@ -44,9 +45,23 @@ impl PrnsTransport {
         PrnsTransport { handle, path_timeout: Duration::from_secs(60) }
     }
 
-    /// Requests a path, retrying: a single Prns path request can time out even
-    /// when the destination is reachable (seen between two local clients of one prnsd).
+    /// Makes sure a path to `peer` is known: a route already in the table is
+    /// enough (like Python RNS's `has_path`). Only otherwise is a path requested.
+    ///
+    /// Prns 0.3.7's `request_path` settles only on a newly *accepted* announce.
+    /// For a destination whose route is already known, the answer (often the
+    /// shared instance's cached copy of the same announce) is rejected as a
+    /// known-route replay, so the request times out after 15 s unless the
+    /// destination happens to announce again (examples/path_replay.rs).
     pub async fn ensure_path(&self, peer: DestinationHash) -> Result<(), String> {
+        if self.handle.route(peer).await.is_some() {
+            return Ok(());
+        }
+        self.request_path(peer).await
+    }
+
+    /// Asks the network for a fresh path (e.g. after a link over a known route failed).
+    pub async fn request_path(&self, peer: DestinationHash) -> Result<(), String> {
         let deadline = tokio::time::Instant::now() + self.path_timeout;
         let mut last = String::from("no attempt");
         while tokio::time::Instant::now() < deadline {
