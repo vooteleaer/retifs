@@ -45,7 +45,7 @@ use retifs_core::{
     lease::{self, node_destination, Lease, LeaseId, LeaseKey, Receipt, Renewal},
     stamp,
     manifest::{self, decode_node, decode_root, NodeEntry},
-    record::{Record, RecordId, Value},
+    record::{Record, RecordId, Snapshot, Value},
     open, ChunkToken, Cid, ConvergenceSecret, FileRef,
 };
 use personal_rns::node_introspection::DestinationIdentityQuery;
@@ -796,32 +796,15 @@ async fn handle(d: &Daemon, req: Request) -> Result<Response, String> {
         }
 
         Request::ChannelPublish { name, data, compress } => {
-            let mut c = d.store.own_channel(&name).map_err(|e| e.to_string())?.ok_or_else(|| format!("no channel {name}"))?;
-            let store = d.store.clone();
-            let opts = manifest::WriteOpts {
-                compression: if compress { retifs_core::Compression::Zstd } else { retifs_core::Compression::Off },
-                ..Default::default()
-            };
-            // One record per channel: versions dedup against each other.
-            let record = format!("retifs-channel/{name}");
-            let file = tokio::task::spawn_blocking(move || store_file(&store, &data, false, false, Some(&record), opts))
-                .await
-                .map_err(|e| e.to_string())??;
-            let key = ChannelKey::from_secrets(c.signing_seed, c.read_key);
-            let (_, sealed) = Commit::create(&key, c.seq + 1, now_ms(), c.last, file);
-            d.store.insert(&sealed.cid, &sealed.ciphertext, tier::PINNED).map_err(|e| e.to_string())?;
-            d.store.register_serving(&[(sealed.cid, ChunkToken::for_seed(&sealed.seed))]).map_err(|e| e.to_string())?;
-            let mut iv = [0u8; 16];
-            getrandom::fill(&mut iv).expect("OS entropy");
-            let head = Head::sign(&key, c.seq + 1, now_s(), sealed.cid, &sealed.seed, iv);
-            c.seq += 1;
-            c.last = Some((sealed.cid, sealed.seed));
-            c.head = head.encode().to_vec();
-            d.store.update_own_channel(&c).map_err(|e| e.to_string())?;
-            d.store.need_file(&file).map_err(|e| e.to_string())?;
-            d.upkeep_wake.notify_one();
-            println!("channel {name}: published version {} ({file})", c.seq);
-            Ok(Response::Published { seq: c.seq, cap: file.to_string() })
+            let (seq, file) = publish_channel(d, &name, data, compress).await?;
+            Ok(Response::Published { seq, cap: file.to_string() })
+        }
+
+        Request::ChannelPublishNs { name, ns } => {
+            let snap = Snapshot::new(d.store.records(&ns).map_err(|e| e.to_string())?).map_err(|e| e.to_string())?;
+            println!("channel {name}: snapshot of {ns}, {} record(s)", snap.records.len());
+            let (seq, file) = publish_channel(d, &name, snap.encode(), true).await?;
+            Ok(Response::Published { seq, cap: file.to_string() })
         }
 
         Request::Follow { address, from } => {
@@ -961,6 +944,58 @@ fn full_status(d: &Daemon, cap: &FileRef) -> Status {
     s
 }
 
+/// Stores `data` as the channel's next version: a commit linking the last one,
+/// and a new signed head (ADR-0015).
+async fn publish_channel(d: &Daemon, name: &str, data: Vec<u8>, compress: bool) -> Result<(u64, FileRef), String> {
+    let mut c = d.store.own_channel(name).map_err(|e| e.to_string())?.ok_or_else(|| format!("no channel {name}"))?;
+    let store = d.store.clone();
+    let opts = manifest::WriteOpts {
+        compression: if compress { retifs_core::Compression::Zstd } else { retifs_core::Compression::Off },
+        ..Default::default()
+    };
+    // One record per channel: versions dedup against each other.
+    let record = format!("retifs-channel/{name}");
+    let file = tokio::task::spawn_blocking(move || store_file(&store, &data, false, false, Some(&record), opts))
+        .await
+        .map_err(|e| e.to_string())??;
+    let key = ChannelKey::from_secrets(c.signing_seed, c.read_key);
+    let (_, sealed) = Commit::create(&key, c.seq + 1, now_ms(), c.last, file);
+    d.store.insert(&sealed.cid, &sealed.ciphertext, tier::PINNED).map_err(|e| e.to_string())?;
+    d.store.register_serving(&[(sealed.cid, ChunkToken::for_seed(&sealed.seed))]).map_err(|e| e.to_string())?;
+    let mut iv = [0u8; 16];
+    getrandom::fill(&mut iv).expect("OS entropy");
+    let head = Head::sign(&key, c.seq + 1, now_s(), sealed.cid, &sealed.seed, iv);
+    c.seq += 1;
+    c.last = Some((sealed.cid, sealed.seed));
+    c.head = head.encode().to_vec();
+    d.store.update_own_channel(&c).map_err(|e| e.to_string())?;
+    d.store.need_file(&file).map_err(|e| e.to_string())?;
+    d.upkeep_wake.notify_one();
+    println!("channel {name}: published version {} ({file})", c.seq);
+    Ok((c.seq, file))
+}
+
+/// The local namespace a followed channel's snapshots are rebuilt into.
+fn channel_ns(addr: &ChannelAddr) -> String {
+    format!("ch-{}", hex(&addr.ns_id()[..8]))
+}
+
+/// A version's snapshot, if the file is one and is local.
+fn read_snapshot(store: &SlabStore, f: &FileRef) -> Option<Snapshot> {
+    let bytes = manifest::read_all(store, f).ok()?;
+    Snapshot::is_snapshot(&bytes).then(|| Snapshot::decode(&bytes).ok()).flatten()
+}
+
+/// Every file a version consists of: the version itself and, for a snapshot,
+/// its records' content blocks.
+fn version_files(store: &SlabStore, f: &FileRef) -> Vec<FileRef> {
+    let mut files = vec![*f];
+    if let Some(snap) = read_snapshot(store, f) {
+        files.extend(snap.records.iter().flat_map(|r| r.blocks.iter().copied()));
+    }
+    files
+}
+
 fn to_value(v: &AttrValue) -> Result<Value, String> {
     Ok(match v {
         AttrValue::Null => Value::Null,
@@ -1046,7 +1081,8 @@ fn channels(d: &Daemon) -> Result<Response, String> {
         .map(|f| FollowInfo {
             address: f.addr.to_string(),
             seq: f.seq,
-            complete: f.current.is_some_and(|c| complete(&d.store, &c)),
+            complete: f.current.is_some_and(|c| version_files(&d.store, &c).iter().all(|x| complete(&d.store, x))),
+            namespace: f.current.and_then(|c| read_snapshot(&d.store, &c)).map(|_| channel_ns(&f.addr)),
             current: f.current.map(|c| c.to_string()),
         })
         .collect();
@@ -1080,27 +1116,47 @@ async fn follower(d: Arc<Daemon>) {
 
 async fn follow_pass(d: &Daemon, mut f: retifs_store::Follow) -> Result<(), String> {
     let ns = hex(&f.addr.ns_id());
-    // A complete version is kept here and served to other followers (who prove
-    // its chunks' seeds): following a channel passes it on, like an app mirror.
+    // A snapshot version is rebuilt into a local namespace (queryable), and
+    // its records' content blocks are sought too (ADR-0016).
     if let Some(cur) = f.current
         && complete(&d.store, &cur)
-        && d.store.tier(&cur.root).ok().flatten().is_some_and(|t| t & tier::PINNED == 0)
+        && let Some(snap) = read_snapshot(&d.store, &cur)
     {
-        let chunks = file_chunks(&d.store, &cur)?;
-        for (cid, _) in &chunks {
-            if let Some(t) = d.store.tier(cid).map_err(|e| e.to_string())? {
-                d.store.set_tier(cid, t | tier::PINNED).map_err(|e| e.to_string())?;
+        d.store.replace_namespace(&channel_ns(&f.addr), &snap.records).map_err(|e| e.to_string())?;
+        for b in snap.records.iter().flat_map(|r| r.blocks.iter()) {
+            if !complete(&d.store, b) && !d.store.is_wanted(&b.root).unwrap_or(false) {
+                d.store.want_file(b, &f.hints).map_err(|e| e.to_string())?;
+                d.wake.notify_one();
             }
         }
-        d.store.register_serving(&chunks).map_err(|e| e.to_string())?;
-        println!("follow {ns}: version {} complete, kept and served to other followers", f.seq);
     }
-    // The new version is complete: the one it replaced is no longer needed here.
-    if let (Some(cur), Some(prev)) = (f.current, f.previous)
-        && complete(&d.store, &cur)
+    let files = f.current.map(|c| version_files(&d.store, &c)).unwrap_or_default();
+    let version_complete = !files.is_empty() && files.iter().all(|x| complete(&d.store, x));
+    // A complete version is kept here and served to other followers (who prove
+    // its chunks' seeds): following a channel passes it on, like an app mirror.
+    if version_complete && d.store.tier(&files[0].root).ok().flatten().is_some_and(|t| t & tier::PINNED == 0) {
+        for x in &files {
+            let chunks = file_chunks(&d.store, x)?;
+            for (cid, _) in &chunks {
+                if let Some(t) = d.store.tier(cid).map_err(|e| e.to_string())? {
+                    d.store.set_tier(cid, t | tier::PINNED).map_err(|e| e.to_string())?;
+                }
+            }
+            d.store.register_serving(&chunks).map_err(|e| e.to_string())?;
+        }
+        println!(
+            "follow {ns}: version {} complete ({} file(s)), kept and served to other followers",
+            f.seq,
+            files.len()
+        );
+    }
+    // The new version is complete: what only the one it replaced had is no longer needed here.
+    if let Some(prev) = f.previous
+        && version_complete
     {
-        if prev.root != cur.root {
-            forget(d, &prev)?;
+        let keep: std::collections::HashSet<Cid> = files.iter().map(|x| x.root).collect();
+        for old in version_files(&d.store, &prev).iter().filter(|x| !keep.contains(&x.root)) {
+            forget(d, old)?;
         }
         f.previous = None;
         d.store.update_follow(&f).map_err(|e| e.to_string())?;

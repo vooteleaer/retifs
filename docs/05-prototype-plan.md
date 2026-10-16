@@ -52,6 +52,7 @@ Prototypes are throwaway. They're for learning, not for locking in the format. T
 
 ## Phase 2: database
 - [x] Records, canonical encoding and snapshots; local attribute index and BeFS-style queries; `rec add/set/get/rm`, `query` ([ADR-0016](adr/0016-records-and-snapshots.md)).
+- [x] Namespaces published over channels: snapshot versions, followers rebuild them and fetch their content ([ADR-0016](adr/0016-records-and-snapshots.md)).
 - [ ] Signed per-modification commits inside namespaces, Prolly-tree index; `watch` / `transaction` / `at` in the API.
 - [ ] `keep:<device>` tag and query-based keep rules (proactive pull).
 - [ ] Blind index, remote `/query`, live query.

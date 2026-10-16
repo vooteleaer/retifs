@@ -92,6 +92,9 @@ pub enum Request {
         #[serde(default)]
         compress: bool,
     },
+    /// Publishes a snapshot of namespace `ns` as the channel's next version
+    /// (ADR-0016): followers rebuild the namespace and fetch its content.
+    ChannelPublishNs { name: String, ns: String },
     /// Follows a channel: keeps its latest version here, asking these nodes for updates.
     Follow { address: String, from: Vec<String> },
     /// Channels written and followed here.
@@ -210,6 +213,9 @@ pub struct FollowInfo {
     pub current: Option<String>,
     /// That version is completely local.
     pub complete: bool,
+    /// The local namespace a snapshot version is rebuilt into.
+    #[serde(default)]
+    pub namespace: Option<String>,
 }
 
 /// Disk usage per tier and the resolved budget (ADR-0012), in bytes.

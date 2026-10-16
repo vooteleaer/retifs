@@ -12,6 +12,7 @@
 //!     retifs [--store DIR] forget READ-CAP
 //!     retifs [--store DIR] channel create NAME
 //!     retifs [--store DIR] channel publish NAME FILE [--compress]
+//!     retifs [--store DIR] channel publish-ns NAME NS
 //!     retifs [--store DIR] follow ADDRESS [--from NODE]...
 //!     retifs [--store DIR] channels
 //!
@@ -45,7 +46,7 @@ fn usage() -> ! {
          retifs [--store DIR] want READ-CAP [--from NODE]...
          retifs [--store DIR] replicate READ-CAP --to NODE...\n\
          retifs [--store DIR] forget READ-CAP\n\
-         retifs [--store DIR] channel create NAME | channel publish NAME FILE [--compress]\n\
+         retifs [--store DIR] channel create NAME | channel publish NAME FILE [--compress] | channel publish-ns NAME NS\n\
          retifs [--store DIR] follow ADDRESS [--from NODE]... | channels\n\
          retifs [--store DIR] rec add NS [KEY=VALUE]... [--file PATH] | rec set NS ID [KEY=VALUE]... [--unset KEY]...\n\
          retifs [--store DIR] rec get NS ID | rec rm NS ID | query NS [TERM]..."
@@ -156,6 +157,16 @@ async fn main() {
                 let data = std::fs::read(&path).unwrap_or_else(|e| fail(format!("{}: {e}", path.display())));
                 let (seq, cap) = client.channel_publish(&name, data, compress).await.unwrap_or_else(|e| fail(e));
                 println!("published {name} version {seq}: {cap}");
+            }
+            Some("publish-ns") => {
+                let name = it.next().unwrap_or_else(|| usage());
+                let ns = it.next().unwrap_or_else(|| usage());
+                let req = libretifs::Request::ChannelPublishNs { name: name.clone(), ns: ns.clone() };
+                match client.call(req).await.unwrap_or_else(|e| fail(e)) {
+                    libretifs::Response::Published { seq, cap } => println!("published namespace {ns} as {name} version {seq}: {cap}"),
+                    libretifs::Response::Error { message } => fail(message),
+                    _ => fail("unexpected response"),
+                }
             }
             _ => usage(),
         },
@@ -307,9 +318,10 @@ fn print_channels(own: &[libretifs::ChannelInfo], follows: &[libretifs::FollowIn
         let short = f.address.get(..32).unwrap_or(&f.address);
         match &f.current {
             Some(cap) => println!(
-                "follows {short}… version {}{}: {cap}",
+                "follows {short}… version {}{}{}: {cap}",
                 f.seq,
-                if f.complete { " (complete)" } else { " (fetching)" }
+                if f.complete { " (complete)" } else { " (fetching)" },
+                f.namespace.as_ref().map(|n| format!(", namespace {n}")).unwrap_or_default()
             ),
             None => println!("follows {short}… (no version yet)"),
         }
