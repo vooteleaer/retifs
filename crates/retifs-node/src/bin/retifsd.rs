@@ -967,11 +967,14 @@ async fn lease_upkeep(d: Arc<Daemon>) {
 /// times each holder's loss estimate from its record. A holder whose receipt
 /// ran out counts as lost; one that is only unreachable just gets a worse
 /// record (lazy repair: it may come back with the data).
-fn loss_now(d: &Daemon, file: &FileRef) -> (f64, std::collections::BTreeSet<PeerId>) {
+/// Returns (local copy's estimate, holders, product of all).
+fn loss_now(d: &Daemon, file: &FileRef) -> (f64, Vec<retifs_store::HolderView>, f64) {
     let pinned = d.store.tier(&file.root).ok().flatten().is_some_and(|f| f & tier::PINNED != 0);
-    let mut risk = if pinned { 0.1 } else { 0.5 };
+    let local = if pinned { 0.1 } else { 0.5 };
     let now = now_s();
-    let mut worst: std::collections::BTreeMap<PeerId, f64> = Default::default();
+    let hops: HashMap<PeerId, u8> =
+        d.store.storage_nodes().unwrap_or_default().into_iter().map(|n| (n.peer, n.hops)).collect();
+    let mut by_holder: std::collections::BTreeMap<PeerId, retifs_store::HolderView> = Default::default();
     for o in d.store.own_leases().unwrap_or_default().into_iter().filter(|o| o.root == file.root) {
         let lapsed = o.receipt_until > 0 && o.receipt_until < now;
         let p = if lapsed || o.proof == ProofState::Failed {
@@ -979,13 +982,19 @@ fn loss_now(d: &Daemon, file: &FileRef) -> (f64, std::collections::BTreeSet<Peer
         } else {
             d.store.holder_stats(&o.holder).map(|s| s.loss()).unwrap_or(1.0)
         };
-        let w = worst.entry(o.holder).or_insert(0.0);
-        *w = w.max(p);
+        let v = by_holder.entry(o.holder).or_insert(retifs_store::HolderView {
+            peer: o.holder,
+            loss: 0.0,
+            hops: hops.get(&o.holder).copied().unwrap_or(0),
+            confirmed: true,
+        });
+        // A holder is as good as its worst lease for this file.
+        v.loss = v.loss.max(p);
+        v.confirmed &= o.receipt_until >= now && !lapsed;
     }
-    for p in worst.values() {
-        risk *= p;
-    }
-    (risk, worst.into_keys().collect())
+    let holders: Vec<_> = by_holder.into_values().collect();
+    let risk = local * holders.iter().map(|h| h.loss).product::<f64>();
+    (local, holders, risk)
 }
 
 /// Whether a loss estimate meets the target. A relative tolerance keeps
@@ -998,10 +1007,39 @@ fn met(risk: f64, target: f64) -> bool {
 /// is below the target. Data goes by push, so readers' copies (cache, never
 /// served) can be placed too, and holders don't learn who sent it.
 async fn place(d: &Daemon, file: &FileRef) -> Result<(), String> {
-    let (mut risk, holders) = loss_now(d, file);
+    // A lease that ran out unrenewed means the holder dropped the copy: forget
+    // that holder for this file instead of re-offering to it later (a minute of
+    // grace for clocks). One that's only away but still within its lease counts
+    // on, with a worse record (lazy repair).
+    let now = now_s();
+    let lapsed: std::collections::BTreeSet<PeerId> = d
+        .store
+        .own_leases()
+        .map_err(|e| e.to_string())?
+        .into_iter()
+        .filter(|o| o.root == file.root && o.expires + 60 < now)
+        .map(|o| o.holder)
+        .collect();
+    for h in lapsed {
+        d.store.drop_holder(&file.root, &h).map_err(|e| e.to_string())?;
+        println!("placement: {}: lease at <{}> ran out unrenewed, its copy is gone", file.root, hex(&h));
+    }
+    let (local, views, mut risk) = loss_now(d, file);
     if met(risk, d.loss_target) {
+        // Surplus after a repair (the absent holder came back): stop renewing
+        // the worst copy once the target holds well without it.
+        if let Some(drop) = retifs_store::surplus_holder(local, &views, d.loss_target) {
+            let n = d.store.drop_holder(&file.root, &drop).map_err(|e| e.to_string())?;
+            let without = local * views.iter().filter(|h| h.peer != drop).map(|h| h.loss).product::<f64>();
+            println!(
+                "placement: {} trimmed at <{}> ({n} lease(s) no longer renewed), loss estimate without it {without:.1e}",
+                file.root,
+                hex(&drop)
+            );
+        }
         return Ok(());
     }
+    let holders: std::collections::BTreeSet<PeerId> = views.iter().map(|h| h.peer).collect();
     let chunks = file_chunks(&d.store, file)?;
     let bytes = chunks.len() as u64 * 16 * 1024;
     // The nearest few by hops, measured by linking (RTT) and earlier transfers,

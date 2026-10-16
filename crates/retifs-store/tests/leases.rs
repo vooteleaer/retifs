@@ -194,3 +194,24 @@ fn forgetting_drops_leases_and_releases_only_unshared_own_chunks() {
     assert_eq!(st.tier(&held_for_other.cid).unwrap(), Some(tier::CACHE | tier::SERVING), "still kept for them");
     assert!(st.serving_token(&held_for_other.cid).unwrap().is_some());
 }
+
+#[test]
+fn surplus_copies_are_trimmed_with_hysteresis() {
+    use retifs_store::{surplus_holder, HolderView};
+    let h = |n: u8, loss: f64, hops: u8, confirmed: bool| HolderView { peer: [n; 16], loss, hops, confirmed };
+    let target = 1e-3;
+    // Exactly at the target with two holders: nothing to trim.
+    assert_eq!(surplus_holder(0.1, &[h(1, 0.1, 1, true), h(2, 0.1, 1, true)], target), None);
+    // A third copy after a repair, and the flaky one recovered a little: 0.1 × 0.02 × 0.02
+    // without the flaky holder is 4e-5, well under half the target. The worst record goes.
+    let after_repair = [h(1, 0.02, 1, true), h(2, 0.15, 1, true), h(3, 0.02, 4, true)];
+    assert_eq!(surplus_holder(0.1, &after_repair, target), Some([2; 16]));
+    // Never while a placement is in progress (a holder without a receipt yet).
+    let pending = [h(1, 0.02, 1, true), h(2, 0.15, 1, true), h(3, 0.02, 4, false)];
+    assert_eq!(surplus_holder(0.1, &pending, target), None);
+    // Equal records: the farthest goes.
+    let equal = [h(1, 0.01, 1, true), h(2, 0.01, 5, true), h(3, 0.01, 2, true)];
+    assert_eq!(surplus_holder(0.1, &equal, target), Some([2; 16]));
+    // Just under the target but not under half of it: keep (hysteresis).
+    assert_eq!(surplus_holder(0.1, &[h(1, 0.09, 1, true), h(2, 0.5, 1, true)], target * 1.0), None);
+}

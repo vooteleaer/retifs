@@ -39,6 +39,36 @@ pub const SLOW_DEFAULT_RATE: f64 = 150.0;
 /// Assumed for other links before anything was measured.
 pub const FAST_DEFAULT_RATE: f64 = 50_000.0;
 
+/// One holder of a file, as placement sees it.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct HolderView {
+    pub peer: PeerId,
+    /// Estimated chance its copy is lost (1.0: counted as gone).
+    pub loss: f64,
+    pub hops: u8,
+    /// It has a valid receipt now.
+    pub confirmed: bool,
+}
+
+/// Trim only when the estimate without the holder is at most this share of
+/// the target: adding happens above the target, so copies don't flip back and forth.
+pub const TRIM_MARGIN: f64 = 0.5;
+
+/// The holder whose copy is surplus, if any (ADR-0014): without it the loss
+/// estimate is still at most `target × TRIM_MARGIN`. Nothing is trimmed while
+/// any holder is unconfirmed (a placement in progress). The worst record goes
+/// first; on a tie, the farthest.
+pub fn surplus_holder(local: f64, holders: &[HolderView], target: f64) -> Option<PeerId> {
+    if !holders.iter().all(|h| h.confirmed) {
+        return None;
+    }
+    let mut order: Vec<&HolderView> = holders.iter().collect();
+    order.sort_by(|a, b| b.loss.total_cmp(&a.loss).then(b.hops.cmp(&a.hops)));
+    order.into_iter().map(|h| h.peer).find(|&drop| {
+        local * holders.iter().filter(|h| h.peer != drop).map(|h| h.loss).product::<f64>() <= target * TRIM_MARGIN
+    })
+}
+
 /// What this node has seen of the path to a peer (ADR-0014: link cost). A
 /// client of the shared instance can't see the interfaces behind it, so
 /// quality is measured: link setup RTT, and throughput of real transfers.
@@ -237,6 +267,26 @@ impl SlabStore {
         }
         w.commit()?;
         Ok(())
+    }
+
+    /// Stops keeping `root` at one holder: drops this node's leases for it
+    /// there, so they're no longer renewed and run out. Returns how many.
+    pub fn drop_holder(&self, root: &Cid, holder: &PeerId) -> Result<usize, StoreError> {
+        let ids: Vec<[u8; 16]> = self
+            .own_leases()?
+            .into_iter()
+            .filter(|o| o.root == *root && o.holder == *holder)
+            .map(|o| o.lease.id)
+            .collect();
+        let w = self.db.begin_write()?;
+        {
+            let mut own = w.open_table(crate::leases::OWN_LEASES)?;
+            for id in &ids {
+                own.remove(id.as_slice())?;
+            }
+        }
+        w.commit()?;
+        Ok(ids.len())
     }
 
     /// This node no longer needs `root` kept: it leaves the needed and wanted
