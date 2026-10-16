@@ -7,10 +7,11 @@
 //! have request  = item × n          item = cid prefix (8) ‖ proof (16)  1..=MAX_HAVE items
 //! have response = bitmap (n bits)
 //!
-//! lease request    = 0x01 ‖ lease ‖ n (u8) ‖ source node (16) × n     offer a lease (sources: where to pull)
+//! lease request    = 0x01 ‖ lease ‖ n (u8) ‖ source node (16) × n [‖ stamp (32)]   offer a lease (sources: where to pull)
 //!                  | 0x02 ‖ renewal (89)                             move its expiry
 //!                  | 0x03 ‖ n (u16) ‖ renewal (89) × n               1..=MAX_BUNDLE renewals at once
-//! lease response   = status (u8) per offer or renewal: 0 accepted, 1 no room, 2 invalid or conflicting, 3 unknown lease
+//! lease response   = status (u8) per offer or renewal: 0 accepted, 1 no room, 2 invalid or conflicting, 3 unknown lease,
+//!                    or for an offer 4 ‖ cost (u8): a stamp worth `cost` bits is required (retifs_core::stamp)
 //! receipt request  = lease_id (16) × n                                1..=MAX_BUNDLE leases
 //! receipt response = reply × n: 0x00 ‖ receipt (185) | 0x01 ‖ held (u16) ‖ total (u16) | 0x02 (unknown lease)
 //!
@@ -34,6 +35,7 @@ use retifs_core::{
     access::PROOF_LEN,
     cid::CID_LEN,
     lease::{Lease, LeaseId, Receipt, Renewal, PROVE_LEN, RECEIPT_LEN, RENEWAL_LEN},
+    stamp::{Stamp, STAMP_LEN},
     Cid,
 };
 
@@ -186,28 +188,51 @@ pub fn decode_bitmap(bytes: &[u8], n: usize) -> Result<Vec<bool>, ProtocolError>
 /// A `/retifs/lease` request.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum LeaseRequest {
-    Offer { lease: Lease, sources: Vec<[u8; 16]> },
+    Offer { lease: Lease, sources: Vec<[u8; 16]>, stamp: Option<Stamp> },
     Renew(Renewal),
     RenewMany(Vec<Renewal>),
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-#[repr(u8)]
 pub enum LeaseStatus {
-    Accepted = 0,
-    NoRoom = 1,
-    Invalid = 2,
-    Unknown = 3,
+    Accepted,
+    NoRoom,
+    Invalid,
+    Unknown,
+    /// Offers to this holder need a stamp of at least this many bits.
+    StampRequired(u8),
+}
+
+impl LeaseStatus {
+    /// The one-byte form used in renewal bundles (StampRequired never occurs there).
+    pub fn byte(self) -> u8 {
+        match self {
+            LeaseStatus::Accepted => 0,
+            LeaseStatus::NoRoom => 1,
+            LeaseStatus::Invalid | LeaseStatus::StampRequired(_) => 2,
+            LeaseStatus::Unknown => 3,
+        }
+    }
+}
+
+pub fn encode_lease_status(s: LeaseStatus) -> Vec<u8> {
+    match s {
+        LeaseStatus::StampRequired(cost) => vec![4, cost],
+        other => vec![other.byte()],
+    }
 }
 
 pub fn encode_lease_request(req: &LeaseRequest) -> Vec<u8> {
     match req {
-        LeaseRequest::Offer { lease, sources } => {
+        LeaseRequest::Offer { lease, sources, stamp } => {
             let mut out = vec![OFFER];
             out.extend_from_slice(&lease.encode());
             out.push(sources.len() as u8);
             for s in sources {
                 out.extend_from_slice(s);
+            }
+            if let Some(st) = stamp {
+                out.extend_from_slice(st);
             }
             out
         }
@@ -229,11 +254,14 @@ pub fn decode_lease_request(bytes: &[u8]) -> Result<LeaseRequest, ProtocolError>
         Some((&OFFER, rest)) => {
             let (lease, rest) = Lease::decode(rest).map_err(|_| ProtocolError("invalid lease"))?;
             let (&n, rest) = rest.split_first().ok_or(ProtocolError("missing source count"))?;
-            if rest.len() != n as usize * 16 {
-                return Err(ProtocolError("source list length"));
-            }
-            let sources = rest.as_chunks::<16>().0.to_vec();
-            Ok(LeaseRequest::Offer { lease, sources })
+            let n = n as usize * 16;
+            let stamp = match rest.len().checked_sub(n) {
+                Some(0) => None,
+                Some(STAMP_LEN) => Some(rest[n..].try_into().unwrap()),
+                _ => return Err(ProtocolError("source list length")),
+            };
+            let sources = rest[..n].as_chunks::<16>().0.to_vec();
+            Ok(LeaseRequest::Offer { lease, sources, stamp })
         }
         Some((&RENEW, rest)) => Ok(LeaseRequest::Renew(Renewal::decode(rest).map_err(|_| ProtocolError("invalid renewal"))?)),
         Some((&RENEW_MANY, rest)) => {
@@ -252,6 +280,7 @@ pub fn decode_lease_request(bytes: &[u8]) -> Result<LeaseRequest, ProtocolError>
 pub fn decode_lease_status(bytes: &[u8]) -> Result<LeaseStatus, ProtocolError> {
     match bytes {
         [b] => status(*b),
+        [4, cost] => Ok(LeaseStatus::StampRequired(*cost)),
         _ => Err(ProtocolError("lease status")),
     }
 }
@@ -429,12 +458,14 @@ mod tests {
         let key = LeaseKey::derive(&[1; 32], &[2; 16]);
         let lease = Lease::sign(&key, [2; 16], 99, 1, vec![(Cid::of(b"a"), ChunkToken([3; 32]))]);
         for req in [
-            LeaseRequest::Offer { lease: lease.clone(), sources: vec![[4; 16], [5; 16]] },
+            LeaseRequest::Offer { lease: lease.clone(), sources: vec![[4; 16], [5; 16]], stamp: None },
+            LeaseRequest::Offer { lease: lease.clone(), sources: vec![[4; 16]], stamp: Some([6; 32]) },
+            LeaseRequest::Offer { lease: lease.clone(), sources: vec![], stamp: Some([7; 32]) },
             LeaseRequest::Renew(Renewal::sign(&key, [2; 16], 100)),
         ] {
             assert_eq!(decode_lease_request(&encode_lease_request(&req)).unwrap(), req);
         }
-        let mut forged = encode_lease_request(&LeaseRequest::Offer { lease, sources: vec![] });
+        let mut forged = encode_lease_request(&LeaseRequest::Offer { lease, sources: vec![], stamp: None });
         forged[30] ^= 1;
         assert!(decode_lease_request(&forged).is_err());
         assert_eq!(encode_lease_request(&LeaseRequest::Renew(Renewal::sign(&key, [2; 16], 1))).len(), 90, "one packet");
@@ -454,6 +485,7 @@ mod tests {
         assert_eq!(decode_receipt_request(&encode_receipt_request(&ids)).unwrap(), ids);
         let bundle = LeaseRequest::RenewMany((0..3).map(|i| Renewal::sign(&key, [2; 16], 100 + i)).collect());
         assert_eq!(decode_lease_request(&encode_lease_request(&bundle)).unwrap(), bundle);
+        assert_eq!(decode_lease_status(&encode_lease_status(LeaseStatus::StampRequired(9))).unwrap(), LeaseStatus::StampRequired(9));
         assert_eq!(decode_lease_statuses(&[0, 3, 2], 3).unwrap(), vec![LeaseStatus::Accepted, LeaseStatus::Unknown, LeaseStatus::Invalid]);
         let (id, nonce, idx) = decode_prove(&encode_prove(&[1; 16], &[2; 16], &[0, 7, 65535])).unwrap();
         assert_eq!((id, nonce, idx), ([1; 16], [2; 16], vec![0, 7, 65535]));

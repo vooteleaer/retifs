@@ -11,6 +11,10 @@
 //! `--slow-link-budget`: the most a file may take over a slow link (LoRa class) before
 //! only its manifest is fetched and the rest waits for a faster path (default 10m).
 //! `--treat-as-slow NODE`: testing only; plan as if NODE were behind LoRa.
+//! `--stamp-cost`: proof of work (bits, LXMF stamps) asked of every lease offer to this
+//! node (default 20 bits: about 0.1 s per lease on a desktop, a few seconds on a Pi;
+//! 0: none). `--max-stamp-cost`: the most this node pays when offering leases (default 24).
+//! A solver reuses the hash state after the workblock, so each try costs one small hash.
 //! `--loss-target`: keep adding nearby holders for each needed file until the
 //! estimated chance of losing every copy is below P (default 0.001).
 //! `--lease-term`: how long leases this node gives out run before renewal is
@@ -35,6 +39,7 @@ use libretifs::{read_frame, write_frame, Envelope, GetStats, Request, Response, 
 use personal_rns::prelude::*;
 use retifs_core::{
     lease::{self, node_destination, Lease, LeaseId, LeaseKey, Receipt, Renewal},
+    stamp,
     manifest::{self, decode_node, decode_root, NodeEntry},
     open, ChunkToken, Cid, ConvergenceSecret, FileRef,
 };
@@ -47,7 +52,7 @@ use retifs_net::{
         decode_have, decode_lease_request, decode_lease_status, decode_lease_statuses, decode_prove, decode_prove_reply,
         decode_receipt_replies, decode_receipt_request, encode_receipt_replies, encode_receipt_request, MAX_BUNDLE,
         decode_request, encode_bitmap, encode_lease_request, encode_prove, encode_prove_reply,
-        encode_response, LeaseRequest, LeaseStatus, ReceiptReply, GET_ENDPOINT, HAVE_ENDPOINT, LEASE_ENDPOINT,
+        encode_lease_status, encode_response, LeaseRequest, LeaseStatus, ReceiptReply, GET_ENDPOINT, HAVE_ENDPOINT, LEASE_ENDPOINT,
         PROVE_ENDPOINT, RECEIPT_ENDPOINT, decode_bitmap, decode_put, encode_have, encode_put, HAVE_PREFIX, MAX_HAVE,
         MAX_PUT, PUT_ENDPOINT,
     },
@@ -69,6 +74,8 @@ struct Shared {
     hold_limit: Option<u64>,
     /// Wakes the lease puller (a lease was accepted).
     pull_wake: Notify,
+    /// Bits of proof of work asked of every lease offer (0: none).
+    stamp_cost: u8,
 }
 
 struct Get;
@@ -145,10 +152,17 @@ impl RequestEndpoint<Arc<Shared>> for LeaseEndpoint {
             _ => LeaseStatus::Unknown,
         };
         let status = match decode_lease_request(context.data) {
-            Ok(LeaseRequest::RenewMany(rs)) => return context.respond(rs.iter().map(|r| renew(r) as u8).collect::<Vec<u8>>()),
+            Ok(LeaseRequest::RenewMany(rs)) => return context.respond(rs.iter().map(|r| renew(r).byte()).collect::<Vec<u8>>()),
             Err(_) => LeaseStatus::Invalid,
             Ok(LeaseRequest::Offer { lease, .. }) if lease.expires <= now_s() => LeaseStatus::Invalid,
-            Ok(LeaseRequest::Offer { lease, sources }) => match s.store.accept_lease(&lease, &sources, s.hold_limit()) {
+            // Proof of work against junk leases (ADR-0014), checked before anything is stored.
+            Ok(LeaseRequest::Offer { lease, stamp, .. })
+                if s.stamp_cost > 0
+                    && !stamp.is_some_and(|st| stamp::valid(&stamp::workblock(&stamp::lease_material(&lease)), &st, s.stamp_cost)) =>
+            {
+                LeaseStatus::StampRequired(s.stamp_cost)
+            }
+            Ok(LeaseRequest::Offer { lease, sources, .. }) => match s.store.accept_lease(&lease, &sources, s.hold_limit()) {
                 Ok(Accept::Accepted) => {
                     println!("lease {}: keeping {} chunk(s) for someone until {}", hex(&lease.id), lease.entries.len(), lease.expires);
                     s.pull_wake.notify_one();
@@ -159,7 +173,7 @@ impl RequestEndpoint<Arc<Shared>> for LeaseEndpoint {
             },
             Ok(LeaseRequest::Renew(r)) => renew(&r),
         };
-        context.respond(vec![status as u8])
+        context.respond(encode_lease_status(status))
     }
 }
 
@@ -251,6 +265,8 @@ struct Args {
     loss_target: f64,
     slow_budget: u64,
     treat_as_slow: Vec<PeerId>,
+    stamp_cost: u8,
+    max_stamp_cost: u8,
 }
 
 fn duration_secs(s: &str) -> u64 {
@@ -290,6 +306,8 @@ fn args() -> Args {
         loss_target: 1e-3,
         slow_budget: 600,
         treat_as_slow: Vec::new(),
+        stamp_cost: 20,
+        max_stamp_cost: 24,
     };
     let mut it = std::env::args().skip(1);
     while let Some(arg) = it.next() {
@@ -304,12 +322,15 @@ fn args() -> Args {
             "--hold-for-others" => a.hold_limit = Some(size(&it.next().expect("--hold-for-others SIZE"))),
             "--slow-link-budget" => a.slow_budget = duration_secs(&it.next().expect("--slow-link-budget DURATION")),
             "--treat-as-slow" => a.treat_as_slow.push(*parse_destination(&it.next().expect("--treat-as-slow NODE")).expect("node hash").as_bytes()),
+            "--stamp-cost" => a.stamp_cost = it.next().and_then(|v| v.parse().ok()).expect("--stamp-cost BITS"),
+            "--max-stamp-cost" => a.max_stamp_cost = it.next().and_then(|v| v.parse().ok()).expect("--max-stamp-cost BITS"),
             "--loss-target" => a.loss_target = it.next().and_then(|v| v.parse().ok()).expect("--loss-target P (e.g. 0.001)"),
             "--lease-term" => a.lease_term = duration_secs(&it.next().expect("--lease-term DURATION")).max(60),
             "-h" | "--help" => {
                 println!(
                     "retifsd [--store DIR] [--max-store SIZE] [--min-free SIZE] [--cache-max SIZE] [--private-requests]
-                             [--hold-for-others SIZE] [--lease-term DURATION] [--loss-target P] [--slow-link-budget DURATION] [--public] [--put FILE]..."
+                             [--hold-for-others SIZE] [--lease-term DURATION] [--loss-target P] [--slow-link-budget DURATION]\n        \
+                     [--stamp-cost BITS] [--max-stamp-cost BITS] [--public] [--put FILE]..."
                 );
                 std::process::exit(0);
             }
@@ -398,6 +419,9 @@ struct Daemon {
     treat_as_slow: Vec<PeerId>,
     /// Files whose rest waits for a faster path, with the estimate over the slow link.
     deferred: Mutex<HashMap<Cid, u64>>,
+    /// Stamp cost each holder asked for, so later offers carry a stamp at once.
+    stamp_costs: Mutex<HashMap<PeerId, u8>>,
+    max_stamp_cost: u8,
 }
 
 impl Daemon {
@@ -463,6 +487,7 @@ async fn serve(store: Arc<SlabStore>, identity: node::IdentitySecret, endpoint: 
         identity: identity_bytes,
         hold_limit: args.hold_limit,
         pull_wake: Notify::new(),
+        stamp_cost: args.stamp_cost,
     });
     let (heard_tx, mut heard_rx) = mpsc::unbounded_channel::<(PeerId, u8)>();
     let (seek_tx, seek_rx) = mpsc::unbounded_channel::<PeerId>();
@@ -497,6 +522,8 @@ async fn serve(store: Arc<SlabStore>, identity: node::IdentitySecret, endpoint: 
         slow_budget: args.slow_budget,
         treat_as_slow: args.treat_as_slow.clone(),
         deferred: Mutex::new(HashMap::new()),
+        stamp_costs: Mutex::new(HashMap::new()),
+        max_stamp_cost: args.max_stamp_cost,
     });
     println!("attached to shared instance {of}");
     println!("serving {} chunks as retifs.node <{}>", store.len().unwrap_or(0), daemon.node_hex);
@@ -1022,6 +1049,36 @@ async fn place(d: &Daemon, file: &FileRef) -> Result<(), String> {
     Ok(())
 }
 
+/// Offers a lease, with a stamp if the holder asks for one (or asked before).
+/// A holder asking more than `--max-stamp-cost` is treated as having no room.
+async fn offer(d: &Daemon, link: LinkId, peer: &PeerId, l: &Lease, sources: &[PeerId]) -> Result<LeaseStatus, String> {
+    let mut cost = d.stamp_costs.lock().unwrap().get(peer).copied().unwrap_or(0);
+    for _ in 0..2 {
+        let stamp = if cost > 0 {
+            let material = stamp::lease_material(l);
+            let t0 = Instant::now();
+            let st = tokio::task::spawn_blocking(move || stamp::generate(&material, cost)).await.map_err(|e| e.to_string())?;
+            println!("lease {}: stamp of {cost} bits for <{}> in {:.2} s", hex(&l.id), hex(peer), t0.elapsed().as_secs_f64());
+            Some(st)
+        } else {
+            None
+        };
+        let req = LeaseRequest::Offer { lease: l.clone(), sources: sources.to_vec(), stamp };
+        match decode_lease_status(&d.ask(link, LEASE_ENDPOINT, encode_lease_request(&req)).await?).map_err(|e| e.to_string())? {
+            LeaseStatus::StampRequired(c) if c > d.max_stamp_cost => {
+                println!("lease {}: <{}> asks a stamp of {c} bits, more than {}: not offering there", hex(&l.id), hex(peer), d.max_stamp_cost);
+                return Ok(LeaseStatus::NoRoom);
+            }
+            LeaseStatus::StampRequired(c) if c != cost => {
+                d.stamp_costs.lock().unwrap().insert(*peer, c);
+                cost = c;
+            }
+            other => return Ok(other),
+        }
+    }
+    Err("holder keeps refusing the stamp".into())
+}
+
 /// Offers `peer` leases over all of `chunks` and pushes what it lacks.
 /// Ok(false): it has no room.
 async fn lease_to(d: &Daemon, peer: &PeerId, file: &FileRef, chunks: &[(Cid, ChunkToken)], sources: &[PeerId]) -> Result<bool, String> {
@@ -1030,9 +1087,7 @@ async fn lease_to(d: &Daemon, peer: &PeerId, file: &FileRef, chunks: &[(Cid, Chu
         let mut id = [0u8; lease::ID_LEN];
         getrandom::fill(&mut id).expect("OS entropy");
         let l = d.sign_lease(id, now_s() + d.lease_term, part.to_vec());
-        let req = LeaseRequest::Offer { lease: l.clone(), sources: sources.to_vec() };
-        let reply = d.ask(link, LEASE_ENDPOINT, encode_lease_request(&req)).await;
-        match reply.and_then(|r| decode_lease_status(&r).map_err(|e| e.to_string())) {
+        match offer(d, link, peer, &l, sources).await {
             Ok(LeaseStatus::Accepted) => {
                 d.store.record_own_lease(&l, peer, &file.root).map_err(|e| e.to_string())?;
                 match push(d, link, &l, Some(peer)).await {
@@ -1219,8 +1274,7 @@ async fn upkeep_holder(
 /// the same ID, with a fresh expiry, and wait for a new receipt.
 async fn reoffer(d: &Daemon, link: LinkId, o: &mut OwnLease, expires: u64) -> Result<(), String> {
     let l = d.sign_lease(o.lease.id, expires, o.lease.entries.clone());
-    let req = LeaseRequest::Offer { lease: l.clone(), sources: vec![d.node_id] };
-    match decode_lease_status(&d.ask(link, LEASE_ENDPOINT, encode_lease_request(&req)).await?).map_err(|e| e.to_string())? {
+    match offer(d, link, &o.holder, &l, &[d.node_id]).await? {
         LeaseStatus::Accepted => {
             o.lease = l;
             o.expires = expires;

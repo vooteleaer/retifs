@@ -10,6 +10,7 @@ pub mod cid;
 pub mod lease;
 pub mod manifest;
 pub mod secret;
+pub mod stamp;
 
 pub use access::ChunkToken;
 pub use chunk::{open, seal, seal_with, ChunkError, Compression, Sealed, Seed};

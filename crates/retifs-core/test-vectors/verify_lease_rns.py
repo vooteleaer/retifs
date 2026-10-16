@@ -3,7 +3,8 @@
 
 Rebuilds the lease, renewal and receipt from the vector inputs using only RNS's
 own primitives (hkdf, HMAC, Ed25519, Identity, Destination) and compares them
-byte for byte (Ed25519 signatures are deterministic).
+byte for byte (Ed25519 signatures are deterministic). Stamps are checked with
+LXMF's own LXStamper.
 
     python verify_lease_rns.py [lease-v1.json]
 """
@@ -64,6 +65,16 @@ def main():
     checks["receipt"] = receipt.hex() == v["receipt"]
     vec_receipt = h(v["receipt"])
     checks["receipt_validate"] = holder.validate(vec_receipt[-64:], b"retifs/v1/receipt" + vec_receipt[:-64])
+
+    # Stamps: LXMF's own construction (LXStamper), over "retifs/v1/stamp" || SHA-256(lease body).
+    from LXMF import LXStamper
+    material = b"retifs/v1/stamp" + hashlib.sha256(body).digest()
+    checks["stamp_material"] = material.hex() == v["stamp_material"]
+    wb = LXStamper.stamp_workblock(material)
+    checks["stamp_workblock"] = hashlib.sha256(wb).hexdigest() == v["stamp_workblock_sha256"]
+    stamp = h(v["stamp"])
+    checks["stamp_value"] = LXStamper.stamp_value(wb, stamp) == v["stamp_value"] >= v["stamp_cost"]
+    checks["stamp_valid_lxmf"] = LXStamper.stamp_valid(stamp, v["stamp_cost"], wb)
 
     failures = 0
     for name, ok in checks.items():

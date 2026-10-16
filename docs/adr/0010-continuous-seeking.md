@@ -95,7 +95,7 @@ A read-cap may carry hints: `retifs:1:<root>:<seed>:<size>@<node>,<node>`. Hints
 | `/retifs/have` | items of CID prefix (8) ‖ proof (16), ≤ 16 | bitmap |
 | `/retifs/get` | items of CID (33) ‖ proof (16), ≤ 64 | ciphertexts |
 | `/retifs/put` | lease id ‖ ciphertexts (≤ 16) | bitmap: stored (only chunks the lease lists) |
-| `/retifs/lease` | signed lease ‖ source nodes, a renewal, or a bundle of up to 64 renewals | per item: accepted, no room, invalid, unknown lease |
+| `/retifs/lease` | signed lease ‖ source nodes [‖ stamp], a renewal, or a bundle of up to 64 renewals | per item: accepted, no room, invalid, unknown lease; for an offer also "stamp required, cost N" |
 | `/retifs/receipt` | up to 64 lease ids | per lease: signed receipt, progress, or unknown |
 | `/retifs/prove` | lease id ‖ nonce ‖ chunk indices | storage proof per chunk |
 

@@ -20,6 +20,7 @@ Every crypto decision is checked against this.
 - Chunk count and size class, request timing.
 - Public content under a convergent key: anyone can compute the CIDs of a known file. That the file exists somewhere is accepted, since the content is public. **Who holds it is not**: see "Holder privacy" below.
 - Lease renewal timing (mitigation: delegated renewal).
+- **Junk leases:** per-lease signing keys rule out quotas per owner, so lease offers carry a proof-of-work stamp (LXMF construction, holder-set cost, [ADR-0014](adr/0014-placement-follows-need.md)); together with each holder's hold limit this makes filling nodes with junk costly, not impossible.
 - **Request patterns:** requests on one link are visibly one session, and bursts are visible in timing. Token linking is removed (per-chunk proofs), request grouping is avoidable (one item per request), and padding hides file size to a PADMÉ bucket; what remains is link/timing correlation ([ADR-0010](adr/0010-continuous-seeking.md)).
 - **File size** to a PADMÉ bucket (O(log log n) bits), not exactly ([ADR-0008](adr/0008-chunk-encryption-and-cid.md)).
 

@@ -4,7 +4,7 @@
 
 use retifs_core::{
     lease::{node_destination, prove, Lease, LeaseKey, Receipt, Renewal},
-    ChunkToken, Cid, Seed,
+    stamp, ChunkToken, Cid, Seed,
 };
 use serde_json::json;
 
@@ -22,6 +22,10 @@ fn main() {
     let holder_identity: [u8; 64] = std::array::from_fn(|i| 0x55 ^ i as u8);
     let receipt = Receipt::sign(&holder_identity, &lease, 1_800_000_000);
     let nonce = [0x77u8; 16];
+    let material = stamp::lease_material(&lease);
+    let wb = stamp::workblock(&material);
+    let lease_stamp = stamp::generate(&material, 8);
+    use sha2::Digest;
 
     let doc = json!({
         "construction": "retifs leases v1 (ADR-0010/0011, decision 6, proposed)",
@@ -45,6 +49,11 @@ fn main() {
         "holder_identity_secret": hex::encode(holder_identity),
         "holder_node_destination": hex::encode(node_destination(&receipt.holder)),
         "receipt": hex::encode(receipt.encode()),
+        "stamp_material": hex::encode(&material),
+        "stamp_workblock_sha256": hex::encode(sha2::Sha256::digest(&wb)),
+        "stamp_cost": 8,
+        "stamp": hex::encode(lease_stamp),
+        "stamp_value": stamp::value(&wb, &lease_stamp),
     });
     println!("{}", serde_json::to_string_pretty(&doc).unwrap());
 }
