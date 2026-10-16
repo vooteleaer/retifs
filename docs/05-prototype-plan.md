@@ -36,7 +36,8 @@ Prototypes are throwaway. They're for learning, not for locking in the format. T
 - [x] Placement follows need, first slice ([ADR-0014](adr/0014-placement-follows-need.md)): every node holds for others by default; storage nodes recognised from announces (hops); push after lease with `have` first; automatic leases to the nearest nodes by writers and readers until a loss target is met; holder reliability record; lazy repair.
 - [x] Link cost: measured RTT and throughput per peer; placement ranks by estimated transfer time and never uses slow links; seeking over a slow link fetches only the manifest unless the rest fits a budget ([ADR-0014](adr/0014-placement-follows-need.md)).
 - [x] Ending need: `retifs forget` (leases run out, shared chunks kept) ([ADR-0014](adr/0014-placement-follows-need.md)).
-- [ ] Placement, continued: offer in announces (needs announce app data from Prns), per-holder bundling, stamps.
+- [x] One upkeep exchange per holder: bundled renewals and receipt requests, sampled storage proofs ([ADR-0014](adr/0014-placement-follows-need.md)).
+- [ ] Placement, continued: offer in announces (needs announce app data from Prns), leases mixing chunks of several files, stamps.
 - [ ] Own-node pool on a LAN, replication target, repair, storage proofs ([ADR-0011](adr/0011-redundancy-by-default.md)).
 - [ ] Volunteer storage offers (`retifs.store`).
 - [ ] Diffuse mode: anonymous push seeding, epidemic re-replication with jitter, cover holdings ([ADR-0011](adr/0011-redundancy-by-default.md)).
