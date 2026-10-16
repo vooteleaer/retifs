@@ -5,7 +5,7 @@ These stay forever in every stored chunk and signature. Everything else can be f
 | # | Decision | Risk | Status |
 |---|---|---|---|
 | 1 | **CID format**: hash algorithm plus a version byte from the start | The IPFS CIDv0→v1 migration was painful for years | proposed ([ADR-0008](adr/0008-chunk-encryption-and-cid.md)) |
-| 2 | **Canonical serialization**: exactly what is signed (msgpack key order, integer encoding) | SSB signed a JS engine's JSON formatting, which made other implementations nearly impossible | open |
+| 2 | **Canonical serialization**: exactly what is signed (msgpack key order, integer encoding) | SSB signed a JS engine's JSON formatting, which made other implementations nearly impossible | proposed: canonical msgpack profile ([ADR-0016](adr/0016-records-and-snapshots.md), vectors verified with RNS umsgpack) |
 | 3 | **Nonces for deterministic crypto**: SIV-style, nonce derived from content | Same key and nonce with different content = silent catastrophe | proposed ([ADR-0008](adr/0008-chunk-encryption-and-cid.md)) |
 | 4 | **Capability semantics**: narrowing, chain validation, revocation | Confused deputy | open |
 | 5 | **Namespace updates**: per-writer sequence numbers, rollback protection (multi-writer, [ADR-0006](adr/0006-versioning-and-sharing.md)) | Replaying an old signed root | proposed: signed heads ([ADR-0015](adr/0015-signed-channels.md), vectors verified against RNS) |
