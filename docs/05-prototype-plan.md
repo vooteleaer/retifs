@@ -38,7 +38,8 @@ Prototypes are throwaway. They're for learning, not for locking in the format. T
 - [x] Ending need: `retifs forget` (leases run out, shared chunks kept) ([ADR-0014](adr/0014-placement-follows-need.md)).
 - [x] One upkeep exchange per holder: bundled renewals and receipt requests, sampled storage proofs ([ADR-0014](adr/0014-placement-follows-need.md)).
 - [x] Stamps on lease offers (LXMF construction, verified with LXMF), holder-set cost, offerer limit ([ADR-0014](adr/0014-placement-follows-need.md)).
-- [ ] Placement, continued: offer in announces (needs announce app data from Prns), leases mixing chunks of several files.
+- [x] Repair live across machines: a holder goes offline, a farther node is added, the holder returns and is renewed ([ADR-0014](adr/0014-placement-follows-need.md)).
+- [ ] Placement, continued: trimming surplus copies, offer in announces (needs announce app data from Prns), leases mixing chunks of several files.
 - [ ] Own-node pool on a LAN, replication target, repair, storage proofs ([ADR-0011](adr/0011-redundancy-by-default.md)).
 - [ ] Volunteer storage offers (`retifs.store`).
 - [ ] Diffuse mode: anonymous push seeding, epidemic re-replication with jitter, cover holdings ([ADR-0011](adr/0011-redundancy-by-default.md)).
