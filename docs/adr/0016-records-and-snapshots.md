@@ -43,3 +43,11 @@ See the [threat model](../04-threat-model.md). A snapshot is encrypted like any 
 ## Consequences
 - Easier: one encoding for everything signed, checkable with stock RNS tools; sites and apps can be published as trees today.
 - Harder: snapshots rewrite the whole namespace per version (fine for small ones; record-level dedup comes from the per-record secret of each block, not the snapshot itself).
+
+## Implementation status (2026-10-16)
+- **Format:** `retifs_core::record`; vectors `record-v1.json`, verified byte for byte with RNS's umsgpack (26/26: integer and string boundaries, floats, bytes, nested lists, two records, a snapshot).
+- **Local database** (`retifs-store`, `db.rs`): records per namespace, and an order-preserving index of every attribute value (ints and floats numerically, strings and bytes bytewise; list values per element). Queries are the AND of terms: `key=value`, `key>n`, `key>=n`, `key<n`, `key<=n` (the bound's type limits the range), `key^=prefix`, `has:key`.
+- **API and CLI:** `retifs rec add NS KEY=VALUE… [--file PATH]` (the file becomes the record's content block, stored under its own record secret, needed and placed like any file; `name` and `size` are filled in), `rec set … [--unset KEY]`, `rec get`, `rec rm` (its content is forgotten unless another record uses it), `retifs query NS TERM…`.
+- Live: records with and without content; queries by exact value, prefix, list element, numeric range combined with type, and `has:`; set and unset; delete.
+- **Not yet:** publishing a namespace snapshot over a channel and materializing it at followers; per-modification signed commits inside a namespace; Prolly trees; content-bound attributes (decision 7).
+

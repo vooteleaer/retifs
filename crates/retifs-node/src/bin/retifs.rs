@@ -15,7 +15,16 @@
 //!     retifs [--store DIR] follow ADDRESS [--from NODE]...
 //!     retifs [--store DIR] channels
 //!
+//!     retifs [--store DIR] rec add NS [KEY=VALUE]... [--file PATH]
+//!     retifs [--store DIR] rec set NS ID [KEY=VALUE]... [--unset KEY]...
+//!     retifs [--store DIR] rec get NS ID | rec rm NS ID
+//!     retifs [--store DIR] query NS [TERM]...
+//!
 //! Channels (ADR-0015): a writer publishes versions; followers keep the latest.
+//! Records (ADR-0016): attributes and content blocks, queried BeFS style:
+//! terms `key=value`, `key>n`, `key>=n`, `key<n`, `key<=n`, `key^=prefix`,
+//! `has:key`, all of which must hold. Values: true/false, integers, decimals,
+//! else strings ("quoted" to force a string); `key=a,b` with --list sets a list.
 //!
 //! `replicate` keeps an own file on other nodes under signed leases (ADR-0011);
 //! `status` then shows how many of them confirmed with a receipt.
@@ -37,7 +46,9 @@ fn usage() -> ! {
          retifs [--store DIR] replicate READ-CAP --to NODE...\n\
          retifs [--store DIR] forget READ-CAP\n\
          retifs [--store DIR] channel create NAME | channel publish NAME FILE [--compress]\n\
-         retifs [--store DIR] follow ADDRESS [--from NODE]... | channels"
+         retifs [--store DIR] follow ADDRESS [--from NODE]... | channels\n\
+         retifs [--store DIR] rec add NS [KEY=VALUE]... [--file PATH] | rec set NS ID [KEY=VALUE]... [--unset KEY]...\n\
+         retifs [--store DIR] rec get NS ID | rec rm NS ID | query NS [TERM]..."
     );
     std::process::exit(2);
 }
@@ -164,6 +175,63 @@ async fn main() {
             let (own, follows) = client.channels().await.unwrap_or_else(|e| fail(e));
             print_channels(&own, &follows);
         }
+        "rec" => {
+            let sub = it.next().unwrap_or_else(|| usage());
+            let ns = it.next().unwrap_or_else(|| usage());
+            let rest: Vec<String> = it.collect();
+            let req = match sub.as_str() {
+                "add" => {
+                    let mut attrs = Vec::new();
+                    let mut data = None;
+                    let mut i = 0;
+                    while i < rest.len() {
+                        if rest[i] == "--file" {
+                            let path: PathBuf = rest.get(i + 1).cloned().unwrap_or_else(|| usage()).into();
+                            data = Some(std::fs::read(&path).unwrap_or_else(|e| fail(format!("{}: {e}", path.display()))));
+                            if !rest.iter().any(|a| a.starts_with("name=")) {
+                                let name = path.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default();
+                                attrs.push(("name".to_string(), libretifs::AttrValue::Str(name)));
+                            }
+                            i += 2;
+                        } else {
+                            attrs.push(attr(&rest[i]));
+                            i += 1;
+                        }
+                    }
+                    libretifs::Request::RecordCreate { ns, attrs, data }
+                }
+                "set" => {
+                    let id = rest.first().cloned().unwrap_or_else(|| usage());
+                    let (mut attrs, mut unset) = (Vec::new(), Vec::new());
+                    let mut i = 1;
+                    while i < rest.len() {
+                        if rest[i] == "--unset" {
+                            unset.push(rest.get(i + 1).cloned().unwrap_or_else(|| usage()));
+                            i += 2;
+                        } else {
+                            attrs.push(attr(&rest[i]));
+                            i += 1;
+                        }
+                    }
+                    libretifs::Request::RecordSet { ns, id, attrs, unset }
+                }
+                "get" => libretifs::Request::RecordGet { ns, id: rest.first().cloned().unwrap_or_else(|| usage()) },
+                "rm" => libretifs::Request::RecordDelete { ns, id: rest.first().cloned().unwrap_or_else(|| usage()) },
+                _ => usage(),
+            };
+            for r in client.records(req).await.unwrap_or_else(|e| fail(e)) {
+                print_record(&r);
+            }
+        }
+        "query" => {
+            let ns = it.next().unwrap_or_else(|| usage());
+            let terms: Vec<String> = it.collect();
+            let found = client.records(libretifs::Request::Query { ns, terms }).await.unwrap_or_else(|e| fail(e));
+            for r in &found {
+                print_record(r);
+            }
+            println!("{} record(s)", found.len());
+        }
         "forget" => {
             let cap = it.next().unwrap_or_else(|| usage());
             let s = client.forget(&cap).await.unwrap_or_else(|e| fail(e));
@@ -193,6 +261,41 @@ fn print_status(s: &libretifs::Status) {
     }
     if s.leased_to > 0 {
         println!("  leased to {} node(s), {} confirmed by receipt", s.leased_to, s.replicas);
+    }
+}
+
+/// `key=value` on the command line; `key=a,b,c` with a trailing `,` or more than one comma is a list.
+fn attr(arg: &str) -> (String, libretifs::AttrValue) {
+    let (k, v) = arg.split_once('=').unwrap_or_else(|| fail(format!("expected KEY=VALUE, got {arg:?}")));
+    let scalar = |v: &str| -> libretifs::AttrValue {
+        if v.len() >= 2 && v.starts_with('"') && v.ends_with('"') {
+            return libretifs::AttrValue::Str(v[1..v.len() - 1].to_string());
+        }
+        match v {
+            "true" => libretifs::AttrValue::Bool(true),
+            "false" => libretifs::AttrValue::Bool(false),
+            _ => v
+                .parse::<i64>()
+                .map(libretifs::AttrValue::Int)
+                .or_else(|_| v.parse::<f64>().map(libretifs::AttrValue::Float))
+                .unwrap_or_else(|_| libretifs::AttrValue::Str(v.to_string())),
+        }
+    };
+    let value = if v.contains(',') && !v.starts_with('"') {
+        libretifs::AttrValue::List(v.split(',').filter(|s| !s.is_empty()).map(scalar).collect())
+    } else {
+        scalar(v)
+    };
+    (k.to_string(), value)
+}
+
+fn print_record(r: &libretifs::RecordView) {
+    println!("{}", r.id);
+    for (k, v) in &r.attrs {
+        println!("  {k} = {v}");
+    }
+    for b in &r.blocks {
+        println!("  block {b}");
     }
 }
 

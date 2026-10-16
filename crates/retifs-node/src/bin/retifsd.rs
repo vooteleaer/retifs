@@ -35,13 +35,17 @@ use std::{
     time::{Duration, Instant, SystemTime, UNIX_EPOCH},
 };
 
-use libretifs::{read_frame, write_frame, ChannelInfo, Envelope, FollowInfo, GetStats, Request, Response, Status, PROTOCOL_VERSION};
+use libretifs::{
+    read_frame, write_frame, AttrValue, ChannelInfo, Envelope, FollowInfo, GetStats, RecordView, Request, Response, Status,
+    PROTOCOL_VERSION,
+};
 use personal_rns::prelude::*;
 use retifs_core::{
     channel::{ChannelAddr, ChannelKey, Commit, Head},
     lease::{self, node_destination, Lease, LeaseId, LeaseKey, Receipt, Renewal},
     stamp,
     manifest::{self, decode_node, decode_root, NodeEntry},
+    record::{Record, RecordId, Value},
     open, ChunkToken, Cid, ConvergenceSecret, FileRef,
 };
 use personal_rns::node_introspection::DestinationIdentityQuery;
@@ -833,6 +837,74 @@ async fn handle(d: &Daemon, req: Request) -> Result<Response, String> {
 
         Request::Channels => channels(d),
 
+        Request::RecordCreate { ns, attrs, data } => {
+            let mut id: RecordId = [0; 16];
+            getrandom::fill(&mut id).expect("OS entropy");
+            let mut rec = Record { id, attrs: Default::default(), blocks: Vec::new() };
+            for (k, v) in attrs {
+                rec.attrs.insert(k, to_value(&v)?);
+            }
+            if let Some(data) = data {
+                rec.attrs.entry("size".into()).or_insert(Value::Int(data.len() as i64));
+                let store = d.store.clone();
+                // One record secret per record: its content versions dedup.
+                let secret_name = format!("retifs-record/{ns}/{}", hex(&id));
+                let file = tokio::task::spawn_blocking(move || {
+                    store_file(&store, &data, false, false, Some(&secret_name), manifest::WriteOpts::default())
+                })
+                .await
+                .map_err(|e| e.to_string())??;
+                d.store.need_file(&file).map_err(|e| e.to_string())?;
+                d.upkeep_wake.notify_one();
+                rec.blocks.push(file);
+            }
+            d.store.put_record(&ns, &rec).map_err(|e| e.to_string())?;
+            Ok(Response::Records { records: vec![view(&rec)] })
+        }
+
+        Request::RecordSet { ns, id, attrs, unset } => {
+            let id = parse_record_id(&id)?;
+            let mut rec = d.store.get_record(&ns, &id).map_err(|e| e.to_string())?.ok_or("no such record")?;
+            for k in unset {
+                rec.attrs.remove(&k);
+            }
+            for (k, v) in attrs {
+                rec.attrs.insert(k, to_value(&v)?);
+            }
+            d.store.put_record(&ns, &rec).map_err(|e| e.to_string())?;
+            Ok(Response::Records { records: vec![view(&rec)] })
+        }
+
+        Request::RecordGet { ns, id } => {
+            let rec = d.store.get_record(&ns, &parse_record_id(&id)?).map_err(|e| e.to_string())?.ok_or("no such record")?;
+            Ok(Response::Records { records: vec![view(&rec)] })
+        }
+
+        Request::RecordDelete { ns, id } => {
+            let id = parse_record_id(&id)?;
+            let rec = d.store.get_record(&ns, &id).map_err(|e| e.to_string())?.ok_or("no such record")?;
+            d.store.delete_record(&ns, &id).map_err(|e| e.to_string())?;
+            // Its content is no longer needed here (unless another record uses it).
+            let still_used: std::collections::HashSet<Cid> = d
+                .store
+                .namespaces()
+                .map_err(|e| e.to_string())?
+                .iter()
+                .flat_map(|n| d.store.records(n).unwrap_or_default())
+                .flat_map(|r| r.blocks.into_iter().map(|b| b.root))
+                .collect();
+            for b in rec.blocks.iter().filter(|b| !still_used.contains(&b.root)) {
+                forget(d, b)?;
+            }
+            Ok(Response::Records { records: Vec::new() })
+        }
+
+        Request::Query { ns, terms } => {
+            let terms: Vec<retifs_store::Term> = terms.iter().map(|t| retifs_store::Term::parse(t)).collect::<Result<_, _>>()?;
+            let found = d.store.query(&ns, &terms).map_err(|e| e.to_string())?;
+            Ok(Response::Records { records: found.iter().map(view).collect() })
+        }
+
         Request::Want { cap, from } => {
             let cap: FileRef = cap.parse().map_err(|e: retifs_core::ManifestError| e.to_string())?;
             let peers: Vec<PeerId> = from
@@ -887,6 +959,48 @@ fn full_status(d: &Daemon, cap: &FileRef) -> Status {
     s.leased_to = own.iter().filter(|o| o.roots.contains(&cap.root)).map(|o| o.holder).collect::<std::collections::BTreeSet<_>>().len();
     s.replicas = store.confirmed_holders(&cap.root, now_s()).map(|h| h.len()).unwrap_or(0);
     s
+}
+
+fn to_value(v: &AttrValue) -> Result<Value, String> {
+    Ok(match v {
+        AttrValue::Null => Value::Null,
+        AttrValue::Bool(b) => Value::Bool(*b),
+        AttrValue::Int(i) => Value::Int(*i),
+        AttrValue::Float(f) if f.is_nan() => return Err("NaN has no canonical form".into()),
+        AttrValue::Float(f) => Value::Float(*f),
+        AttrValue::Str(s) => Value::Str(s.clone()),
+        AttrValue::Bytes(b) => Value::Bytes(b.clone()),
+        AttrValue::List(items) => Value::List(items.iter().map(to_value).collect::<Result<_, _>>()?),
+    })
+}
+
+fn from_value(v: &Value) -> AttrValue {
+    match v {
+        Value::Null => AttrValue::Null,
+        Value::Bool(b) => AttrValue::Bool(*b),
+        Value::Int(i) => AttrValue::Int(*i),
+        Value::Float(f) => AttrValue::Float(*f),
+        Value::Str(s) => AttrValue::Str(s.clone()),
+        Value::Bytes(b) => AttrValue::Bytes(b.clone()),
+        Value::List(items) => AttrValue::List(items.iter().map(from_value).collect()),
+    }
+}
+
+fn view(r: &Record) -> RecordView {
+    RecordView {
+        id: hex(&r.id),
+        attrs: r.attrs.iter().map(|(k, v)| (k.clone(), from_value(v))).collect(),
+        blocks: r.blocks.iter().map(|b| b.to_string()).collect(),
+    }
+}
+
+fn parse_record_id(s: &str) -> Result<RecordId, String> {
+    let s = s.trim();
+    let bytes: Option<Vec<u8>> = (0..s.len())
+        .step_by(2)
+        .map(|i| s.get(i..i + 2).and_then(|h| u8::from_str_radix(h, 16).ok()))
+        .collect();
+    bytes.and_then(|b| b.try_into().ok()).ok_or_else(|| format!("bad record id {s}"))
 }
 
 /// Ends this node's need for `cap` (ADR-0014): leases run out, own copies of

@@ -31,11 +31,13 @@ use std::{
 };
 
 mod channels;
+mod db;
 mod leases;
 mod placement;
 mod wants;
 pub use leases::{Accept, BlindWants, HeldLease, OwnLease, ProofState, LEASE_CHUNK_ESTIMATE};
 pub use channels::{Follow, OwnChannel};
+pub use db::{parse_value, Term};
 pub use placement::{surplus_holder, HolderStats, HolderView, LinkQuality, StorageNode, SLOW_DEFAULT_RATE, SLOW_RTT_MS, TRIM_MARGIN};
 pub use wants::{Hint, PeerId, Want};
 
@@ -232,6 +234,7 @@ impl SlabStore {
         leases::open_tables(&w)?;
         placement::open_tables(&w)?;
         channels::open_tables(&w)?;
+        db::open_tables(&w)?;
         w.commit()?;
         Ok(SlabStore {
             root,

@@ -51,7 +51,8 @@ Prototypes are throwaway. They're for learning, not for locking in the format. T
 - [ ] Slow links: per-interface priority and airtime budget; no bulk/spare/diffusion over LoRa ([ADR-0013](adr/0013-slow-links.md)); LoRa measurements once a second RNode is available.
 
 ## Phase 2: database
-- [ ] Attribute records (signed), Prolly-tree index, local queries; `set` / `query` / `watch` / `transaction` / `at` in the API.
+- [x] Records, canonical encoding and snapshots; local attribute index and BeFS-style queries; `rec add/set/get/rm`, `query` ([ADR-0016](adr/0016-records-and-snapshots.md)).
+- [ ] Signed per-modification commits inside namespaces, Prolly-tree index; `watch` / `transaction` / `at` in the API.
 - [ ] `keep:<device>` tag and query-based keep rules (proactive pull).
 - [ ] Blind index, remote `/query`, live query.
 - [ ] Per-writer commit chains (one commit per modification), merge, history queries, per-record `versions`.

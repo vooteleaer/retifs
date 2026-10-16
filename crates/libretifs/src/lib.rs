@@ -96,6 +96,64 @@ pub enum Request {
     Follow { address: String, from: Vec<String> },
     /// Channels written and followed here.
     Channels,
+    /// Creates a record in namespace `ns` (ADR-0016); `data` becomes its content block.
+    RecordCreate {
+        ns: String,
+        attrs: Vec<(String, AttrValue)>,
+        #[serde(default, with = "serde_bytes")]
+        data: Option<Vec<u8>>,
+    },
+    /// Sets and unsets attributes of a record.
+    RecordSet { ns: String, id: String, attrs: Vec<(String, AttrValue)>, unset: Vec<String> },
+    RecordGet { ns: String, id: String },
+    RecordDelete { ns: String, id: String },
+    /// Records matching every term (`key=value`, `key>n`, `key^=prefix`, `has:key`, …).
+    Query { ns: String, terms: Vec<String> },
+}
+
+/// An attribute value (ADR-0016).
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub enum AttrValue {
+    Null,
+    Bool(bool),
+    Int(i64),
+    Float(f64),
+    Str(String),
+    Bytes(#[serde(with = "serde_bytes")] Vec<u8>),
+    List(Vec<AttrValue>),
+}
+
+impl std::fmt::Display for AttrValue {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            AttrValue::Null => f.write_str("null"),
+            AttrValue::Bool(b) => write!(f, "{b}"),
+            AttrValue::Int(i) => write!(f, "{i}"),
+            AttrValue::Float(x) => write!(f, "{x:?}"),
+            AttrValue::Str(s) => write!(f, "{s:?}"),
+            AttrValue::Bytes(b) => write!(f, "<{} bytes>", b.len()),
+            AttrValue::List(items) => {
+                f.write_str("[")?;
+                for (i, v) in items.iter().enumerate() {
+                    if i > 0 {
+                        f.write_str(", ")?;
+                    }
+                    write!(f, "{v}")?;
+                }
+                f.write_str("]")
+            }
+        }
+    }
+}
+
+/// A record as the API shows it.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct RecordView {
+    /// 32 hex digits.
+    pub id: String,
+    pub attrs: Vec<(String, AttrValue)>,
+    /// Read-caps of its content blocks.
+    pub blocks: Vec<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -126,6 +184,9 @@ pub enum Response {
     Channels {
         own: Vec<ChannelInfo>,
         follows: Vec<FollowInfo>,
+    },
+    Records {
+        records: Vec<RecordView>,
     },
     Error {
         message: String,
@@ -412,6 +473,13 @@ impl Client {
     pub async fn channels(&mut self) -> Result<(Vec<ChannelInfo>, Vec<FollowInfo>), ClientError> {
         match self.call(Request::Channels).await? {
             Response::Channels { own, follows } => Ok((own, follows)),
+            _ => Err(ClientError::Unexpected),
+        }
+    }
+
+    pub async fn records(&mut self, req: Request) -> Result<Vec<RecordView>, ClientError> {
+        match self.call(req).await? {
+            Response::Records { records } => Ok(records),
             _ => Err(ClientError::Unexpected),
         }
     }
