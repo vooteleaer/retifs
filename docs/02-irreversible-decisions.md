@@ -8,10 +8,10 @@ These stay forever in every stored chunk and signature. Everything else can be f
 | 2 | **Canonical serialization**: exactly what is signed (msgpack key order, integer encoding) | SSB signed a JS engine's JSON formatting, which made other implementations nearly impossible | open |
 | 3 | **Nonces for deterministic crypto**: SIV-style, nonce derived from content | Same key and nonce with different content = silent catastrophe | proposed ([ADR-0008](adr/0008-chunk-encryption-and-cid.md)) |
 | 4 | **Capability semantics**: narrowing, chain validation, revocation | Confused deputy | open |
-| 5 | **Namespace updates**: per-writer sequence numbers, rollback protection (multi-writer, [ADR-0006](adr/0006-versioning-and-sharing.md)) | Replaying an old signed root | in progress |
+| 5 | **Namespace updates**: per-writer sequence numbers, rollback protection (multi-writer, [ADR-0006](adr/0006-versioning-and-sharing.md)) | Replaying an old signed root | proposed: signed heads ([ADR-0015](adr/0015-signed-channels.md), vectors verified against RNS) |
 | 6 | **Lease format**: expiry and renewal signature, and it covers a chunk list, not a manifest; receipts and per-lease derived keys ([ADR-0010](adr/0010-continuous-seeking.md), [ADR-0011](adr/0011-redundancy-by-default.md)) | A manifest-based lease leaks structure | proposed (draft v1, vectors verified against RNS) |
 | 7 | **Record ID vs content CID**: which attributes attach to which | Without the distinction, every change loses the tags | open |
-| 8 | **Commit object format**: per-writer chains, one commit per modification, lazy content ([ADR-0006](adr/0006-versioning-and-sharing.md)) | Restructuring history later is impossible | in progress |
+| 8 | **Commit object format**: per-writer chains, one commit per modification, lazy content ([ADR-0006](adr/0006-versioning-and-sharing.md)) | Restructuring history later is impossible | proposed: single-writer commits ([ADR-0015](adr/0015-signed-channels.md)); merge commits open |
 | 9 | **Chunk encryption construction**: per-chunk AEAD, padding size classes | Size leakage, no random access | proposed ([ADR-0008](adr/0008-chunk-encryption-and-cid.md)) |
 | 10 | **Blind index key derivation** | Index leakage, or keys that can't be rotated | open |
 | 11 | **Manifest node format**: fixed binary layout, sealed like chunks | Non-canonical encoding breaks convergence; format changes strand old trees | proposed ([ADR-0009](adr/0009-manifest-format.md)) |

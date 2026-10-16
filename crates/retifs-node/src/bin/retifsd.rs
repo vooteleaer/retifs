@@ -35,9 +35,10 @@ use std::{
     time::{Duration, Instant, SystemTime, UNIX_EPOCH},
 };
 
-use libretifs::{read_frame, write_frame, Envelope, GetStats, Request, Response, Status, PROTOCOL_VERSION};
+use libretifs::{read_frame, write_frame, ChannelInfo, Envelope, FollowInfo, GetStats, Request, Response, Status, PROTOCOL_VERSION};
 use personal_rns::prelude::*;
 use retifs_core::{
+    channel::{ChannelAddr, ChannelKey, Commit, Head},
     lease::{self, node_destination, Lease, LeaseId, LeaseKey, Receipt, Renewal},
     stamp,
     manifest::{self, decode_node, decode_root, NodeEntry},
@@ -54,7 +55,7 @@ use retifs_net::{
         decode_request, encode_bitmap, encode_lease_request, encode_prove, encode_prove_reply,
         encode_lease_status, encode_response, LeaseRequest, LeaseStatus, ReceiptReply, GET_ENDPOINT, HAVE_ENDPOINT, LEASE_ENDPOINT,
         PROVE_ENDPOINT, RECEIPT_ENDPOINT, decode_bitmap, decode_put, encode_have, encode_put, HAVE_PREFIX, MAX_HAVE,
-        MAX_PUT, PUT_ENDPOINT,
+        MAX_PUT, PUT_ENDPOINT, HEAD_ENDPOINT,
     },
     seek::{pull_round, seek_round},
     transport::{PrnsTransport, Transport},
@@ -243,6 +244,23 @@ impl RequestEndpoint<Arc<Shared>> for PutEndpoint {
     }
 }
 
+/// `/retifs/head`: the latest head this node knows for a namespace (its own
+/// channels and those it follows), or nothing. Heads are signed and say only
+/// which commit is latest; the commit's seed is encrypted to readers (ADR-0015).
+struct HeadEndpoint;
+impl RequestEndpoint<Arc<Shared>> for HeadEndpoint {
+    const ENDPOINT_ID: &'static str = HEAD_ENDPOINT;
+    const POLICY: RequestEndpointPolicy = RequestEndpointPolicy::AllowAll;
+
+    async fn handle(mut context: RequestContext<'_, Arc<Shared>>) -> Result<(), Decline> {
+        let Ok(id) = <[u8; 16]>::try_from(context.data) else {
+            return Err(Decline::Ignore);
+        };
+        let head = context.state.store.head_for(&id).ok().flatten().unwrap_or_default();
+        context.respond(head)
+    }
+}
+
 impl Shared {
     /// What's already held for others plus what still fits (within the store
     /// limit and above the free-space reserve), capped by `--hold-for-others`:
@@ -422,6 +440,8 @@ struct Daemon {
     /// Stamp cost each holder asked for, so later offers carry a stamp at once.
     stamp_costs: Mutex<HashMap<PeerId, u8>>,
     max_stamp_cost: u8,
+    /// Wakes the follower loop (a channel was followed).
+    follow_wake: Notify,
 }
 
 impl Daemon {
@@ -496,7 +516,7 @@ async fn serve(store: Arc<SlabStore>, identity: node::IdentitySecret, endpoint: 
         pre_configured_destinations: [dest],
         app_state: shared.clone(),
         storage: GrowableHeap,
-        request_endpoints: request_endpoints![Get, Have, LeaseEndpoint, ReceiptEndpoint, ProveEndpoint, PutEndpoint],
+        request_endpoints: request_endpoints![Get, Have, LeaseEndpoint, ReceiptEndpoint, ProveEndpoint, PutEndpoint, HeadEndpoint],
         on_event: move |event, _state| {
             if let PrnsEvent::Diagnostic(Diagnostic::AnnounceHeard { destination, hops, .. }) = event {
                 let _ = heard_tx.send((*destination.as_bytes(), hops));
@@ -524,6 +544,7 @@ async fn serve(store: Arc<SlabStore>, identity: node::IdentitySecret, endpoint: 
         deferred: Mutex::new(HashMap::new()),
         stamp_costs: Mutex::new(HashMap::new()),
         max_stamp_cost: args.max_stamp_cost,
+        follow_wake: Notify::new(),
     });
     println!("attached to shared instance {of}");
     println!("serving {} chunks as retifs.node <{}>", store.len().unwrap_or(0), daemon.node_hex);
@@ -538,6 +559,7 @@ async fn serve(store: Arc<SlabStore>, identity: node::IdentitySecret, endpoint: 
     tokio::spawn(local_api(endpoint, daemon.clone()));
     tokio::spawn(lease_puller(daemon.clone(), shared.clone()));
     tokio::spawn(lease_upkeep(daemon.clone()));
+    tokio::spawn(follower(daemon.clone()));
     let watcher = daemon.clone();
     tokio::spawn(async move {
         // Every retifs node is a storage node (ADR-0014). Prns doesn't pass
@@ -755,25 +777,61 @@ async fn handle(d: &Daemon, req: Request) -> Result<Response, String> {
 
         Request::Forget { cap } => {
             let cap: FileRef = cap.parse().map_err(|e: retifs_core::ManifestError| e.to_string())?;
-            // Chunks other needed files still use stay (versions share most of theirs).
-            let mut keep = std::collections::HashSet::new();
-            for other in d.store.needed_files().map_err(|e| e.to_string())? {
-                if other.root != cap.root {
-                    keep.extend(file_chunks(&d.store, &other).unwrap_or_default().into_iter().map(|(c, _)| c));
-                }
-            }
-            let all: Vec<Cid> = file_chunks(&d.store, &cap).unwrap_or_default().into_iter().map(|(c, _)| c).collect();
-            let shared = all.iter().filter(|c| keep.contains(c)).count();
-            let mine: Vec<Cid> = all.into_iter().filter(|c| !keep.contains(c)).collect();
-            let leases = d.store.forget_file(&cap.root).map_err(|e| e.to_string())?;
-            let released = d.store.release_chunks(&mine).map_err(|e| e.to_string())?;
-            d.deferred.lock().unwrap().remove(&cap.root);
-            println!(
-                "forget {}: {leases} lease(s) no longer serve it, {released} chunk(s) evictable, {shared} kept (other needed files use them)",
-                cap.root
-            );
+            forget(d, &cap)?;
             Ok(Response::Status(full_status(d, &cap)))
         }
+
+        Request::ChannelCreate { name } => {
+            let mut secrets = [0u8; 64];
+            getrandom::fill(&mut secrets).expect("OS entropy");
+            d.store
+                .create_channel(&name, secrets[..32].try_into().unwrap(), secrets[32..].try_into().unwrap())
+                .map_err(|e| e.to_string())?;
+            let c = d.store.own_channel(&name).map_err(|e| e.to_string())?.expect("just created");
+            Ok(Response::Channel { address: ChannelKey::from_secrets(c.signing_seed, c.read_key).addr().to_string() })
+        }
+
+        Request::ChannelPublish { name, data, compress } => {
+            let mut c = d.store.own_channel(&name).map_err(|e| e.to_string())?.ok_or_else(|| format!("no channel {name}"))?;
+            let store = d.store.clone();
+            let opts = manifest::WriteOpts {
+                compression: if compress { retifs_core::Compression::Zstd } else { retifs_core::Compression::Off },
+                ..Default::default()
+            };
+            // One record per channel: versions dedup against each other.
+            let record = format!("retifs-channel/{name}");
+            let file = tokio::task::spawn_blocking(move || store_file(&store, &data, false, false, Some(&record), opts))
+                .await
+                .map_err(|e| e.to_string())??;
+            let key = ChannelKey::from_secrets(c.signing_seed, c.read_key);
+            let (_, sealed) = Commit::create(&key, c.seq + 1, now_ms(), c.last, file);
+            d.store.insert(&sealed.cid, &sealed.ciphertext, tier::PINNED).map_err(|e| e.to_string())?;
+            d.store.register_serving(&[(sealed.cid, ChunkToken::for_seed(&sealed.seed))]).map_err(|e| e.to_string())?;
+            let mut iv = [0u8; 16];
+            getrandom::fill(&mut iv).expect("OS entropy");
+            let head = Head::sign(&key, c.seq + 1, now_s(), sealed.cid, &sealed.seed, iv);
+            c.seq += 1;
+            c.last = Some((sealed.cid, sealed.seed));
+            c.head = head.encode().to_vec();
+            d.store.update_own_channel(&c).map_err(|e| e.to_string())?;
+            d.store.need_file(&file).map_err(|e| e.to_string())?;
+            d.upkeep_wake.notify_one();
+            println!("channel {name}: published version {} ({file})", c.seq);
+            Ok(Response::Published { seq: c.seq, cap: file.to_string() })
+        }
+
+        Request::Follow { address, from } => {
+            let addr: ChannelAddr = address.parse().map_err(|e: retifs_core::channel::ChannelError| e.to_string())?;
+            let peers: Vec<PeerId> = from
+                .iter()
+                .map(|h| parse_destination(h).map(|d| *d.as_bytes()).ok_or_else(|| format!("bad node hash {h}")))
+                .collect::<Result<_, _>>()?;
+            d.store.follow(&addr, &peers).map_err(|e| e.to_string())?;
+            d.follow_wake.notify_one();
+            channels(d)
+        }
+
+        Request::Channels => channels(d),
 
         Request::Want { cap, from } => {
             let cap: FileRef = cap.parse().map_err(|e: retifs_core::ManifestError| e.to_string())?;
@@ -829,6 +887,169 @@ fn full_status(d: &Daemon, cap: &FileRef) -> Status {
     s.leased_to = own.iter().filter(|o| o.roots.contains(&cap.root)).map(|o| o.holder).collect::<std::collections::BTreeSet<_>>().len();
     s.replicas = store.confirmed_holders(&cap.root, now_s()).map(|h| h.len()).unwrap_or(0);
     s
+}
+
+/// Ends this node's need for `cap` (ADR-0014): leases run out, own copies of
+/// chunks no other needed file uses become evictable.
+fn forget(d: &Daemon, cap: &FileRef) -> Result<(), String> {
+    // Chunks other needed files still use stay (versions share most of theirs).
+    let mut keep = std::collections::HashSet::new();
+    for other in d.store.needed_files().map_err(|e| e.to_string())? {
+        if other.root != cap.root {
+            keep.extend(file_chunks(&d.store, &other).unwrap_or_default().into_iter().map(|(c, _)| c));
+        }
+    }
+    let all: Vec<Cid> = file_chunks(&d.store, cap).unwrap_or_default().into_iter().map(|(c, _)| c).collect();
+    let shared = all.iter().filter(|c| keep.contains(c)).count();
+    let mine: Vec<Cid> = all.into_iter().filter(|c| !keep.contains(c)).collect();
+    let leases = d.store.forget_file(&cap.root).map_err(|e| e.to_string())?;
+    let released = d.store.release_chunks(&mine).map_err(|e| e.to_string())?;
+    d.deferred.lock().unwrap().remove(&cap.root);
+    println!(
+        "forget {}: {leases} lease(s) no longer serve it, {released} chunk(s) evictable, {shared} kept (other needed files use them)",
+        cap.root
+    );
+    Ok(())
+}
+
+fn channels(d: &Daemon) -> Result<Response, String> {
+    let own = d
+        .store
+        .own_channels()
+        .map_err(|e| e.to_string())?
+        .into_iter()
+        .map(|c| ChannelInfo {
+            address: ChannelKey::from_secrets(c.signing_seed, c.read_key).addr().to_string(),
+            name: c.name,
+            seq: c.seq,
+        })
+        .collect();
+    let follows = d
+        .store
+        .follows()
+        .map_err(|e| e.to_string())?
+        .into_iter()
+        .map(|f| FollowInfo {
+            address: f.addr.to_string(),
+            seq: f.seq,
+            complete: f.current.is_some_and(|c| complete(&d.store, &c)),
+            current: f.current.map(|c| c.to_string()),
+        })
+        .collect();
+    Ok(Response::Channels { own, follows })
+}
+
+/// Completely local and no longer sought.
+fn complete(store: &SlabStore, f: &FileRef) -> bool {
+    !store.is_wanted(&f.root).unwrap_or(true) && local_status(store, f).complete()
+}
+
+/// Keeps followed channels at their latest version (ADR-0015): asks the hints
+/// for the head, accepts only a valid head with a higher sequence number
+/// (rollback protection), fetches its commit and seeks the new tree. Once a new
+/// version is complete, the one it replaced is forgotten. Woken by new follows,
+/// else every 30 s.
+async fn follower(d: Arc<Daemon>) {
+    let mut tick = tokio::time::interval(Duration::from_secs(30));
+    loop {
+        tokio::select! {
+            _ = d.follow_wake.notified() => {}
+            _ = tick.tick() => {}
+        }
+        for f in d.store.follows().unwrap_or_default() {
+            if let Err(e) = follow_pass(&d, f).await {
+                eprintln!("follow: {e}");
+            }
+        }
+    }
+}
+
+async fn follow_pass(d: &Daemon, mut f: retifs_store::Follow) -> Result<(), String> {
+    let ns = hex(&f.addr.ns_id());
+    // A complete version is kept here and served to other followers (who prove
+    // its chunks' seeds): following a channel passes it on, like an app mirror.
+    if let Some(cur) = f.current
+        && complete(&d.store, &cur)
+        && d.store.tier(&cur.root).ok().flatten().is_some_and(|t| t & tier::PINNED == 0)
+    {
+        let chunks = file_chunks(&d.store, &cur)?;
+        for (cid, _) in &chunks {
+            if let Some(t) = d.store.tier(cid).map_err(|e| e.to_string())? {
+                d.store.set_tier(cid, t | tier::PINNED).map_err(|e| e.to_string())?;
+            }
+        }
+        d.store.register_serving(&chunks).map_err(|e| e.to_string())?;
+        println!("follow {ns}: version {} complete, kept and served to other followers", f.seq);
+    }
+    // The new version is complete: the one it replaced is no longer needed here.
+    if let (Some(cur), Some(prev)) = (f.current, f.previous)
+        && complete(&d.store, &cur)
+    {
+        if prev.root != cur.root {
+            forget(d, &prev)?;
+        }
+        f.previous = None;
+        d.store.update_follow(&f).map_err(|e| e.to_string())?;
+    }
+    for hint in f.hints.clone() {
+        let link = match d.link_to(&hint).await {
+            Ok(l) => l,
+            Err(e) => {
+                eprintln!("follow {ns}: <{}> unreachable: {e}", hex(&hint));
+                continue;
+            }
+        };
+        let raw = match d.ask(link, HEAD_ENDPOINT, f.addr.ns_id().to_vec()).await {
+            Ok(r) => r,
+            Err(e) => {
+                d.drop_link(&hint);
+                eprintln!("follow {ns}: <{}>: {e}", hex(&hint));
+                continue;
+            }
+        };
+        if raw.is_empty() {
+            continue;
+        }
+        let head = Head::decode(&raw).map_err(|e| format!("bad head from <{}>: {e}", hex(&hint)))?;
+        if head.writer != f.addr.writer || head.seq <= f.seq {
+            continue; // another channel, or not newer: never go back
+        }
+        let seed = head.commit_seed(&f.addr).map_err(|e| e.to_string())?;
+        let ct = match d.store.fetch(&head.commit).map_err(|e| e.to_string())? {
+            Some(ct) => ct,
+            None => {
+                let round = seek_round(&d.transport, link, &[(head.commit, seed)], false, Duration::from_secs(60)).await?;
+                match round.got.into_iter().next() {
+                    Some((_, ct, _)) => ct,
+                    None => continue, // this hint has the head but not the commit
+                }
+            }
+        };
+        let commit = Commit::decode(&open(&head.commit, &seed, &ct).map_err(|e| e.to_string())?, &f.addr)
+            .map_err(|e| e.to_string())?;
+        if commit.seq != head.seq {
+            return Err(format!("head {} points at commit {}", head.seq, commit.seq));
+        }
+        // Keep the commit and pass it on to other followers (they prove its seed).
+        d.store.insert(&head.commit, &ct, tier::PINNED).map_err(|e| e.to_string())?;
+        d.store.register_serving(&[(head.commit, ChunkToken::for_seed(&seed))]).map_err(|e| e.to_string())?;
+        if f.current.map(|c| c.root) != Some(commit.root.root) {
+            match f.current {
+                // A version that never completed is simply replaced.
+                Some(cur) if !complete(&d.store, &cur) => forget(d, &cur)?,
+                Some(cur) => f.previous = Some(cur),
+                None => {}
+            }
+            f.current = Some(commit.root);
+            d.store.want_file(&commit.root, &f.hints).map_err(|e| e.to_string())?;
+            d.wake.notify_one();
+        }
+        println!("follow {ns}: version {} from <{}>, seeking {}", head.seq, hex(&hint), commit.root.root);
+        f.seq = head.seq;
+        f.head = raw;
+        d.store.update_follow(&f).map_err(|e| e.to_string())?;
+    }
+    Ok(())
 }
 
 fn now_s() -> u64 {

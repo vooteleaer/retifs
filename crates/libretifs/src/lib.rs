@@ -82,6 +82,20 @@ pub enum Request {
     /// renewing its leases (holders release it when they run out), and make
     /// its local chunks evictable, except those other needed files share.
     Forget { cap: String },
+    /// Creates a channel this node writes (ADR-0015); returns its address.
+    ChannelCreate { name: String },
+    /// Publishes `data` as the channel's next version: followers update to it.
+    ChannelPublish {
+        name: String,
+        #[serde(with = "serde_bytes")]
+        data: Vec<u8>,
+        #[serde(default)]
+        compress: bool,
+    },
+    /// Follows a channel: keeps its latest version here, asking these nodes for updates.
+    Follow { address: String, from: Vec<String> },
+    /// Channels written and followed here.
+    Channels,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -102,9 +116,39 @@ pub enum Response {
         stats: GetStats,
     },
     Status(Status),
+    Channel {
+        address: String,
+    },
+    Published {
+        seq: u64,
+        cap: String,
+    },
+    Channels {
+        own: Vec<ChannelInfo>,
+        follows: Vec<FollowInfo>,
+    },
     Error {
         message: String,
     },
+}
+
+/// A channel this node writes.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct ChannelInfo {
+    pub name: String,
+    pub address: String,
+    pub seq: u64,
+}
+
+/// A channel this node follows.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct FollowInfo {
+    pub address: String,
+    pub seq: u64,
+    /// Read-cap of the version kept here.
+    pub current: Option<String>,
+    /// That version is completely local.
+    pub complete: bool,
 }
 
 /// Disk usage per tier and the resolved budget (ADR-0012), in bytes.
@@ -340,6 +384,34 @@ impl Client {
     pub async fn status(&mut self, cap: &str) -> Result<Status, ClientError> {
         match self.call(Request::Status { cap: cap.into() }).await? {
             Response::Status(s) => Ok(s),
+            _ => Err(ClientError::Unexpected),
+        }
+    }
+
+    pub async fn channel_create(&mut self, name: &str) -> Result<String, ClientError> {
+        match self.call(Request::ChannelCreate { name: name.into() }).await? {
+            Response::Channel { address } => Ok(address),
+            _ => Err(ClientError::Unexpected),
+        }
+    }
+
+    pub async fn channel_publish(&mut self, name: &str, data: Vec<u8>, compress: bool) -> Result<(u64, String), ClientError> {
+        match self.call(Request::ChannelPublish { name: name.into(), data, compress }).await? {
+            Response::Published { seq, cap } => Ok((seq, cap)),
+            _ => Err(ClientError::Unexpected),
+        }
+    }
+
+    pub async fn follow(&mut self, address: &str, from: &[String]) -> Result<(Vec<ChannelInfo>, Vec<FollowInfo>), ClientError> {
+        match self.call(Request::Follow { address: address.into(), from: from.to_vec() }).await? {
+            Response::Channels { own, follows } => Ok((own, follows)),
+            _ => Err(ClientError::Unexpected),
+        }
+    }
+
+    pub async fn channels(&mut self) -> Result<(Vec<ChannelInfo>, Vec<FollowInfo>), ClientError> {
+        match self.call(Request::Channels).await? {
+            Response::Channels { own, follows } => Ok((own, follows)),
             _ => Err(ClientError::Unexpected),
         }
     }

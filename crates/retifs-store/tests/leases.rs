@@ -242,3 +242,34 @@ fn mixed_leases_turn_stale_when_one_file_goes() {
     assert!(st.own_leases().unwrap().is_empty());
 }
 
+
+#[test]
+fn channels_and_follows_roundtrip() {
+    use retifs_core::channel::ChannelKey;
+    let (_d, st) = store();
+    assert!(st.create_channel("news", [1; 32], [2; 32]).unwrap());
+    assert!(!st.create_channel("news", [3; 32], [4; 32]).unwrap(), "names are unique");
+    let mut c = st.own_channel("news").unwrap().unwrap();
+    assert_eq!((c.seq, c.last, c.head.len()), (0, None, 0));
+    c.seq = 3;
+    c.last = Some((chunk(1).cid, chunk(1).seed));
+    c.head = vec![7; 258];
+    st.update_own_channel(&c).unwrap();
+    let back = st.own_channel("news").unwrap().unwrap();
+    assert_eq!((back.seq, back.last, back.head.clone()), (3, c.last, vec![7; 258]));
+    let addr = ChannelKey::from_secrets([1; 32], [2; 32]).addr();
+    assert_eq!(st.head_for(&addr.ns_id()).unwrap(), Some(vec![7; 258]), "own heads are served");
+
+    let other = ChannelKey::from_secrets([5; 32], [6; 32]).addr();
+    st.follow(&other, &[[9; 16]]).unwrap();
+    let mut f = st.follow(&other, &[[9; 16], [8; 16]]).unwrap();
+    assert_eq!(f.hints, vec![[9; 16], [8; 16]]);
+    f.seq = 2;
+    f.current = Some(retifs_core::FileRef { root: chunk(2).cid, seed: chunk(2).seed, size: 5 });
+    f.head = vec![1; 258];
+    st.update_follow(&f).unwrap();
+    let g = st.followed(&other.ns_id()).unwrap().unwrap();
+    assert_eq!((g.seq, g.current, g.previous, g.hints.len()), (2, f.current, None, 2));
+    assert_eq!(st.head_for(&other.ns_id()).unwrap(), Some(vec![1; 258]));
+    assert_eq!(st.follows().unwrap().len(), 1);
+}

@@ -10,6 +10,12 @@
 //!     retifs [--store DIR] want READ-CAP [--from NODE]...
 //!     retifs [--store DIR] replicate READ-CAP --to NODE...
 //!     retifs [--store DIR] forget READ-CAP
+//!     retifs [--store DIR] channel create NAME
+//!     retifs [--store DIR] channel publish NAME FILE [--compress]
+//!     retifs [--store DIR] follow ADDRESS [--from NODE]...
+//!     retifs [--store DIR] channels
+//!
+//! Channels (ADR-0015): a writer publishes versions; followers keep the latest.
 //!
 //! `replicate` keeps an own file on other nodes under signed leases (ADR-0011);
 //! `status` then shows how many of them confirmed with a receipt.
@@ -29,7 +35,9 @@ fn usage() -> ! {
          retifs [--store DIR] status READ-CAP\n\
          retifs [--store DIR] want READ-CAP [--from NODE]...
          retifs [--store DIR] replicate READ-CAP --to NODE...\n\
-         retifs [--store DIR] forget READ-CAP"
+         retifs [--store DIR] forget READ-CAP\n\
+         retifs [--store DIR] channel create NAME | channel publish NAME FILE [--compress]\n\
+         retifs [--store DIR] follow ADDRESS [--from NODE]... | channels"
     );
     std::process::exit(2);
 }
@@ -125,6 +133,37 @@ async fn main() {
             let s = client.replicate(&cap, &to).await.unwrap_or_else(|e| fail(e));
             print_status(&s);
         }
+        "channel" => match it.next().as_deref() {
+            Some("create") => {
+                let name = it.next().unwrap_or_else(|| usage());
+                println!("{}", client.channel_create(&name).await.unwrap_or_else(|e| fail(e)));
+            }
+            Some("publish") => {
+                let name = it.next().unwrap_or_else(|| usage());
+                let path: PathBuf = it.next().unwrap_or_else(|| usage()).into();
+                let compress = it.any(|a| a == "--compress");
+                let data = std::fs::read(&path).unwrap_or_else(|e| fail(format!("{}: {e}", path.display())));
+                let (seq, cap) = client.channel_publish(&name, data, compress).await.unwrap_or_else(|e| fail(e));
+                println!("published {name} version {seq}: {cap}");
+            }
+            _ => usage(),
+        },
+        "follow" => {
+            let address = it.next().unwrap_or_else(|| usage());
+            let mut from = Vec::new();
+            while let Some(arg) = it.next() {
+                match arg.as_str() {
+                    "--from" => from.push(it.next().unwrap_or_else(|| usage())),
+                    _ => usage(),
+                }
+            }
+            let (own, follows) = client.follow(&address, &from).await.unwrap_or_else(|e| fail(e));
+            print_channels(&own, &follows);
+        }
+        "channels" => {
+            let (own, follows) = client.channels().await.unwrap_or_else(|e| fail(e));
+            print_channels(&own, &follows);
+        }
         "forget" => {
             let cap = it.next().unwrap_or_else(|| usage());
             let s = client.forget(&cap).await.unwrap_or_else(|e| fail(e));
@@ -154,6 +193,23 @@ fn print_status(s: &libretifs::Status) {
     }
     if s.leased_to > 0 {
         println!("  leased to {} node(s), {} confirmed by receipt", s.leased_to, s.replicas);
+    }
+}
+
+fn print_channels(own: &[libretifs::ChannelInfo], follows: &[libretifs::FollowInfo]) {
+    for c in own {
+        println!("writes {} (version {}): {}", c.name, c.seq, c.address);
+    }
+    for f in follows {
+        let short = f.address.get(..32).unwrap_or(&f.address);
+        match &f.current {
+            Some(cap) => println!(
+                "follows {short}… version {}{}: {cap}",
+                f.seq,
+                if f.complete { " (complete)" } else { " (fetching)" }
+            ),
+            None => println!("follows {short}… (no version yet)"),
+        }
     }
 }
 

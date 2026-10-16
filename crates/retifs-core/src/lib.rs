@@ -4,6 +4,7 @@
 //! Nothing here may be used for real data until that ADR is accepted.
 
 pub mod access;
+pub mod channel;
 pub mod chunk;
 pub mod chunker;
 pub mod cid;

@@ -18,6 +18,8 @@
 //! Bundles keep upkeep at one exchange per holder, however many leases it keeps.
 //! prove request    = lease_id (16) ‖ nonce (16) ‖ index (u16) × n      1..=MAX_PROVE indices
 //! prove response   = (0x00 ‖ answer (16) | 0x01) × n
+//! head request     = ns_id (16)                                          latest head known (ADR-0015)
+//! head response    = head (258) | empty (unknown)
 //! put request      = lease_id (16) ‖ (u32_be len ‖ ciphertext) × n     1..=MAX_PUT chunks of that lease
 //! put response     = bitmap (n bits): stored
 //! ```
@@ -55,6 +57,7 @@ pub const RECEIPT_ENDPOINT: &str = "/retifs/receipt";
 pub const PROVE_ENDPOINT: &str = "/retifs/prove";
 pub const MAX_PROVE: usize = 16;
 pub const PUT_ENDPOINT: &str = "/retifs/put";
+pub const HEAD_ENDPOINT: &str = "/retifs/head";
 /// 16 chunks of up to 16 KiB: one resource of about 256 KiB.
 pub const MAX_PUT: usize = 16;
 

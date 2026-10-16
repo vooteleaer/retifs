@@ -30,10 +30,12 @@ use std::{
     time::{Duration, Instant, SystemTime, UNIX_EPOCH},
 };
 
+mod channels;
 mod leases;
 mod placement;
 mod wants;
 pub use leases::{Accept, BlindWants, HeldLease, OwnLease, ProofState, LEASE_CHUNK_ESTIMATE};
+pub use channels::{Follow, OwnChannel};
 pub use placement::{surplus_holder, HolderStats, HolderView, LinkQuality, StorageNode, SLOW_DEFAULT_RATE, SLOW_RTT_MS, TRIM_MARGIN};
 pub use wants::{Hint, PeerId, Want};
 
@@ -229,6 +231,7 @@ impl SlabStore {
         wants::open_tables(&w)?;
         leases::open_tables(&w)?;
         placement::open_tables(&w)?;
+        channels::open_tables(&w)?;
         w.commit()?;
         Ok(SlabStore {
             root,
