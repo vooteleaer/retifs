@@ -96,8 +96,8 @@ fn owner_counts_holders_with_valid_receipts() {
     let root = chunks[0].cid;
     let (_, l1) = lease(1, &chunks, 1000);
     let (_, l2) = lease(2, &chunks, 1000);
-    st.record_own_lease(&l1, &[1; 16], &root).unwrap();
-    st.record_own_lease(&l2, &[2; 16], &root).unwrap();
+    st.record_own_lease(&l1, &[1; 16], &[root]).unwrap();
+    st.record_own_lease(&l2, &[2; 16], &[root]).unwrap();
     assert!(st.confirmed_holders(&root, 10).unwrap().is_empty(), "no receipts yet");
 
     let mut own = st.own_leases().unwrap();
@@ -180,7 +180,7 @@ fn forgetting_drops_leases_and_releases_only_unshared_own_chunks() {
     let v1 = retifs_core::FileRef { root: only_v1.cid, seed: only_v1.seed, size: 3000 };
     st.need_file(&v1).unwrap();
     let (_, mine) = lease(1, &[only_v1.clone(), shared.clone()], 1000);
-    st.record_own_lease(&mine, &[5; 16], &v1.root).unwrap();
+    st.record_own_lease(&mine, &[5; 16], &[v1.root]).unwrap();
 
     assert_eq!(st.forget_file(&v1.root).unwrap(), 1, "its lease is no longer renewed");
     assert!(st.needed_files().unwrap().is_empty());
@@ -215,3 +215,30 @@ fn surplus_copies_are_trimmed_with_hysteresis() {
     // Just under the target but not under half of it: keep (hysteresis).
     assert_eq!(surplus_holder(0.1, &[h(1, 0.09, 1, true), h(2, 0.5, 1, true)], target * 1.0), None);
 }
+
+#[test]
+fn mixed_leases_turn_stale_when_one_file_goes() {
+    let (_d, st) = store();
+    let (a, b) = (chunk(1).cid, chunk(2).cid);
+    let (_, mixed) = lease(1, &[chunk(1), chunk(2), chunk(3)], 1000);
+    let (_, only_a) = lease(2, &[chunk(1)], 1000);
+    st.record_own_lease(&mixed, &[7; 16], &[a, b]).unwrap();
+    st.record_own_lease(&only_a, &[8; 16], &[a]).unwrap();
+    assert_eq!(st.own_leases_for(&a).unwrap().len(), 2);
+
+    // Trim `a` at holder 7: the mixed lease still serves `b`, so it turns stale.
+    assert_eq!(st.drop_holder(&a, &[7; 16]).unwrap(), 1);
+    let m = st.own_leases_for(&b).unwrap();
+    assert_eq!((m.len(), m[0].roots.clone(), m[0].stale), (1, vec![b], true));
+    assert_eq!(st.own_leases_for(&a).unwrap().len(), 1, "a is still kept at holder 8");
+
+    // Forget `a` entirely: its single-file lease goes; the stale one is untouched.
+    st.need_file(&retifs_core::FileRef { root: a, seed: chunk(1).seed, size: 3000 }).unwrap();
+    assert_eq!(st.forget_file(&a).unwrap(), 1);
+    assert!(st.own_leases_for(&a).unwrap().is_empty());
+    assert_eq!(st.own_leases().unwrap().len(), 1);
+    // And forgetting `b` drops the last one.
+    assert_eq!(st.forget_file(&b).unwrap(), 1);
+    assert!(st.own_leases().unwrap().is_empty());
+}
+

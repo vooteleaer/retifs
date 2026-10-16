@@ -7,7 +7,13 @@
 //! ```
 //! Owner side (own data kept elsewhere):
 //! ```text
-//! OWN_LEASES    lease_id → holder (16) ‖ root (33) ‖ expires (8) ‖ receipt_until (8) ‖ proof (1) ‖ lease bytes
+//! OWN_LEASES    lease_id → holder (16) ‖ n (u16) ‖ root (33) × n ‖ stale (1) ‖ expires (8) ‖ receipt_until (8)
+//!               ‖ proof (1) ‖ lease bytes
+//! ```
+//! A lease may serve several files (ADR-0014: mixed leases hide file boundaries);
+//! `roots` lists them. When a file stops being kept there, the lease turns
+//! *stale* and is repacked at its next renewal instead of renewed.
+//! ```text
 //! ```
 //! Leased chunks carry the SERVING tier flag (hard: never evicted) and their
 //! access token in the serving index, so the holder serves them to anyone who
@@ -24,7 +30,7 @@ use crate::{tier, wants::PeerId, SlabStore, StoreError, SERVE};
 
 const LEASES: TableDefinition<&[u8], &[u8]> = TableDefinition::new("leases");
 const LEASE_CHUNKS: TableDefinition<&[u8], ()> = TableDefinition::new("lease_chunks");
-pub(crate) const OWN_LEASES: TableDefinition<&[u8], &[u8]> = TableDefinition::new("own_leases");
+pub(crate) const OWN_LEASES: TableDefinition<&[u8], &[u8]> = TableDefinition::new("own_leases_v2");
 
 /// Quota estimate per leased chunk: data chunks are at most the 16 KiB class.
 pub const LEASE_CHUNK_ESTIMATE: u64 = 16 * 1024;
@@ -63,7 +69,10 @@ pub struct HeldLease {
 pub struct OwnLease {
     pub lease: Lease,
     pub holder: PeerId,
-    pub root: Cid,
+    /// Files this lease keeps chunks of (several when mixed).
+    pub roots: Vec<Cid>,
+    /// It lists chunks no file still needs here: repack at renewal.
+    pub stale: bool,
     /// Current expiry (unix seconds): the lease's own, moved by renewals.
     pub expires: u64,
     /// Unix seconds the holder's latest valid receipt covers (0: none yet).
@@ -97,23 +106,40 @@ fn held_value(expires: u64, sources: &[PeerId], lease_bytes: &[u8]) -> Vec<u8> {
 }
 
 fn parse_own(v: &[u8]) -> OwnLease {
+    let n = u16::from_be_bytes([v[16], v[17]]) as usize;
+    let roots = v[18..18 + n * 33]
+        .chunks(33)
+        .map(|r| Cid::from_bytes(r.try_into().unwrap()).expect("CID version"))
+        .collect();
+    let v = &v[18 + n * 33..];
     OwnLease {
-        holder: v[..16].try_into().unwrap(),
-        root: Cid::from_bytes(v[16..49].try_into().unwrap()).expect("CID version"),
-        expires: u64::from_be_bytes(v[49..57].try_into().unwrap()),
-        receipt_until: u64::from_be_bytes(v[57..65].try_into().unwrap()),
-        proof: match v[65] {
+        holder: [0; 16],
+        roots,
+        stale: v[0] != 0,
+        expires: u64::from_be_bytes(v[1..9].try_into().unwrap()),
+        receipt_until: u64::from_be_bytes(v[9..17].try_into().unwrap()),
+        proof: match v[17] {
             1 => ProofState::Passed,
             2 => ProofState::Failed,
             _ => ProofState::Unchecked,
         },
-        lease: Lease::decode(&v[66..]).expect("own leases were signed here").0,
+        lease: Lease::decode(&v[18..]).expect("own leases were signed here").0,
     }
+}
+
+fn parse_own_value(v: &[u8]) -> OwnLease {
+    let mut o = parse_own(v);
+    o.holder = v[..16].try_into().unwrap();
+    o
 }
 
 fn own_value(o: &OwnLease) -> Vec<u8> {
     let mut v = o.holder.to_vec();
-    v.extend_from_slice(o.root.as_bytes());
+    v.extend_from_slice(&(o.roots.len() as u16).to_be_bytes());
+    for r in &o.roots {
+        v.extend_from_slice(r.as_bytes());
+    }
+    v.push(o.stale as u8);
     v.extend_from_slice(&o.expires.to_be_bytes());
     v.extend_from_slice(&o.receipt_until.to_be_bytes());
     v.push(o.proof as u8);
@@ -325,11 +351,12 @@ impl SlabStore {
 
     // ------------------------------------------------------------- owner side
 
-    pub fn record_own_lease(&self, lease: &Lease, holder: &PeerId, root: &Cid) -> Result<(), StoreError> {
+    pub fn record_own_lease(&self, lease: &Lease, holder: &PeerId, roots: &[Cid]) -> Result<(), StoreError> {
         let own = OwnLease {
             lease: lease.clone(),
             holder: *holder,
-            root: *root,
+            roots: roots.to_vec(),
+            stale: false,
             expires: lease.expires,
             receipt_until: 0,
             proof: ProofState::Unchecked,
@@ -343,10 +370,50 @@ impl SlabStore {
     pub fn own_leases(&self) -> Result<Vec<OwnLease>, StoreError> {
         let r = self.db.begin_read()?;
         let t = r.open_table(OWN_LEASES)?;
-        t.iter()?.map(|e| e.map(|(_, v)| parse_own(v.value())).map_err(StoreError::from)).collect()
+        t.iter()?.map(|e| e.map(|(_, v)| parse_own_value(v.value())).map_err(StoreError::from)).collect()
     }
 
     /// Updates an own lease (new expiry after renewal, receipt, proof outcome).
+    /// Leases this node gave out that keep chunks of `root`.
+    pub fn own_leases_for(&self, root: &Cid) -> Result<Vec<OwnLease>, StoreError> {
+        Ok(self.own_leases()?.into_iter().filter(|o| o.roots.contains(root)).collect())
+    }
+
+    /// Stops tracking an own lease (it's not renewed and runs out).
+    pub fn remove_own_lease(&self, id: &LeaseId) -> Result<(), StoreError> {
+        let w = self.db.begin_write()?;
+        w.open_table(OWN_LEASES)?.remove(id.as_slice())?;
+        w.commit()?;
+        Ok(())
+    }
+
+    /// `root` is no longer kept under these leases (forgotten, trimmed, or
+    /// lapsed at a holder): a lease left serving no file is dropped, one still
+    /// serving others turns stale (repacked at its next renewal). Returns how
+    /// many leases were touched.
+    pub(crate) fn unlist_root(&self, root: &Cid, holder: Option<&PeerId>) -> Result<usize, StoreError> {
+        let affected: Vec<OwnLease> = self
+            .own_leases_for(root)?
+            .into_iter()
+            .filter(|o| holder.is_none_or(|h| o.holder == *h))
+            .collect();
+        let w = self.db.begin_write()?;
+        {
+            let mut t = w.open_table(OWN_LEASES)?;
+            for mut o in affected.iter().cloned() {
+                o.roots.retain(|r| r != root);
+                if o.roots.is_empty() {
+                    t.remove(o.lease.id.as_slice())?;
+                } else {
+                    o.stale = true;
+                    t.insert(o.lease.id.as_slice(), own_value(&o).as_slice())?;
+                }
+            }
+        }
+        w.commit()?;
+        Ok(affected.len())
+    }
+
     pub fn update_own_lease(&self, own: &OwnLease) -> Result<(), StoreError> {
         let w = self.db.begin_write()?;
         w.open_table(OWN_LEASES)?.insert(own.lease.id.as_slice(), own_value(own).as_slice())?;
@@ -358,7 +425,7 @@ impl SlabStore {
     /// and whose last storage proof didn't fail.
     pub fn confirmed_holders(&self, root: &Cid, now: u64) -> Result<Vec<PeerId>, StoreError> {
         let mut by_holder: std::collections::BTreeMap<PeerId, bool> = Default::default();
-        for o in self.own_leases()?.into_iter().filter(|o| o.root == *root) {
+        for o in self.own_leases_for(root)? {
             let ok = o.receipt_until >= now && o.proof != ProofState::Failed;
             *by_holder.entry(o.holder).or_insert(true) &= ok;
         }

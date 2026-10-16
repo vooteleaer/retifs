@@ -269,24 +269,10 @@ impl SlabStore {
         Ok(())
     }
 
-    /// Stops keeping `root` at one holder: drops this node's leases for it
-    /// there, so they're no longer renewed and run out. Returns how many.
+    /// Stops keeping `root` at one holder: its leases there stop serving it
+    /// (dropped, or stale if they also serve other files). Returns how many.
     pub fn drop_holder(&self, root: &Cid, holder: &PeerId) -> Result<usize, StoreError> {
-        let ids: Vec<[u8; 16]> = self
-            .own_leases()?
-            .into_iter()
-            .filter(|o| o.root == *root && o.holder == *holder)
-            .map(|o| o.lease.id)
-            .collect();
-        let w = self.db.begin_write()?;
-        {
-            let mut own = w.open_table(crate::leases::OWN_LEASES)?;
-            for id in &ids {
-                own.remove(id.as_slice())?;
-            }
-        }
-        w.commit()?;
-        Ok(ids.len())
+        self.unlist_root(root, Some(holder))
     }
 
     /// This node no longer needs `root` kept: it leaves the needed and wanted
@@ -294,21 +280,14 @@ impl SlabStore {
     /// holders release the chunks when the leases run out. Returns how many
     /// leases were dropped. Chunks stay where they are; see `release_chunks`.
     pub fn forget_file(&self, root: &Cid) -> Result<usize, StoreError> {
-        let ids: Vec<[u8; 16]> =
-            self.own_leases()?.into_iter().filter(|o| o.root == *root).map(|o| o.lease.id).collect();
         let w = self.db.begin_write()?;
-        {
-            w.open_table(NEEDED)?.remove(root.as_bytes().as_slice())?;
-            let mut own = w.open_table(crate::leases::OWN_LEASES)?;
-            for id in &ids {
-                own.remove(id.as_slice())?;
-            }
-        }
+        w.open_table(NEEDED)?.remove(root.as_bytes().as_slice())?;
         w.commit()?;
+        let n = self.unlist_root(root, None)?;
         if self.is_wanted(root)? {
             self.finish_file(root)?;
         }
-        Ok(ids.len())
+        Ok(n)
     }
 
     /// Makes these chunks of a forgotten file evictable: own (pinned) copies

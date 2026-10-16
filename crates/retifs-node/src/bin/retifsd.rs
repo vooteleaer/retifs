@@ -743,7 +743,8 @@ async fn handle(d: &Daemon, req: Request) -> Result<Response, String> {
             for h in &to {
                 let peer = *parse_destination(h).ok_or_else(|| format!("bad node hash {h}"))?.as_bytes();
                 // Also name this node as a source, so the holder can pull what a push missed.
-                match lease_to(d, &peer, &cap, &chunks, &[d.node_id]).await.map_err(|e| format!("{h}: {e}"))? {
+                let roots: HashMap<Cid, Vec<Cid>> = chunks.iter().map(|(c, _)| (*c, vec![cap.root])).collect();
+                match lease_to(d, &peer, &sorted(&chunks), &roots, &[d.node_id]).await.map_err(|e| format!("{h}: {e}"))? {
                     true => println!("replicate: leased {} chunk(s) of {} to <{h}>", chunks.len(), cap.root),
                     false => return Err(format!("{h} refused the lease: NoRoom")),
                 }
@@ -761,19 +762,15 @@ async fn handle(d: &Daemon, req: Request) -> Result<Response, String> {
                     keep.extend(file_chunks(&d.store, &other).unwrap_or_default().into_iter().map(|(c, _)| c));
                 }
             }
-            let mine: Vec<Cid> = file_chunks(&d.store, &cap)
-                .unwrap_or_default()
-                .into_iter()
-                .map(|(c, _)| c)
-                .filter(|c| !keep.contains(c))
-                .collect();
+            let all: Vec<Cid> = file_chunks(&d.store, &cap).unwrap_or_default().into_iter().map(|(c, _)| c).collect();
+            let shared = all.iter().filter(|c| keep.contains(c)).count();
+            let mine: Vec<Cid> = all.into_iter().filter(|c| !keep.contains(c)).collect();
             let leases = d.store.forget_file(&cap.root).map_err(|e| e.to_string())?;
             let released = d.store.release_chunks(&mine).map_err(|e| e.to_string())?;
             d.deferred.lock().unwrap().remove(&cap.root);
             println!(
-                "forget {}: {leases} lease(s) no longer renewed, {released} chunk(s) evictable, {} shared chunk(s) kept",
-                cap.root,
-                keep.len()
+                "forget {}: {leases} lease(s) no longer serve it, {released} chunk(s) evictable, {shared} kept (other needed files use them)",
+                cap.root
             );
             Ok(Response::Status(full_status(d, &cap)))
         }
@@ -829,7 +826,7 @@ fn full_status(d: &Daemon, cap: &FileRef) -> Status {
     s.seeking = store.is_wanted(&cap.root).unwrap_or(false);
     s.holders_known = store.hints(&cap.root).map(|h| h.len()).unwrap_or(0);
     let own = store.own_leases().unwrap_or_default();
-    s.leased_to = own.iter().filter(|o| o.root == cap.root).map(|o| o.holder).collect::<std::collections::BTreeSet<_>>().len();
+    s.leased_to = own.iter().filter(|o| o.roots.contains(&cap.root)).map(|o| o.holder).collect::<std::collections::BTreeSet<_>>().len();
     s.replicas = store.confirmed_holders(&cap.root, now_s()).map(|h| h.len()).unwrap_or(0);
     s
 }
@@ -953,12 +950,8 @@ async fn lease_upkeep(d: Arc<Daemon>) {
                 }
             }
         }
-        if let Ok(files) = d.store.needed_files() {
-            for f in files {
-                if let Err(e) = place(&d, &f).await {
-                    eprintln!("placement {}: {e}", f.root);
-                }
-            }
+        if let Err(e) = place_all(&d).await {
+            eprintln!("placement: {e}");
         }
     }
 }
@@ -975,7 +968,7 @@ fn loss_now(d: &Daemon, file: &FileRef) -> (f64, Vec<retifs_store::HolderView>, 
     let hops: HashMap<PeerId, u8> =
         d.store.storage_nodes().unwrap_or_default().into_iter().map(|n| (n.peer, n.hops)).collect();
     let mut by_holder: std::collections::BTreeMap<PeerId, retifs_store::HolderView> = Default::default();
-    for o in d.store.own_leases().unwrap_or_default().into_iter().filter(|o| o.root == file.root) {
+    for o in d.store.own_leases_for(&file.root).unwrap_or_default() {
         let lapsed = o.receipt_until > 0 && o.receipt_until < now;
         let p = if lapsed || o.proof == ProofState::Failed {
             1.0
@@ -1003,10 +996,74 @@ fn met(risk: f64, target: f64) -> bool {
     risk <= target * (1.0 + 1e-9)
 }
 
-/// Adds the nearest storage nodes as holders of `file` until the loss estimate
-/// is below the target. Data goes by push, so readers' copies (cache, never
+/// Keeps every needed file at or below the loss target (ADR-0014), in one
+/// planned pass: each file picks the holders it lacks from one ranking of
+/// candidates, then everything bound for a holder goes out together, packed
+/// into mixed leases sorted by CID, so a holder sees neither file boundaries
+/// nor chunk order. Data goes by push, so readers' copies (cache, never
 /// served) can be placed too, and holders don't learn who sent it.
-async fn place(d: &Daemon, file: &FileRef) -> Result<(), String> {
+async fn place_all(d: &Daemon) -> Result<(), String> {
+    let mut plan: std::collections::BTreeMap<PeerId, Vec<FileRef>> = Default::default();
+    let mut ranked: Option<Vec<(f64, retifs_store::StorageNode)>> = None;
+    for file in d.store.needed_files().map_err(|e| e.to_string())? {
+        let Some((mut risk, holders)) = review(d, &file)? else { continue };
+        if ranked.is_none() {
+            ranked = Some(rank_candidates(d).await?);
+        }
+        for (_, n) in ranked.as_deref().unwrap_or_default() {
+            if met(risk, d.loss_target) {
+                break;
+            }
+            if holders.contains(&n.peer) {
+                continue;
+            }
+            plan.entry(n.peer).or_default().push(file);
+            risk *= d.store.holder_stats(&n.peer).map(|s| s.loss()).unwrap_or(1.0);
+        }
+    }
+    for (peer, files) in plan {
+        // Union of the files' chunks: shared chunks (versions) are listed once.
+        let mut roots: HashMap<Cid, Vec<Cid>> = HashMap::new();
+        let mut chunks: Vec<(Cid, ChunkToken)> = Vec::new();
+        for f in &files {
+            for (cid, token) in file_chunks(&d.store, f)? {
+                let r = roots.entry(cid).or_default();
+                if r.is_empty() {
+                    chunks.push((cid, token));
+                }
+                r.push(f.root);
+            }
+        }
+        let hops = d.store.storage_nodes().unwrap_or_default().iter().find(|n| n.peer == peer).map_or(0, |n| n.hops);
+        match lease_to(d, &peer, &sorted(&chunks), &roots, &[]).await {
+            Ok(true) => println!(
+                "placement: {} file(s), {} chunk(s) kept at <{}> ({hops} hop(s)) in mixed lease(s)",
+                files.len(),
+                chunks.len(),
+                hex(&peer)
+            ),
+            Ok(false) => d.store.avoid_storage_node(&peer, now_ms() + 3_600_000).map_err(|e| e.to_string())?,
+            Err(e) => {
+                eprintln!("placement: <{}>: {e}", hex(&peer));
+                d.store.avoid_storage_node(&peer, now_ms() + 600_000).map_err(|e| e.to_string())?;
+            }
+        }
+    }
+    Ok(())
+}
+
+/// Chunks in CID order: a lease then says nothing about file order or boundaries.
+fn sorted(chunks: &[(Cid, ChunkToken)]) -> Vec<(Cid, ChunkToken)> {
+    let mut v = chunks.to_vec();
+    v.sort_by(|a, b| a.0.as_bytes().cmp(b.0.as_bytes()));
+    v.dedup_by(|a, b| a.0 == b.0);
+    v
+}
+
+/// Brings one file's holders up to date: forgets holders whose lease ran
+/// out, trims a surplus copy. Returns the loss estimate and current holders
+/// if the file needs more.
+fn review(d: &Daemon, file: &FileRef) -> Result<Option<(f64, std::collections::BTreeSet<PeerId>)>, String> {
     // A lease that ran out unrenewed means the holder dropped the copy: forget
     // that holder for this file instead of re-offering to it later (a minute of
     // grace for clocks). One that's only away but still within its lease counts
@@ -1014,17 +1071,17 @@ async fn place(d: &Daemon, file: &FileRef) -> Result<(), String> {
     let now = now_s();
     let lapsed: std::collections::BTreeSet<PeerId> = d
         .store
-        .own_leases()
+        .own_leases_for(&file.root)
         .map_err(|e| e.to_string())?
         .into_iter()
-        .filter(|o| o.root == file.root && o.expires + 60 < now)
+        .filter(|o| o.expires + 60 < now)
         .map(|o| o.holder)
         .collect();
     for h in lapsed {
         d.store.drop_holder(&file.root, &h).map_err(|e| e.to_string())?;
         println!("placement: {}: lease at <{}> ran out unrenewed, its copy is gone", file.root, hex(&h));
     }
-    let (local, views, mut risk) = loss_now(d, file);
+    let (local, views, risk) = loss_now(d, file);
     if met(risk, d.loss_target) {
         // Surplus after a repair (the absent holder came back): stop renewing
         // the worst copy once the target holds well without it.
@@ -1032,25 +1089,26 @@ async fn place(d: &Daemon, file: &FileRef) -> Result<(), String> {
             let n = d.store.drop_holder(&file.root, &drop).map_err(|e| e.to_string())?;
             let without = local * views.iter().filter(|h| h.peer != drop).map(|h| h.loss).product::<f64>();
             println!(
-                "placement: {} trimmed at <{}> ({n} lease(s) no longer renewed), loss estimate without it {without:.1e}",
+                "placement: {} trimmed at <{}> ({n} lease(s) no longer serve it), loss estimate without it {without:.1e}",
                 file.root,
                 hex(&drop)
             );
         }
-        return Ok(());
+        return Ok(None);
     }
-    let holders: std::collections::BTreeSet<PeerId> = views.iter().map(|h| h.peer).collect();
-    let chunks = file_chunks(&d.store, file)?;
-    let bytes = chunks.len() as u64 * 16 * 1024;
-    // The nearest few by hops, measured by linking (RTT) and earlier transfers,
-    // then ranked by estimated transfer time. Placement is never worth a slow
-    // link: copies for durability don't cross LoRa (ADR-0013/0014).
+    Ok(Some((risk, views.iter().map(|h| h.peer).collect())))
+}
+
+/// The nearest few storage nodes by hops, measured by linking (RTT) and
+/// earlier transfers, ranked by estimated transfer time. Placement is never
+/// worth a slow link: copies for durability don't cross LoRa (ADR-0013/0014).
+async fn rank_candidates(d: &Daemon) -> Result<Vec<(f64, retifs_store::StorageNode)>, String> {
     let mut candidates = Vec::new();
     for n in d.store.storage_nodes().map_err(|e| e.to_string())? {
         if candidates.len() == 8 {
             break;
         }
-        if n.peer == d.node_id || holders.contains(&n.peer) || n.avoid_until_ms > now_ms() {
+        if n.peer == d.node_id || n.avoid_until_ms > now_ms() {
             continue;
         }
         if let Err(e) = d.link_to(&n.peer).await {
@@ -1064,27 +1122,10 @@ async fn place(d: &Daemon, file: &FileRef) -> Result<(), String> {
             d.store.avoid_storage_node(&n.peer, now_ms() + 6 * 3_600_000).map_err(|e| e.to_string())?;
             continue;
         }
-        candidates.push((q.transfer_secs(bytes), n));
+        candidates.push((q.transfer_secs(1 << 20), n));
     }
     candidates.sort_by(|a, b| a.0.total_cmp(&b.0).then(a.1.hops.cmp(&b.1.hops)));
-    for (secs, n) in candidates {
-        if met(risk, d.loss_target) {
-            break;
-        }
-        println!("placement: candidate <{}>, {} hop(s), est. {secs:.1} s", hex(&n.peer), n.hops);
-        match lease_to(d, &n.peer, file, &chunks, &[]).await {
-            Ok(true) => {
-                risk *= d.store.holder_stats(&n.peer).map(|s| s.loss()).unwrap_or(1.0);
-                println!("placement: {} kept at <{}> ({} hop(s)), loss estimate now {risk:.1e}", file.root, hex(&n.peer), n.hops);
-            }
-            Ok(false) => d.store.avoid_storage_node(&n.peer, now_ms() + 3_600_000).map_err(|e| e.to_string())?,
-            Err(e) => {
-                eprintln!("placement: <{}>: {e}", hex(&n.peer));
-                d.store.avoid_storage_node(&n.peer, now_ms() + 600_000).map_err(|e| e.to_string())?;
-            }
-        }
-    }
-    Ok(())
+    Ok(candidates)
 }
 
 /// Offers a lease, with a stamp if the holder asks for one (or asked before).
@@ -1117,17 +1158,27 @@ async fn offer(d: &Daemon, link: LinkId, peer: &PeerId, l: &Lease, sources: &[Pe
     Err("holder keeps refusing the stamp".into())
 }
 
-/// Offers `peer` leases over all of `chunks` and pushes what it lacks.
-/// Ok(false): it has no room.
-async fn lease_to(d: &Daemon, peer: &PeerId, file: &FileRef, chunks: &[(Cid, ChunkToken)], sources: &[PeerId]) -> Result<bool, String> {
+/// Offers `peer` leases over `chunks` (≤ 1024 per lease, in the given order)
+/// and pushes what it lacks. `roots` says which files each chunk belongs to,
+/// so each lease records the files it serves. Ok(false): it has no room.
+async fn lease_to(
+    d: &Daemon,
+    peer: &PeerId,
+    chunks: &[(Cid, ChunkToken)],
+    roots: &HashMap<Cid, Vec<Cid>>,
+    sources: &[PeerId],
+) -> Result<bool, String> {
     let link = d.link_to(peer).await?;
     for part in chunks.chunks(lease::MAX_CHUNKS) {
         let mut id = [0u8; lease::ID_LEN];
         getrandom::fill(&mut id).expect("OS entropy");
         let l = d.sign_lease(id, now_s() + d.lease_term, part.to_vec());
+        let mut served: Vec<Cid> = part.iter().flat_map(|(c, _)| roots.get(c).cloned().unwrap_or_default()).collect();
+        served.sort_by(|a, b| a.as_bytes().cmp(b.as_bytes()));
+        served.dedup();
         match offer(d, link, peer, &l, sources).await {
             Ok(LeaseStatus::Accepted) => {
-                d.store.record_own_lease(&l, peer, &file.root).map_err(|e| e.to_string())?;
+                d.store.record_own_lease(&l, peer, &served).map_err(|e| e.to_string())?;
                 match push(d, link, &l, Some(peer)).await {
                     Ok(sent) => println!("lease {}: pushed {sent} of {} chunk(s) to <{}>", hex(&l.id), l.entries.len(), hex(peer)),
                     Err(e) => {
@@ -1210,6 +1261,17 @@ async fn upkeep_holder(
     let before: Vec<_> = leases.iter().map(|o| (o.expires, o.receipt_until, o.proof)).collect();
     let mut behaved = true;
 
+    // Stale leases (a file they served is no longer kept here) are repacked
+    // instead of renewed: a new lease with only the chunks still needed, which
+    // the holder already has, while the old one runs out.
+    let mut gone = std::collections::HashSet::new();
+    let (stale, renew): (Vec<usize>, Vec<usize>) = renew.into_iter().partition(|&i| leases[i].stale);
+    for i in stale {
+        if repack(d, holder, &leases[i]).await? {
+            gone.insert(i);
+        }
+    }
+
     // Renewals, up to 64 per request.
     for batch in renew.chunks(MAX_BUNDLE) {
         let expires = now + d.lease_term;
@@ -1239,7 +1301,7 @@ async fn upkeep_holder(
     }
 
     // Receipts for leases not yet covered, up to 64 per request.
-    let need: Vec<usize> = (0..leases.len()).filter(|&i| leases[i].receipt_until < leases[i].expires).collect();
+    let need: Vec<usize> = (0..leases.len()).filter(|&i| !gone.contains(&i) && leases[i].receipt_until < leases[i].expires).collect();
     for batch in need.chunks(MAX_BUNDLE) {
         let ids: Vec<LeaseId> = batch.iter().map(|&i| leases[i].lease.id).collect();
         let reply = d.ask(link, RECEIPT_ENDPOINT, encode_receipt_request(&ids)).await?;
@@ -1275,7 +1337,7 @@ async fn upkeep_holder(
     }
 
     // One storage proof per holder per interval, on a random lease with a receipt.
-    let receipted: Vec<usize> = (0..leases.len()).filter(|&i| leases[i].receipt_until > 0).collect();
+    let receipted: Vec<usize> = (0..leases.len()).filter(|&i| !gone.contains(&i) && leases[i].receipt_until > 0).collect();
     if proof_due && !receipted.is_empty() {
         let mut rnd = [0u8; 16 + 8 + 2];
         getrandom::fill(&mut rnd).expect("OS entropy");
@@ -1300,12 +1362,47 @@ async fn upkeep_holder(
         proved.insert(*holder, Instant::now());
     }
 
-    for (o, b) in leases.iter().zip(before) {
-        if (o.expires, o.receipt_until, o.proof) != b {
+    for (i, (o, b)) in leases.iter().zip(before).enumerate() {
+        if !gone.contains(&i) && (o.expires, o.receipt_until, o.proof) != b {
             d.store.update_own_lease(o).map_err(|e| e.to_string())?;
         }
     }
     Ok(Some(behaved))
+}
+
+/// Replaces a stale lease with one over only the chunks its remaining files
+/// still need (the holder has them: nothing is pushed). The old lease isn't
+/// renewed and runs out. Ok(true): the old lease is no longer tracked.
+async fn repack(d: &Daemon, holder: &PeerId, o: &OwnLease) -> Result<bool, String> {
+    let needed: HashMap<Cid, FileRef> =
+        d.store.needed_files().map_err(|e| e.to_string())?.into_iter().map(|f| (f.root, f)).collect();
+    let in_lease: std::collections::HashSet<Cid> = o.lease.entries.iter().map(|(c, _)| *c).collect();
+    let mut roots: HashMap<Cid, Vec<Cid>> = HashMap::new();
+    let mut keep = Vec::new();
+    for root in &o.roots {
+        let Some(f) = needed.get(root) else { continue };
+        for (cid, token) in file_chunks(&d.store, f)? {
+            if in_lease.contains(&cid) {
+                let r = roots.entry(cid).or_default();
+                if r.is_empty() {
+                    keep.push((cid, token));
+                }
+                r.push(*root);
+            }
+        }
+    }
+    if keep.is_empty() || lease_to(d, holder, &sorted(&keep), &roots, &[]).await? {
+        println!(
+            "lease {}: repacked at <{}>: {} of {} chunk(s) still needed",
+            hex(&o.lease.id),
+            hex(holder),
+            keep.len(),
+            o.lease.entries.len()
+        );
+        d.store.remove_own_lease(&o.lease.id).map_err(|e| e.to_string())?;
+        return Ok(true);
+    }
+    Ok(false)
 }
 
 /// The holder lost a lease (restart without it, expiry): offer it again under
