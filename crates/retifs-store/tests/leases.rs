@@ -163,3 +163,34 @@ fn link_quality_from_rtt_then_measurements() {
     assert_eq!(st.link_quality(&fast).unwrap().samples, 0);
     assert!(!LinkQuality::default().slow(), "never linked: no reason to call it slow");
 }
+
+#[test]
+fn forgetting_drops_leases_and_releases_only_unshared_own_chunks() {
+    let (_d, st) = store();
+    let (only_v1, shared, held_for_other) = (chunk(1), chunk(2), chunk(3));
+    for c in [&only_v1, &shared] {
+        st.insert(&c.cid, &c.ciphertext, tier::PINNED).unwrap();
+        st.register_serving(&[(c.cid, ChunkToken::for_seed(&c.seed))]).unwrap();
+    }
+    // Also pinned here, and kept for someone else under their lease.
+    st.insert(&held_for_other.cid, &held_for_other.ciphertext, tier::PINNED).unwrap();
+    let (_, theirs) = lease(9, std::slice::from_ref(&held_for_other), 1000);
+    st.accept_lease(&theirs, &[], u64::MAX).unwrap();
+
+    let v1 = retifs_core::FileRef { root: only_v1.cid, seed: only_v1.seed, size: 3000 };
+    st.need_file(&v1).unwrap();
+    let (_, mine) = lease(1, &[only_v1.clone(), shared.clone()], 1000);
+    st.record_own_lease(&mine, &[5; 16], &v1.root).unwrap();
+
+    assert_eq!(st.forget_file(&v1.root).unwrap(), 1, "its lease is no longer renewed");
+    assert!(st.needed_files().unwrap().is_empty());
+    assert!(st.own_leases().unwrap().is_empty());
+
+    // `shared` is still used by another needed version: the caller leaves it out.
+    assert_eq!(st.release_chunks(&[only_v1.cid, held_for_other.cid]).unwrap(), 1);
+    assert_eq!(st.tier(&only_v1.cid).unwrap(), Some(tier::CACHE), "evictable now");
+    assert!(st.serving_token(&only_v1.cid).unwrap().is_none(), "no longer served");
+    assert_eq!(st.tier(&shared.cid).unwrap(), Some(tier::PINNED));
+    assert_eq!(st.tier(&held_for_other.cid).unwrap(), Some(tier::CACHE | tier::SERVING), "still kept for them");
+    assert!(st.serving_token(&held_for_other.cid).unwrap().is_some());
+}

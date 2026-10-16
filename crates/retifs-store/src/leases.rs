@@ -24,7 +24,7 @@ use crate::{tier, wants::PeerId, SlabStore, StoreError, SERVE};
 
 const LEASES: TableDefinition<&[u8], &[u8]> = TableDefinition::new("leases");
 const LEASE_CHUNKS: TableDefinition<&[u8], ()> = TableDefinition::new("lease_chunks");
-const OWN_LEASES: TableDefinition<&[u8], &[u8]> = TableDefinition::new("own_leases");
+pub(crate) const OWN_LEASES: TableDefinition<&[u8], &[u8]> = TableDefinition::new("own_leases");
 
 /// Quota estimate per leased chunk: data chunks are at most the 16 KiB class.
 pub const LEASE_CHUNK_ESTIMATE: u64 = 16 * 1024;

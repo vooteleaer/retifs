@@ -718,6 +718,32 @@ async fn handle(d: &Daemon, req: Request) -> Result<Response, String> {
             Ok(Response::Status(full_status(d, &cap)))
         }
 
+        Request::Forget { cap } => {
+            let cap: FileRef = cap.parse().map_err(|e: retifs_core::ManifestError| e.to_string())?;
+            // Chunks other needed files still use stay (versions share most of theirs).
+            let mut keep = std::collections::HashSet::new();
+            for other in d.store.needed_files().map_err(|e| e.to_string())? {
+                if other.root != cap.root {
+                    keep.extend(file_chunks(&d.store, &other).unwrap_or_default().into_iter().map(|(c, _)| c));
+                }
+            }
+            let mine: Vec<Cid> = file_chunks(&d.store, &cap)
+                .unwrap_or_default()
+                .into_iter()
+                .map(|(c, _)| c)
+                .filter(|c| !keep.contains(c))
+                .collect();
+            let leases = d.store.forget_file(&cap.root).map_err(|e| e.to_string())?;
+            let released = d.store.release_chunks(&mine).map_err(|e| e.to_string())?;
+            d.deferred.lock().unwrap().remove(&cap.root);
+            println!(
+                "forget {}: {leases} lease(s) no longer renewed, {released} chunk(s) evictable, {} shared chunk(s) kept",
+                cap.root,
+                keep.len()
+            );
+            Ok(Response::Status(full_status(d, &cap)))
+        }
+
         Request::Want { cap, from } => {
             let cap: FileRef = cap.parse().map_err(|e: retifs_core::ManifestError| e.to_string())?;
             let peers: Vec<PeerId> = from

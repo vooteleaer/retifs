@@ -9,6 +9,7 @@
 //!     retifs [--store DIR] status READ-CAP
 //!     retifs [--store DIR] want READ-CAP [--from NODE]...
 //!     retifs [--store DIR] replicate READ-CAP --to NODE...
+//!     retifs [--store DIR] forget READ-CAP
 //!
 //! `replicate` keeps an own file on other nodes under signed leases (ADR-0011);
 //! `status` then shows how many of them confirmed with a receipt.
@@ -27,7 +28,8 @@ fn usage() -> ! {
          retifs [--store DIR] get READ-CAP [--from NODE]... [-o OUT] [--links N] [--batch N]\n\
          retifs [--store DIR] status READ-CAP\n\
          retifs [--store DIR] want READ-CAP [--from NODE]...
-         retifs [--store DIR] replicate READ-CAP --to NODE..."
+         retifs [--store DIR] replicate READ-CAP --to NODE...\n\
+         retifs [--store DIR] forget READ-CAP"
     );
     std::process::exit(2);
 }
@@ -121,6 +123,12 @@ async fn main() {
                 usage();
             }
             let s = client.replicate(&cap, &to).await.unwrap_or_else(|e| fail(e));
+            print_status(&s);
+        }
+        "forget" => {
+            let cap = it.next().unwrap_or_else(|| usage());
+            let s = client.forget(&cap).await.unwrap_or_else(|e| fail(e));
+            println!("no longer needed here: its copies elsewhere expire unless others need them");
             print_status(&s);
         }
         "status" => {

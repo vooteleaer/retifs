@@ -239,6 +239,57 @@ impl SlabStore {
         Ok(())
     }
 
+    /// This node no longer needs `root` kept: it leaves the needed and wanted
+    /// lists, and its own leases are dropped, so they're no longer renewed and
+    /// holders release the chunks when the leases run out. Returns how many
+    /// leases were dropped. Chunks stay where they are; see `release_chunks`.
+    pub fn forget_file(&self, root: &Cid) -> Result<usize, StoreError> {
+        let ids: Vec<[u8; 16]> =
+            self.own_leases()?.into_iter().filter(|o| o.root == *root).map(|o| o.lease.id).collect();
+        let w = self.db.begin_write()?;
+        {
+            w.open_table(NEEDED)?.remove(root.as_bytes().as_slice())?;
+            let mut own = w.open_table(crate::leases::OWN_LEASES)?;
+            for id in &ids {
+                own.remove(id.as_slice())?;
+            }
+        }
+        w.commit()?;
+        if self.is_wanted(root)? {
+            self.finish_file(root)?;
+        }
+        Ok(ids.len())
+    }
+
+    /// Makes these chunks of a forgotten file evictable: own (pinned) copies
+    /// move to the cache tier and stop being served. Chunks held for others
+    /// (leases) are untouched. The caller leaves out chunks other needed files
+    /// still use (versions of a record share most of theirs).
+    pub fn release_chunks(&self, cids: &[Cid]) -> Result<usize, StoreError> {
+        let mut released = Vec::new();
+        for cid in cids {
+            if let Some(flags) = self.tier(cid)?
+                && flags & crate::tier::PINNED != 0
+            {
+                self.set_tier(cid, (flags & !crate::tier::PINNED) | crate::tier::CACHE)?;
+                if flags & crate::tier::SERVING == 0 {
+                    released.push(*cid);
+                }
+            }
+        }
+        let w = self.db.begin_write()?;
+        {
+            let mut serve = w.open_table(crate::SERVE)?;
+            let mut published = w.open_table(crate::PUBLISHED)?;
+            for cid in &released {
+                serve.remove(cid.as_bytes().as_slice())?;
+                published.remove(cid.as_bytes().as_slice())?;
+            }
+        }
+        w.commit()?;
+        Ok(released.len())
+    }
+
     pub fn needed_files(&self) -> Result<Vec<FileRef>, StoreError> {
         let r = self.db.begin_read()?;
         let t = r.open_table(NEEDED)?;

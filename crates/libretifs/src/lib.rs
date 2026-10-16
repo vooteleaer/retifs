@@ -78,6 +78,10 @@ pub enum Request {
         /// retifsd destination hashes (hex) of the holders.
         to: Vec<String>,
     },
+    /// This node no longer needs `cap` kept (ADR-0014): stop seeking it, stop
+    /// renewing its leases (holders release it when they run out), and make
+    /// its local chunks evictable, except those other needed files share.
+    Forget { cap: String },
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -335,6 +339,13 @@ impl Client {
 
     pub async fn status(&mut self, cap: &str) -> Result<Status, ClientError> {
         match self.call(Request::Status { cap: cap.into() }).await? {
+            Response::Status(s) => Ok(s),
+            _ => Err(ClientError::Unexpected),
+        }
+    }
+
+    pub async fn forget(&mut self, cap: &str) -> Result<Status, ClientError> {
+        match self.call(Request::Forget { cap: cap.into() }).await? {
             Response::Status(s) => Ok(s),
             _ => Err(ClientError::Unexpected),
         }
