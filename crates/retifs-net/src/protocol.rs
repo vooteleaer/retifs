@@ -9,9 +9,12 @@
 //!
 //! lease request    = 0x01 ‖ lease ‖ n (u8) ‖ source node (16) × n     offer a lease (sources: where to pull)
 //!                  | 0x02 ‖ renewal (89)                             move its expiry
-//! lease response   = status (u8): 0 accepted, 1 no room, 2 invalid or conflicting, 3 unknown lease
-//! receipt request  = lease_id (16)
-//! receipt response = 0x00 ‖ receipt (185) | 0x01 ‖ held (u16) ‖ total (u16) | 0x02 (unknown lease)
+//!                  | 0x03 ‖ n (u16) ‖ renewal (89) × n               1..=MAX_BUNDLE renewals at once
+//! lease response   = status (u8) per offer or renewal: 0 accepted, 1 no room, 2 invalid or conflicting, 3 unknown lease
+//! receipt request  = lease_id (16) × n                                1..=MAX_BUNDLE leases
+//! receipt response = reply × n: 0x00 ‖ receipt (185) | 0x01 ‖ held (u16) ‖ total (u16) | 0x02 (unknown lease)
+//!
+//! Bundles keep upkeep at one exchange per holder, however many leases it keeps.
 //! prove request    = lease_id (16) ‖ nonce (16) ‖ index (u16) × n      1..=MAX_PROVE indices
 //! prove response   = (0x00 ‖ answer (16) | 0x01) × n
 //! put request      = lease_id (16) ‖ (u32_be len ‖ ciphertext) × n     1..=MAX_PUT chunks of that lease
@@ -30,7 +33,7 @@ use std::fmt;
 use retifs_core::{
     access::PROOF_LEN,
     cid::CID_LEN,
-    lease::{Lease, LeaseId, Receipt, Renewal, PROVE_LEN},
+    lease::{Lease, LeaseId, Receipt, Renewal, PROVE_LEN, RECEIPT_LEN, RENEWAL_LEN},
     Cid,
 };
 
@@ -53,8 +56,12 @@ pub const PUT_ENDPOINT: &str = "/retifs/put";
 /// 16 chunks of up to 16 KiB: one resource of about 256 KiB.
 pub const MAX_PUT: usize = 16;
 
+/// Renewals or receipt requests per bundle.
+pub const MAX_BUNDLE: usize = 64;
+
 const OFFER: u8 = 1;
 const RENEW: u8 = 2;
+const RENEW_MANY: u8 = 3;
 
 const FOUND: u8 = 0;
 const MISSING: u8 = 1;
@@ -181,6 +188,7 @@ pub fn decode_bitmap(bytes: &[u8], n: usize) -> Result<Vec<bool>, ProtocolError>
 pub enum LeaseRequest {
     Offer { lease: Lease, sources: Vec<[u8; 16]> },
     Renew(Renewal),
+    RenewMany(Vec<Renewal>),
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -204,6 +212,14 @@ pub fn encode_lease_request(req: &LeaseRequest) -> Vec<u8> {
             out
         }
         LeaseRequest::Renew(r) => [&[RENEW][..], &r.encode()].concat(),
+        LeaseRequest::RenewMany(rs) => {
+            let mut out = vec![RENEW_MANY];
+            out.extend_from_slice(&(rs.len() as u16).to_be_bytes());
+            for r in rs {
+                out.extend_from_slice(&r.encode());
+            }
+            out
+        }
     }
 }
 
@@ -220,16 +236,40 @@ pub fn decode_lease_request(bytes: &[u8]) -> Result<LeaseRequest, ProtocolError>
             Ok(LeaseRequest::Offer { lease, sources })
         }
         Some((&RENEW, rest)) => Ok(LeaseRequest::Renew(Renewal::decode(rest).map_err(|_| ProtocolError("invalid renewal"))?)),
+        Some((&RENEW_MANY, rest)) => {
+            let (n, rest) = rest.split_first_chunk::<2>().ok_or(ProtocolError("missing renewal count"))?;
+            let n = u16::from_be_bytes(*n) as usize;
+            if n == 0 || n > MAX_BUNDLE || rest.len() != n * RENEWAL_LEN {
+                return Err(ProtocolError("renewal bundle needs 1..=64 renewals"));
+            }
+            let rs = rest.chunks(RENEWAL_LEN).map(Renewal::decode).collect::<Result<_, _>>();
+            Ok(LeaseRequest::RenewMany(rs.map_err(|_| ProtocolError("invalid renewal"))?))
+        }
         _ => Err(ProtocolError("unknown lease request")),
     }
 }
 
 pub fn decode_lease_status(bytes: &[u8]) -> Result<LeaseStatus, ProtocolError> {
     match bytes {
-        [0] => Ok(LeaseStatus::Accepted),
-        [1] => Ok(LeaseStatus::NoRoom),
-        [2] => Ok(LeaseStatus::Invalid),
-        [3] => Ok(LeaseStatus::Unknown),
+        [b] => status(*b),
+        _ => Err(ProtocolError("lease status")),
+    }
+}
+
+/// One status per renewal of a bundle.
+pub fn decode_lease_statuses(bytes: &[u8], expected: usize) -> Result<Vec<LeaseStatus>, ProtocolError> {
+    if bytes.len() != expected {
+        return Err(ProtocolError("status count differs from request"));
+    }
+    bytes.iter().map(|b| status(*b)).collect()
+}
+
+fn status(b: u8) -> Result<LeaseStatus, ProtocolError> {
+    match b {
+        0 => Ok(LeaseStatus::Accepted),
+        1 => Ok(LeaseStatus::NoRoom),
+        2 => Ok(LeaseStatus::Invalid),
+        3 => Ok(LeaseStatus::Unknown),
         _ => Err(ProtocolError("lease status")),
     }
 }
@@ -252,12 +292,53 @@ pub fn encode_receipt_reply(r: &ReceiptReply) -> Vec<u8> {
 
 /// Parses a receipt reply; a receipt's signature is verified, not yet its signer.
 pub fn decode_receipt_reply(bytes: &[u8]) -> Result<ReceiptReply, ProtocolError> {
-    match bytes.split_first() {
-        Some((0, rest)) => Ok(ReceiptReply::Receipt(Receipt::decode(rest).map_err(|_| ProtocolError("invalid receipt"))?)),
-        Some((1, [a, b, c, d])) => Ok(ReceiptReply::Progress { held: u16::from_be_bytes([*a, *b]), total: u16::from_be_bytes([*c, *d]) }),
-        Some((2, [])) => Ok(ReceiptReply::Unknown),
-        _ => Err(ProtocolError("receipt reply")),
+    match decode_receipt_replies(bytes, 1)?.pop() {
+        Some(r) => Ok(r),
+        None => Err(ProtocolError("receipt reply")),
     }
+}
+
+pub fn encode_receipt_replies(replies: &[ReceiptReply]) -> Vec<u8> {
+    replies.iter().flat_map(encode_receipt_reply).collect()
+}
+
+/// Parses the replies to a bundled receipt request, one per lease asked about.
+pub fn decode_receipt_replies(mut bytes: &[u8], expected: usize) -> Result<Vec<ReceiptReply>, ProtocolError> {
+    let mut out = Vec::with_capacity(expected);
+    while let Some((&tag, rest)) = bytes.split_first() {
+        let (reply, rest) = match tag {
+            0 if rest.len() >= RECEIPT_LEN => (
+                ReceiptReply::Receipt(Receipt::decode(&rest[..RECEIPT_LEN]).map_err(|_| ProtocolError("invalid receipt"))?),
+                &rest[RECEIPT_LEN..],
+            ),
+            1 if rest.len() >= 4 => (
+                ReceiptReply::Progress {
+                    held: u16::from_be_bytes([rest[0], rest[1]]),
+                    total: u16::from_be_bytes([rest[2], rest[3]]),
+                },
+                &rest[4..],
+            ),
+            2 => (ReceiptReply::Unknown, rest),
+            _ => return Err(ProtocolError("receipt reply")),
+        };
+        out.push(reply);
+        bytes = rest;
+    }
+    if out.len() != expected {
+        return Err(ProtocolError("receipt reply count differs from request"));
+    }
+    Ok(out)
+}
+
+pub fn encode_receipt_request(ids: &[LeaseId]) -> Vec<u8> {
+    ids.concat()
+}
+
+pub fn decode_receipt_request(bytes: &[u8]) -> Result<Vec<LeaseId>, ProtocolError> {
+    if bytes.is_empty() || !bytes.len().is_multiple_of(16) || bytes.len() / 16 > MAX_BUNDLE {
+        return Err(ProtocolError("receipt request needs 1..=64 lease ids"));
+    }
+    Ok(bytes.as_chunks::<16>().0.to_vec())
 }
 
 pub fn encode_prove(id: &LeaseId, nonce: &[u8; 16], indices: &[u16]) -> Vec<u8> {
@@ -361,6 +442,19 @@ mod tests {
         for r in [ReceiptReply::Progress { held: 3, total: 9 }, ReceiptReply::Unknown] {
             assert_eq!(decode_receipt_reply(&encode_receipt_reply(&r)).unwrap(), r);
         }
+        let lease = Lease::sign(&key, [2; 16], 99, 1, vec![(Cid::of(b"a"), ChunkToken([3; 32]))]);
+        let replies = vec![
+            ReceiptReply::Unknown,
+            ReceiptReply::Receipt(retifs_core::lease::Receipt::sign(&[5; 64], &lease, 99)),
+            ReceiptReply::Progress { held: 1, total: 2 },
+        ];
+        assert_eq!(decode_receipt_replies(&encode_receipt_replies(&replies), 3).unwrap(), replies);
+        assert!(decode_receipt_replies(&encode_receipt_replies(&replies), 2).is_err());
+        let ids = vec![[1u8; 16], [2u8; 16]];
+        assert_eq!(decode_receipt_request(&encode_receipt_request(&ids)).unwrap(), ids);
+        let bundle = LeaseRequest::RenewMany((0..3).map(|i| Renewal::sign(&key, [2; 16], 100 + i)).collect());
+        assert_eq!(decode_lease_request(&encode_lease_request(&bundle)).unwrap(), bundle);
+        assert_eq!(decode_lease_statuses(&[0, 3, 2], 3).unwrap(), vec![LeaseStatus::Accepted, LeaseStatus::Unknown, LeaseStatus::Invalid]);
         let (id, nonce, idx) = decode_prove(&encode_prove(&[1; 16], &[2; 16], &[0, 7, 65535])).unwrap();
         assert_eq!((id, nonce, idx), ([1; 16], [2; 16], vec![0, 7, 65535]));
         let answers = vec![Some([9; PROVE_LEN]), None];

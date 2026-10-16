@@ -44,8 +44,9 @@ use retifs_net::{
     fetch::{fetch_file, FetchOpts},
     node::{self, attach, block_on, destination, destination_hex, load_or_create_identity, parse_destination},
     protocol::{
-        decode_have, decode_lease_request, decode_lease_status, decode_prove, decode_prove_reply, decode_receipt_reply,
-        decode_request, encode_bitmap, encode_lease_request, encode_prove, encode_prove_reply, encode_receipt_reply,
+        decode_have, decode_lease_request, decode_lease_status, decode_lease_statuses, decode_prove, decode_prove_reply,
+        decode_receipt_replies, decode_receipt_request, encode_receipt_replies, encode_receipt_request, MAX_BUNDLE,
+        decode_request, encode_bitmap, encode_lease_request, encode_prove, encode_prove_reply,
         encode_response, LeaseRequest, LeaseStatus, ReceiptReply, GET_ENDPOINT, HAVE_ENDPOINT, LEASE_ENDPOINT,
         PROVE_ENDPOINT, RECEIPT_ENDPOINT, decode_bitmap, decode_put, encode_have, encode_put, HAVE_PREFIX, MAX_HAVE,
         MAX_PUT, PUT_ENDPOINT,
@@ -138,7 +139,13 @@ impl RequestEndpoint<Arc<Shared>> for LeaseEndpoint {
 
     async fn handle(mut context: RequestContext<'_, Arc<Shared>>) -> Result<(), Decline> {
         let s = context.state.clone();
+        let renew = |r: &Renewal| match s.store.held_lease(&r.id) {
+            Ok(Some(_)) if s.store.renew_lease(r).unwrap_or(false) => LeaseStatus::Accepted,
+            Ok(Some(_)) => LeaseStatus::Invalid,
+            _ => LeaseStatus::Unknown,
+        };
         let status = match decode_lease_request(context.data) {
+            Ok(LeaseRequest::RenewMany(rs)) => return context.respond(rs.iter().map(|r| renew(r) as u8).collect::<Vec<u8>>()),
             Err(_) => LeaseStatus::Invalid,
             Ok(LeaseRequest::Offer { lease, .. }) if lease.expires <= now_s() => LeaseStatus::Invalid,
             Ok(LeaseRequest::Offer { lease, sources }) => match s.store.accept_lease(&lease, &sources, s.hold_limit()) {
@@ -150,33 +157,33 @@ impl RequestEndpoint<Arc<Shared>> for LeaseEndpoint {
                 Ok(Accept::NoRoom) => LeaseStatus::NoRoom,
                 Ok(Accept::Conflict) | Err(_) => LeaseStatus::Invalid,
             },
-            Ok(LeaseRequest::Renew(r)) => match s.store.held_lease(&r.id) {
-                Ok(Some(_)) if s.store.renew_lease(&r).unwrap_or(false) => LeaseStatus::Accepted,
-                Ok(Some(_)) => LeaseStatus::Invalid,
-                _ => LeaseStatus::Unknown,
-            },
+            Ok(LeaseRequest::Renew(r)) => renew(&r),
         };
         context.respond(vec![status as u8])
     }
 }
 
-/// `/retifs/receipt`: a signed receipt once every chunk of the lease is held, else progress.
+/// `/retifs/receipt`: per lease asked about (up to 64 at once), a signed
+/// receipt once every chunk is held, else progress.
 struct ReceiptEndpoint;
 impl RequestEndpoint<Arc<Shared>> for ReceiptEndpoint {
     const ENDPOINT_ID: &'static str = RECEIPT_ENDPOINT;
     const POLICY: RequestEndpointPolicy = RequestEndpointPolicy::AllowAll;
 
     async fn handle(mut context: RequestContext<'_, Arc<Shared>>) -> Result<(), Decline> {
-        let Ok(id) = <LeaseId>::try_from(context.data) else {
+        let Ok(ids) = decode_receipt_request(context.data) else {
             return Err(Decline::Ignore);
         };
         let s = context.state.clone();
-        let reply = match s.store.held_lease(&id) {
-            Ok(Some(h)) if h.held == h.lease.entries.len() => ReceiptReply::Receipt(Receipt::sign(&s.identity, &h.lease, h.expires)),
-            Ok(Some(h)) => ReceiptReply::Progress { held: h.held as u16, total: h.lease.entries.len() as u16 },
-            _ => ReceiptReply::Unknown,
-        };
-        context.respond(encode_receipt_reply(&reply))
+        let replies: Vec<ReceiptReply> = ids
+            .iter()
+            .map(|id| match s.store.held_lease(id) {
+                Ok(Some(h)) if h.held == h.lease.entries.len() => ReceiptReply::Receipt(Receipt::sign(&s.identity, &h.lease, h.expires)),
+                Ok(Some(h)) => ReceiptReply::Progress { held: h.held as u16, total: h.lease.entries.len() as u16 },
+                _ => ReceiptReply::Unknown,
+            })
+            .collect();
+        context.respond(encode_receipt_replies(&replies))
     }
 }
 
@@ -894,23 +901,28 @@ const PROOF_INTERVAL: Duration = Duration::from_secs(600);
 /// storage proofs. Woken after new leases, else every 30 s.
 async fn lease_upkeep(d: Arc<Daemon>) {
     let mut tick = tokio::time::interval(Duration::from_secs(30));
-    let mut proved: HashMap<LeaseId, Instant> = HashMap::new();
+    let mut proved: HashMap<PeerId, Instant> = HashMap::new();
     loop {
         tokio::select! {
             _ = d.upkeep_wake.notified() => {}
             _ = tick.tick() => {}
         }
         let Ok(leases) = d.store.own_leases() else { continue };
-        for mut o in leases {
-            match upkeep_one(&d, &mut o, &mut proved).await {
-                Ok(true) => {
-                    let _ = d.store.holder_result(&o.holder, o.proof != ProofState::Failed, now_ms());
+        let mut by_holder: std::collections::BTreeMap<PeerId, Vec<OwnLease>> = Default::default();
+        for o in leases {
+            by_holder.entry(o.holder).or_default().push(o);
+        }
+        // One exchange per holder however many leases it keeps (ADR-0014).
+        for (holder, mut leases) in by_holder {
+            match upkeep_holder(&d, &holder, &mut leases, &mut proved).await {
+                Ok(Some(ok)) => {
+                    let _ = d.store.holder_result(&holder, ok, now_ms());
                 }
-                Ok(false) => {}
+                Ok(None) => {}
                 Err(e) => {
-                    eprintln!("lease {} at <{}>: {e}", hex(&o.lease.id), hex(&o.holder));
-                    let _ = d.store.holder_result(&o.holder, false, now_ms());
-                    d.drop_link(&o.holder);
+                    eprintln!("upkeep <{}>: {e}", hex(&holder));
+                    let _ = d.store.holder_result(&holder, false, now_ms());
+                    d.drop_link(&holder);
                 }
             }
         }
@@ -1086,91 +1098,121 @@ async fn push(d: &Daemon, link: LinkId, l: &Lease, peer: Option<&PeerId>) -> Res
     Ok(sent)
 }
 
-/// Ok(true) if the holder was contacted (and answered).
-async fn upkeep_one(d: &Daemon, o: &mut OwnLease, proved: &mut HashMap<LeaseId, Instant>) -> Result<bool, String> {
+/// Renews, collects receipts and samples a storage proof for all leases one
+/// holder keeps, in bundles. Ok(None): nothing was due; Ok(Some(ok)): the
+/// holder was contacted, and whether it behaved.
+async fn upkeep_holder(
+    d: &Daemon,
+    holder: &PeerId,
+    leases: &mut [OwnLease],
+    proved: &mut HashMap<PeerId, Instant>,
+) -> Result<Option<bool>, String> {
     let now = now_s();
-    let id = o.lease.id;
-    let due_proof = |o: &OwnLease, proved: &HashMap<LeaseId, Instant>| {
-        o.receipt_until > 0 && proved.get(&id).is_none_or(|t| t.elapsed() > PROOF_INTERVAL)
-    };
-    let renew = o.expires < now + d.lease_term / 2;
-    if !renew && o.receipt_until >= o.expires && !due_proof(o, proved) {
-        return Ok(false);
+    let renew: Vec<usize> = (0..leases.len()).filter(|&i| leases[i].expires < now + d.lease_term / 2).collect();
+    let proof_due = leases.iter().any(|o| o.receipt_until > 0) && proved.get(holder).is_none_or(|t| t.elapsed() > PROOF_INTERVAL);
+    if renew.is_empty() && !proof_due && leases.iter().all(|o| o.receipt_until >= o.expires) {
+        return Ok(None);
     }
-    let link = d.link_to(&o.holder).await?;
-    let before = (o.expires, o.receipt_until, o.proof);
+    let link = d.link_to(holder).await?;
+    let before: Vec<_> = leases.iter().map(|o| (o.expires, o.receipt_until, o.proof)).collect();
+    let mut behaved = true;
 
-    if renew {
+    // Renewals, up to 64 per request.
+    for batch in renew.chunks(MAX_BUNDLE) {
         let expires = now + d.lease_term;
-        let r = Renewal::sign(&LeaseKey::derive(&d.namespace_key, &id), id, expires);
-        let status = decode_lease_status(&d.ask(link, LEASE_ENDPOINT, encode_lease_request(&LeaseRequest::Renew(r))).await?)
-            .map_err(|e| e.to_string())?;
-        match status {
-            LeaseStatus::Accepted => {
-                o.expires = expires;
-                println!("lease {}: renewed at <{}> until {expires}", hex(&id), hex(&o.holder));
+        let rs: Vec<Renewal> = batch
+            .iter()
+            .map(|&i| Renewal::sign(&LeaseKey::derive(&d.namespace_key, &leases[i].lease.id), leases[i].lease.id, expires))
+            .collect();
+        let reply = d.ask(link, LEASE_ENDPOINT, encode_lease_request(&LeaseRequest::RenewMany(rs))).await?;
+        let statuses = decode_lease_statuses(&reply, batch.len()).map_err(|e| e.to_string())?;
+        let mut renewed = 0;
+        for (&i, status) in batch.iter().zip(statuses) {
+            match status {
+                LeaseStatus::Accepted => {
+                    leases[i].expires = expires;
+                    renewed += 1;
+                }
+                LeaseStatus::Unknown => reoffer(d, link, &mut leases[i], expires).await?,
+                other => {
+                    eprintln!("lease {}: renewal refused by <{}>: {other:?}", hex(&leases[i].lease.id), hex(holder));
+                    behaved = false;
+                }
             }
-            LeaseStatus::Unknown => reoffer(d, link, o, expires).await?,
-            other => return Err(format!("renewal refused: {other:?}")),
+        }
+        if renewed > 0 {
+            println!("upkeep <{}>: renewed {renewed} lease(s) until {expires} in one request", hex(holder));
         }
     }
 
-    if o.receipt_until < o.expires {
-        let reply = decode_receipt_reply(&d.ask(link, RECEIPT_ENDPOINT, id.to_vec()).await?).map_err(|e| e.to_string())?;
-        match reply {
-            ReceiptReply::Receipt(r) => {
-                if r.lease_id != id || r.lease_digest != o.lease.digest() {
-                    return Err("receipt for another lease".into());
+    // Receipts for leases not yet covered, up to 64 per request.
+    let need: Vec<usize> = (0..leases.len()).filter(|&i| leases[i].receipt_until < leases[i].expires).collect();
+    for batch in need.chunks(MAX_BUNDLE) {
+        let ids: Vec<LeaseId> = batch.iter().map(|&i| leases[i].lease.id).collect();
+        let reply = d.ask(link, RECEIPT_ENDPOINT, encode_receipt_request(&ids)).await?;
+        for (&i, r) in batch.iter().zip(decode_receipt_replies(&reply, ids.len()).map_err(|e| e.to_string())?) {
+            let o = &mut leases[i];
+            let id = o.lease.id;
+            match r {
+                ReceiptReply::Receipt(r) => {
+                    if r.lease_id != id || r.lease_digest != o.lease.digest() || node_destination(&r.holder) != *holder {
+                        eprintln!("lease {}: bad receipt from <{}>", hex(&id), hex(holder));
+                        behaved = false;
+                        continue;
+                    }
+                    o.receipt_until = r.holds_until.min(o.expires);
+                    println!("lease {}: receipt from <{}>, held until {}", hex(&id), hex(holder), o.receipt_until);
                 }
-                if node_destination(&r.holder) != o.holder {
-                    return Err("receipt signed by another node".into());
+                ReceiptReply::Progress { held, total } => {
+                    let sent = push(d, link, &o.lease, Some(holder)).await?;
+                    println!("lease {}: <{}> had {held}/{total}, pushed {sent}", hex(&id), hex(holder));
+                    if sent == 0 {
+                        // It answers but takes nothing (full, or broken): its loss
+                        // estimate should rise so placement looks elsewhere.
+                        behaved = false;
+                    }
                 }
-                o.receipt_until = r.holds_until.min(o.expires);
-                println!("lease {}: receipt from <{}>, held until {}", hex(&id), hex(&o.holder), o.receipt_until);
-            }
-            ReceiptReply::Progress { held, total } => {
-                let sent = push(d, link, &o.lease, Some(&o.holder)).await?;
-                println!("lease {}: <{}> had {held}/{total}, pushed {sent}", hex(&id), hex(&o.holder));
-                if sent == 0 {
-                    // It answers but takes nothing (full, or broken): a failed contact,
-                    // so its loss estimate rises and placement looks elsewhere.
-                    return Err("holder accepted none of the pushed chunks".into());
+                ReceiptReply::Unknown => {
+                    println!("lease {}: <{}> lost the lease, offering it again", hex(&id), hex(holder));
+                    let expires = o.expires.max(now + d.lease_term / 2);
+                    reoffer(d, link, o, expires).await?;
                 }
-            }
-            ReceiptReply::Unknown => {
-                println!("lease {}: <{}> lost the lease, offering it again", hex(&id), hex(&o.holder));
-                let expires = o.expires.max(now + d.lease_term / 2);
-                reoffer(d, link, o, expires).await?;
             }
         }
     }
 
-    if due_proof(o, proved) {
-        let n = o.lease.entries.len();
-        let mut rnd = [0u8; 16 + 8];
+    // One storage proof per holder per interval, on a random lease with a receipt.
+    let receipted: Vec<usize> = (0..leases.len()).filter(|&i| leases[i].receipt_until > 0).collect();
+    if proof_due && !receipted.is_empty() {
+        let mut rnd = [0u8; 16 + 8 + 2];
         getrandom::fill(&mut rnd).expect("OS entropy");
+        let o = &mut leases[receipted[u16::from_be_bytes([rnd[24], rnd[25]]) as usize % receipted.len()]];
+        let n = o.lease.entries.len();
         let nonce: [u8; 16] = rnd[..16].try_into().unwrap();
-        let indices: Vec<u16> = rnd[16..].chunks(2).map(|b| (u16::from_be_bytes([b[0], b[1]]) as usize % n) as u16).collect();
+        let indices: Vec<u16> = rnd[16..24].chunks(2).map(|b| (u16::from_be_bytes([b[0], b[1]]) as usize % n) as u16).collect();
         let mut expected = Vec::new();
         for &i in &indices {
             let ct = d.store.fetch(&o.lease.entries[i as usize].0).map_err(|e| e.to_string())?;
             expected.push(ct.map(|ct| lease::prove(&nonce, &ct)));
         }
-        let reply = d.ask(link, PROVE_ENDPOINT, encode_prove(&id, &nonce, &indices)).await?;
+        let reply = d.ask(link, PROVE_ENDPOINT, encode_prove(&o.lease.id, &nonce, &indices)).await?;
         let answers = decode_prove_reply(&reply, indices.len()).map_err(|e| e.to_string())?;
         // Only chunks this node still has can be checked.
         let checked: Vec<bool> = expected.iter().zip(&answers).filter_map(|(e, a)| e.map(|e| Some(e) == *a)).collect();
         if !checked.is_empty() {
             o.proof = if checked.iter().all(|&ok| ok) { ProofState::Passed } else { ProofState::Failed };
-            println!("lease {}: storage proof from <{}>: {:?} ({} chunk(s))", hex(&id), hex(&o.holder), o.proof, checked.len());
+            behaved &= o.proof == ProofState::Passed;
+            println!("lease {}: storage proof from <{}>: {:?} ({} chunk(s))", hex(&o.lease.id), hex(holder), o.proof, checked.len());
         }
-        proved.insert(id, Instant::now());
+        proved.insert(*holder, Instant::now());
     }
 
-    if (o.expires, o.receipt_until, o.proof) != before {
-        d.store.update_own_lease(o).map_err(|e| e.to_string())?;
+    for (o, b) in leases.iter().zip(before) {
+        if (o.expires, o.receipt_until, o.proof) != b {
+            d.store.update_own_lease(o).map_err(|e| e.to_string())?;
+        }
     }
-    Ok(true)
+    Ok(Some(behaved))
 }
 
 /// The holder lost a lease (restart without it, expiry): offer it again under
