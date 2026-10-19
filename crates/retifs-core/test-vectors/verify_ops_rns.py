@@ -48,6 +48,9 @@ def op(o):
         return ["grant", h(o[1]), sorted(set(o[2]))]
     if tag == "revoke":
         return ["revoke", h(o[1])]
+    if tag == "checkpoint":
+        c, s, n = o[1]
+        return ["checkpoint", [h(c), h(s), n]]
     if tag == "identity":
         return ["identity", h(o[1])]
     if tag == "rekey":
@@ -70,6 +73,8 @@ def merge(creator, chains, now):
     records, ignored, identities, rekeys = {}, 0, {}, []
     for t, w, _, _, o in events:
         tag = o[0]
+        if tag == "checkpoint":
+            continue  # names a checkpoint file; changes nothing
         if tag == "identity":
             if o[1][32:] == w:
                 identities[w] = o[1]

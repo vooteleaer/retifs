@@ -86,6 +86,7 @@ fn op(o: &Op) -> J {
         ]),
         Op::Revoke(w) => json!(["revoke", hex::encode(w)]),
         Op::Identity(p) => json!(["identity", hex::encode(p)]),
+        Op::Checkpoint(f) => json!(["checkpoint", [f.root.to_string(), hex::encode(f.seed.0), f.size]]),
         Op::Rekey(e, entries) => json!(["rekey", e, entries.iter().map(|(w, x)| json!([hex::encode(w), hex::encode(x)])).collect::<Vec<_>>()]),
     }
 }
@@ -107,7 +108,14 @@ fn checkpoint_vector() -> J {
                 ops: vec![Op::Grant(bob, vec![Right::Write]), Op::Set(page, "title".into(), s("Home")), Op::Set(gone, "x".into(), Value::Int(1))],
             },
             WriterCommit { seq: 2, time_ms: 3000, ops: vec![Op::Revoke(bob), Op::Unset(page, "draft".into()), Op::Delete(gone)] },
-            WriterCommit { seq: 3, time_ms: 3000, ops: vec![Op::Set(page, "title".into(), s("Front page"))] },
+            WriterCommit {
+                seq: 3,
+                time_ms: 3000,
+                ops: vec![
+                    Op::Set(page, "title".into(), s("Front page")),
+                    Op::Checkpoint(FileRef { root: Cid::of(b"an earlier checkpoint"), seed: Seed([0x44; 32]), size: 300 }),
+                ],
+            },
         ],
     );
     chains.insert(

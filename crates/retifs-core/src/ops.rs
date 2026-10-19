@@ -7,6 +7,7 @@
 //!          | [ "delete", id ] | [ "grant", writer (bin 32), [ right, … ] ] | [ "revoke", writer ]
 //!          | [ "identity", public (bin 64) ]                     the signer's RNS identity (X25519 ‖ Ed25519)
 //!          | [ "rekey", epoch, [ [ writer (bin 32), wrapped (bin) ], … sorted by writer ] ]
+//!          | [ "checkpoint", [ cid, seed, size ] ]               a checkpoint file (ADR-0018); changes nothing
 //! right    = "grant" | "write"                                   sorted, unique
 //! ```
 //! Every reader replays all writers' operations in stamp order —
@@ -61,6 +62,9 @@ pub enum Op {
     /// A new read key for epoch `epoch`, wrapped to each remaining writer
     /// (keywrap: RNS `Identity.encrypt`). Counts only from a writer holding `grant`.
     Rekey(u64, Vec<(WriterKey, Vec<u8>)>),
+    /// The writer's checkpoint of the namespace (ADR-0018): a file a new
+    /// member may start from instead of the history. It changes no state.
+    Checkpoint(FileRef),
 }
 
 /// One commit's operations.
@@ -170,6 +174,11 @@ pub(crate) fn write_op(out: &mut Vec<u8>, op: &Op) {
                 write_bin(out, &wrapped);
             }
         }
+        Op::Checkpoint(f) => {
+            write_array_len(out, 2);
+            write_str(out, "checkpoint");
+            write_block(out, f);
+        }
     }
 }
 
@@ -233,6 +242,7 @@ pub(crate) fn read_op(r: &mut Reader) -> Result<Op, RecordError> {
             }
             Op::Rekey(epoch, entries)
         }
+        ("checkpoint", 2) => Op::Checkpoint(read_block(r)?),
         _ => return Err(RecordError::Malformed("unknown operation")),
     };
     Ok(op)
@@ -325,6 +335,7 @@ pub fn merge(creator: &WriterKey, chains: &BTreeMap<WriterKey, Vec<WriterCommit>
                 }
             }
             Op::Grant(..) | Op::Revoke(_) => m.ignored_ops += 1,
+            Op::Checkpoint(_) => {}
             _ if !has(&rights, &writer, Right::Write) => m.ignored_ops += 1,
             Op::Set(id, k, v) => {
                 let rec = records.entry(*id).or_insert_with(|| Record { id: *id, attrs: BTreeMap::new(), blocks: Vec::new() });
@@ -491,7 +502,7 @@ impl State {
 
     /// Applies one data operation; any order gives the same state.
     pub fn apply(&mut self, s: Stamp, op: &Op) {
-        if is_control(op) {
+        if is_control(op) || matches!(op, Op::Checkpoint(_)) {
             return;
         }
         if self.high.is_none_or(|h| s > h) {
@@ -538,8 +549,8 @@ impl State {
     }
 
     /// Applies new commits: their control operations first, then their data,
-    /// so arrival order doesn't matter. Returns false (the state is then
-    /// incomplete) if a control operation is older than data already seen.
+    /// so arrival order doesn't matter. Returns false, applying nothing, if a
+    /// control operation is older than data already seen.
     pub fn apply_commits(&mut self, commits: &[(WriterKey, &WriterCommit)]) -> bool {
         let mut control: Vec<(Stamp, &Op)> = Vec::new();
         for (w, c) in commits {
@@ -548,10 +559,11 @@ impl State {
             }
         }
         control.sort_by_key(|(s, _)| *s);
+        if control.first().is_some_and(|(s, _)| self.high.is_some_and(|h| h > *s)) {
+            return false; // nothing applied
+        }
         for (s, op) in control {
-            if !self.add_control(s, op.clone()) {
-                return false;
-            }
+            self.add_control(s, op.clone());
         }
         for (w, c) in commits {
             for (i, op) in c.ops.iter().enumerate() {

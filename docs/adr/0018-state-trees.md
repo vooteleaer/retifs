@@ -69,9 +69,15 @@ checkpoint = { "control":  [ [ stamp, op ], … ],              every control op
   - Control operations are few, so the checkpoint carries all of them, and the rights timeline is re-evaluated whole.
 - **Misdated commits** (dated before their predecessor, or more than a day ahead when the checkpoint was made) are settled as ignored once a frontier passes them.
 - **Local checkpoints:** a node writes one after every 64 new commits it applies, plus on the first rebuild of an existing namespace. The previous checkpoint's chunks that the new one doesn't share become evictable.
-- **Not decided yet:** how a checkpoint goes into a chain for new members, and whose checkpoints a member may trust without replaying.
-  - Likely as an operation naming the checkpoint file, written by a member holding `grant`. Such a member can already revoke and rekey anyone, so trusting it adds no power.
-  - Placing tree nodes on other nodes needs placement to know trees, not only manifests.
+
+### Checkpoints for new members
+- **In the chain:** a writer holding `grant` names its latest checkpoint with the operation `[ "checkpoint", [cid, seed, size] ]` (ADR-0017 operations file). The operation changes no state; the merge skips it. The checkpoint file is then needed and placed like the history, and its state tree goes with it: a checkpoint file's chunks are its manifest's plus every tree node.
+- **Whose checkpoints count:** a member starts only from a checkpoint by a writer holding `grant` in the view it already trusts. For a node joining with nothing, that view is the address alone, so it is the creator.
+  - A grant holder can already revoke and rekey anyone, so trusting its checkpoint adds no power.
+  - Anyone holding the chains can check a checkpoint by replaying them. The skipped history stays placed, so it can always be fetched.
+- **Joining:** a node with no state walks the creator's chain back from its head to the newest checkpoint operation. It fetches that checkpoint and its tree, checks that it loads, and keeps it as its own. Every writer's chain is then fetched back only to the checkpoint's frontier.
+- **History on demand:** if a control operation arrives that is older than data already applied, the node needs the history before its checkpoint. Until sync has fetched every chain whole, it stays at its previous state; it then rebuilds.
+- **Not covered:** a writer's grant revoked in history this node skipped. Such a writer could hand a joiner a false checkpoint, and the joiner would only detect it by replaying. That is why joiners start only from the creator's checkpoint for now.
 
 ## Impact on the threat model
 See the [threat model](../04-threat-model.md).
@@ -100,4 +106,12 @@ See the [threat model](../04-threat-model.md).
   - three stamped records re-encode byte for byte with RNS umsgpack;
   - three trees are rebuilt independently in Python, sealed with RNS primitives, and match root CID, root seed and every node CID. The trees are 2 003 small entries over three levels, the same with one entry changed (3 new nodes, the rest shared), and 60 entries of 4 000 bytes, where the size cut closes the leaves;
   - a checkpoint of a three-writer history (grant, revoke, a write after the revoke, an ungranted writer, unset, delete, content). Python replays the chains into stamped records on its own, builds the state tree under the HKDF state secret, and matches the root and the checkpoint's bytes.
-- **Not yet:** checkpoints in chains for new members, placing trees on other nodes, pruning tombstones.
+- **Checkpoints for new members (2026-10-19):**
+  - `[ "checkpoint", ref ]` added to the operations format; the ops and checkpoint vectors include it (12/12, 18/18).
+  - `retifs ns checkpoint NS` writes a checkpoint now and names it in the chain. Grant holders also name their latest local checkpoint on every sync round, and `ns info` shows the checkpoint kept.
+  - Joining and the history fallback work as described above.
+  - Live, two daemons:
+    1. A wrote 100 records, edited one, deleted one, named a checkpoint, then wrote 5 more records and deleted another.
+    2. B joined and was granted. It started from A's checkpoint and fetched 7 commits instead of 109. Its 103 records were identical to A's, edits and deletions included, and B's own write reached A.
+    3. Then A granted a third key, and B wrote before syncing, so the grant reached B stamped before B's data. B logged that it needed the history, fetched the 102 earlier commits, rebuilt, and again matched A: 105 records, with the new writer known.
+- **Not yet:** starting from a grant holder's checkpoint other than the creator's, verifying a checkpoint by replaying in the background, pruning tombstones, fetching only part of a namespace.

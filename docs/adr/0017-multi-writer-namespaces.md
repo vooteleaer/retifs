@@ -27,6 +27,7 @@ op       = [ "set", id (bin 16), key (str), value ]
          | [ "delete", id ]
          | [ "grant", writer (bin 32, Ed25519), [ right, … ] ]                  rights: "write", "grant"
          | [ "revoke", writer ]
+         | [ "checkpoint", [cid, seed, size] ]                                   names a checkpoint file (ADR-0018); changes nothing
 ```
 One commit is one modification (or one transaction): its operations take effect together.
 

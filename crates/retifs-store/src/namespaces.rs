@@ -25,6 +25,8 @@ const NS_KEYS: TableDefinition<&str, &[u8]> = TableDefinition::new("ns_keys");
 const KEY_HEADS: TableDefinition<&[u8], &[u8]> = TableDefinition::new("key_heads");
 /// Namespace name → its latest local checkpoint file (root ‖ seed ‖ u64 size).
 const NS_CHECKPOINT: TableDefinition<&str, &[u8]> = TableDefinition::new("ns_checkpoint");
+/// Namespace name → root CID of the checkpoint this node last committed to its chain.
+const NS_CHECKPOINT_PUBLISHED: TableDefinition<&str, &[u8]> = TableDefinition::new("ns_checkpoint_published");
 
 pub(crate) fn open_tables(w: &redb::WriteTransaction) -> Result<(), StoreError> {
     w.open_table(NS_INFO)?;
@@ -35,6 +37,7 @@ pub(crate) fn open_tables(w: &redb::WriteTransaction) -> Result<(), StoreError> 
     w.open_table(NS_KEYS)?;
     w.open_table(KEY_HEADS)?;
     w.open_table(NS_CHECKPOINT)?;
+    w.open_table(NS_CHECKPOINT_PUBLISHED)?;
     Ok(())
 }
 
@@ -92,6 +95,18 @@ impl SlabStore {
         let v = [file.root.as_bytes().as_slice(), &file.seed.0, &file.size.to_be_bytes()].concat();
         let w = self.db.begin_write()?;
         w.open_table(NS_CHECKPOINT)?.insert(name, v.as_slice())?;
+        w.commit()?;
+        Ok(())
+    }
+
+    pub fn ns_checkpoint_published(&self, name: &str) -> Result<Option<Cid>, StoreError> {
+        let r = self.db.begin_read()?;
+        Ok(r.open_table(NS_CHECKPOINT_PUBLISHED)?.get(name)?.and_then(|v| Cid::from_bytes(v.value().try_into().ok()?)))
+    }
+
+    pub fn set_ns_checkpoint_published(&self, name: &str, root: &Cid) -> Result<(), StoreError> {
+        let w = self.db.begin_write()?;
+        w.open_table(NS_CHECKPOINT_PUBLISHED)?.insert(name, root.as_bytes().as_slice())?;
         w.commit()?;
         Ok(())
     }

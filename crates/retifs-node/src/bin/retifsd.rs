@@ -1040,6 +1040,14 @@ async fn handle(d: &Daemon, req: Request) -> Result<Response, String> {
 
         Request::NsInfo { ns } => Ok(Response::Namespace(ns_view(d, &ns)?)),
 
+        Request::NsCheckpoint { ns } => {
+            writable(&ns)?;
+            d.ns_cache.lock().unwrap().entry(ns.clone()).or_default().since_checkpoint = CHECKPOINT_EVERY;
+            materialize(d, &ns)?;
+            publish_checkpoint(d, &ns).await?;
+            Ok(Response::Namespace(ns_view(d, &ns)?))
+        }
+
         Request::Query { ns, terms, at } => {
             let terms: Vec<retifs_store::Term> = terms.iter().map(|t| retifs_store::Term::parse(t)).collect::<Result<_, _>>()?;
             let found = match at {
@@ -1205,6 +1213,7 @@ fn ns_view(d: &Daemon, ns: &str) -> Result<NsView, String> {
             .collect(),
         records: merged.records.len(),
         peers: d.store.ns_peers(ns).map_err(|e| e.to_string())?.len(),
+        checkpoint: d.store.ns_checkpoint(ns).map_err(|e| e.to_string())?.map(|f| f.to_string()),
     })
 }
 
@@ -1220,6 +1229,9 @@ async fn ns_sync(d: Arc<Daemon>) {
             _ = tick.tick() => {}
         }
         for ns in d.store.ns_names().unwrap_or_default() {
+            if let Err(e) = publish_checkpoint(&d, &ns).await {
+                eprintln!("ns {ns}: checkpoint: {e}");
+            }
             if let Err(e) = sync_ns(&d, &ns).await {
                 eprintln!("ns {ns}: {e}");
             }
@@ -1235,6 +1247,20 @@ async fn sync_ns(d: &Daemon, ns: &str) -> Result<(), String> {
     let (addr, own, _) = chains(d, ns, false)?;
     let ns_id = addr.ns_id();
     let mut changed = false;
+    // A member with nothing yet starts from the creator's latest checkpoint
+    // (ADR-0018); chains are then fetched back only to its frontier, and
+    // the history before it only if a rebuild needs it.
+    let fresh = d.store.ns_checkpoint(ns).map_err(|e| e.to_string())?.is_none()
+        && d.store.writer_heads(&ns_id).map_err(|e| e.to_string())?.is_empty();
+    let whole = d.ns_cache.lock().unwrap().get(ns).is_some_and(|e| e.needs_history);
+    let floors: HashMap<[u8; 32], Cid> = match d.store.ns_checkpoint(ns).map_err(|e| e.to_string())? {
+        Some(f) if !whole => manifest::read_all(&*d.store, &f)
+            .ok()
+            .and_then(|b| Checkpoint::decode(&b).ok())
+            .map(|cp| cp.frontier.iter().map(|f| (f.writer, f.commit)).collect())
+            .unwrap_or_default(),
+        _ => HashMap::new(),
+    };
     for peer in peers {
         let link = match d.link_to(&peer).await {
             Ok(l) => l,
@@ -1269,7 +1295,7 @@ async fn sync_ns(d: &Daemon, ns: &str) -> Result<(), String> {
             }
             let known = d.store.writer_head(&ns_id, &w).map_err(|e| e.to_string())?;
             let known_seq = known.as_ref().and_then(|k| Head::decode(&k.head).ok()).map(|k| k.seq);
-            if known_seq.is_some_and(|k| k >= head.seq) {
+            if known_seq.is_some_and(|k| k >= head.seq) && !whole {
                 continue; // nothing newer (and never go back)
             }
             let keys = d.store.ns_keys(ns).map_err(|e| e.to_string())?;
@@ -1293,13 +1319,33 @@ async fn sync_ns(d: &Daemon, ns: &str) -> Result<(), String> {
                 continue;
             };
             d.store.set_key_head(&ns_id, &w, &key_id(&used_key), &raw).map_err(|e| e.to_string())?;
-            let got = fetch_chain(d, link, &addr, (head.commit, seed), &w).await?;
+            let walk = if whole {
+                Walk::Whole
+            } else if fresh && w == addr.writer {
+                Walk::ToCheckpoint
+            } else {
+                Walk::ToHeld
+            };
+            let got = fetch_chain(d, link, &addr, (head.commit, seed), &w, floors.get(&w).copied(), walk).await?;
+            if let Some(cp) = got.checkpoint {
+                install_checkpoint(d, ns, link, &cp).await?;
+                println!("ns {ns}: starting from the creator's checkpoint {cp}");
+                d.ns_wake.notify_one(); // the checkpoint names the other writers: fetch them next
+            }
             d.store
                 .set_writer_head(&ns_id, &retifs_store::WriterHead { writer: w, head: raw, commit: (head.commit, seed) })
                 .map_err(|e| e.to_string())?;
-            println!("ns {ns}: writer {}… at version {} from <{}> ({got} commit(s) fetched)", &hex(&w)[..12], head.seq, hex(&peer));
+            println!("ns {ns}: writer {}… at version {} from <{}> ({} commit(s) fetched)", &hex(&w)[..12], head.seq, hex(&peer), got.commits);
             changed = true;
         }
+    }
+    if whole {
+        // The history is here now (as far as peers had it): rebuild from it.
+        if let Some(e) = d.ns_cache.lock().unwrap().get_mut(ns) {
+            e.needs_history = false;
+            e.state = None;
+        }
+        changed = true;
     }
     if changed {
         let keys_before = d.store.ns_keys(ns).map_err(|e| e.to_string())?.len();
@@ -1320,17 +1366,50 @@ async fn sync_ns(d: &Daemon, ns: &str) -> Result<(), String> {
     Ok(())
 }
 
-/// Fetches a writer's commits (and their operations files) back from `last`
-/// until one is already here. Kept pinned and served to other members.
-async fn fetch_chain(d: &Daemon, link: LinkId, addr: &ChannelAddr, last: (Cid, retifs_core::Seed), writer: &[u8; 32]) -> Result<usize, String> {
+/// How far back a chain walk goes.
+#[derive(Clone, Copy, PartialEq)]
+enum Walk {
+    /// Until a commit already held (everything before it is held too).
+    ToHeld,
+    /// Like `ToHeld`, but on the first checkpoint operation found, fetch the
+    /// checkpoint and go back only to its frontier for this writer.
+    ToCheckpoint,
+    /// Through held commits too, to the start (history skipped by a checkpoint).
+    Whole,
+}
+
+struct ChainFetch {
+    commits: usize,
+    checkpoint: Option<FileRef>,
+}
+
+/// Fetches a writer's commits (and their operations files) back from `last`,
+/// as far as `walk` says and never past `floor` (a checkpoint's frontier).
+/// Kept pinned and served to other members.
+async fn fetch_chain(
+    d: &Daemon,
+    link: LinkId,
+    addr: &ChannelAddr,
+    last: (Cid, retifs_core::Seed),
+    writer: &[u8; 32],
+    mut floor: Option<Cid>,
+    walk: Walk,
+) -> Result<ChainFetch, String> {
     let mut next = Some(last);
-    let mut fetched = 0;
+    let mut out = ChainFetch { commits: 0, checkpoint: None };
     while let Some((cid, seed)) = next {
+        if walk != Walk::Whole && Some(cid) == floor {
+            break;
+        }
         let ct = match d.store.fetch(&cid).map_err(|e| e.to_string())? {
             Some(ct) => {
-                // Already here: so is everything before it.
+                // Already here: so is everything before it (unless a checkpoint skipped it).
                 let c = Commit::decode(&open(&cid, &seed, &ct).map_err(|e| e.to_string())?, addr).map_err(|e| e.to_string())?;
                 if manifest::read_all(&*d.store, &c.root).is_ok() {
+                    if walk == Walk::Whole {
+                        next = c.prev;
+                        continue;
+                    }
                     break;
                 }
                 ct
@@ -1359,10 +1438,87 @@ async fn fetch_chain(d: &Daemon, link: LinkId, addr: &ChannelAddr, last: (Cid, r
             }
         }
         d.store.register_serving(&keep).map_err(|e| e.to_string())?;
-        fetched += 1;
+        out.commits += 1;
+        if walk == Walk::ToCheckpoint && out.checkpoint.is_none() {
+            let ops = manifest::read_all(&*d.store, &commit.root).ok().and_then(|b| OpsFile::decode(&b).ok());
+            if let Some(f) = ops.and_then(|o| o.ops.iter().rev().find_map(|op| if let Op::Checkpoint(f) = op { Some(*f) } else { None })) {
+                if manifest::read_all(&*d.store, &f).is_err() {
+                    fetch_file(&d.transport, &[link], &f, FetchOpts::default(), &mut CacheTier(&d.store))
+                        .await
+                        .map_err(|e| e.to_string())?;
+                }
+                let cp = manifest::read_all(&*d.store, &f)
+                    .map_err(|e| e.to_string())
+                    .and_then(|b| Checkpoint::decode(&b).map_err(|e| format!("bad checkpoint: {e}")))?;
+                floor = cp.frontier.iter().find(|x| x.writer == *writer).map(|x| x.commit);
+                out.checkpoint = Some(f);
+            }
+        }
         next = commit.prev;
     }
-    Ok(fetched)
+    Ok(out)
+}
+
+/// Takes a fetched checkpoint as this node's starting point: fetches its
+/// state tree, checks that it loads, keeps it and resumes from it.
+async fn install_checkpoint(d: &Daemon, ns: &str, link: LinkId, file: &FileRef) -> Result<(), String> {
+    let (creator, _) = d.store.ns_info(ns).map_err(|e| e.to_string())?.ok_or_else(|| format!("no namespace {ns}"))?;
+    let cp = manifest::read_all(&*d.store, file)
+        .map_err(|e| e.to_string())
+        .and_then(|b| Checkpoint::decode(&b).map_err(|e| e.to_string()))?;
+    if let Some(root) = cp.state {
+        loop {
+            let missing = prolly::missing(&*d.store, &root).map_err(|e| e.to_string())?;
+            if missing.is_empty() {
+                break;
+            }
+            let round = seek_round(&d.transport, link, &missing, false, Duration::from_secs(60)).await?;
+            if round.got.is_empty() {
+                return Err("peer lacks part of the checkpoint's state".into());
+            }
+            for (i, ct, _) in round.got {
+                d.store.insert(&missing[i].0, &ct, tier::PINNED).map_err(|e| e.to_string())?;
+            }
+        }
+    }
+    cp.load(&*d.store, &creator).map_err(|e| format!("checkpoint doesn't load: {e}"))?;
+    let chunks = file_chunks(&d.store, file)?;
+    for (c, _) in &chunks {
+        if let Some(t) = d.store.tier(c).map_err(|e| e.to_string())? {
+            d.store.set_tier(c, t | tier::PINNED).map_err(|e| e.to_string())?;
+        }
+    }
+    d.store.register_serving(&chunks).map_err(|e| e.to_string())?;
+    d.store.set_ns_checkpoint(ns, file).map_err(|e| e.to_string())?;
+    d.ns_cache.lock().unwrap().remove(ns);
+    Ok(())
+}
+
+/// Names this node's latest checkpoint in its chain, if it holds `grant`
+/// and hasn't named this one yet (ADR-0018). The checkpoint file (with its
+/// state tree) is then needed and placed like the history.
+async fn publish_checkpoint(d: &Daemon, ns: &str) -> Result<(), String> {
+    if ns.starts_with("ch-") {
+        return Ok(());
+    }
+    let Some(file) = d.store.ns_checkpoint(ns).map_err(|e| e.to_string())? else { return Ok(()) };
+    let published = d.store.ns_checkpoint_published(ns).map_err(|e| e.to_string())?;
+    if published == Some(file.root) || d.store.own_channel(&ns_channel(ns)).map_err(|e| e.to_string())?.is_none() {
+        return Ok(());
+    }
+    let merged = materialize(d, ns)?;
+    let (_, own, _) = chains(d, ns, false)?;
+    if !merged.writers.get(&own).is_some_and(|r| r.contains(&Right::Grant)) {
+        return Ok(());
+    }
+    if let Some(old) = published.and_then(|root| d.store.needed_files().ok()?.into_iter().find(|f| f.root == root)) {
+        d.store.unneed_file(&old.root).map_err(|e| e.to_string())?;
+    }
+    d.store.need_file(&file).map_err(|e| e.to_string())?;
+    d.store.set_ns_checkpoint_published(ns, &file.root).map_err(|e| e.to_string())?;
+    write_ops(d, ns, vec![Op::Checkpoint(file)]).await?;
+    println!("ns {ns}: checkpoint {file} named in this node's chain");
+    Ok(())
 }
 
 /// Followed channels' namespaces belong to their writer.
@@ -1461,6 +1617,9 @@ struct NsCache {
     floors: HashMap<[u8; 32], Cid>,
     /// Commits applied since the last checkpoint.
     since_checkpoint: usize,
+    /// A rebuild needs history a checkpoint let this node skip: the state
+    /// stays as it was until sync has fetched it.
+    needs_history: bool,
 }
 
 /// A checkpoint is written after this many new commits (ADR-0018).
@@ -1625,7 +1784,9 @@ fn save_checkpoint(d: &Daemon, ns: &str, state: &State, frontier: Vec<Frontier>)
             gone.extend(prolly::nodes(&*d.store, &old_root).unwrap_or_default().into_iter().map(|(c, _)| c));
         }
         gone.retain(|c| !keep.contains(c));
-        d.store.release_chunks(&gone).map_err(|e| e.to_string())?;
+        if d.store.ns_checkpoint_published(ns).map_err(|e| e.to_string())? != Some(old.root) {
+            d.store.release_chunks(&gone).map_err(|e| e.to_string())?;
+        }
     }
     d.store.set_ns_checkpoint(ns, &file).map_err(|e| e.to_string())?;
     Ok(file)
@@ -1640,6 +1801,11 @@ fn materialize(d: &Daemon, ns: &str) -> Result<retifs_core::ops::Merged, String>
     let merged = loop {
         let mut cache = d.ns_cache.lock().unwrap();
         let entry = cache.entry(ns.to_string()).or_default();
+        if entry.needs_history
+            && let Some(st) = &entry.state
+        {
+            break st.merged(); // as it was, until sync brings the history
+        }
         // Apply only the new commits, unless one is misdated or brings a
         // control operation older than data already applied: then rebuild
         // from every chain (whole, if resumed from a checkpoint).
@@ -1665,6 +1831,19 @@ fn materialize(d: &Daemon, ns: &str) -> Result<retifs_core::ops::Merged, String>
             entry.state = None;
             drop(cache);
             chains = self::chains(d, ns, true)?.2;
+            continue;
+        }
+        let from_start = chains.values().all(|c| c.first().is_none_or(|(seq, _)| *seq == 1));
+        // (Once only: if the checkpoint doesn't load either, build from what's here.)
+        if rebuild && !from_start && !entry.needs_history && d.store.ns_checkpoint(ns).map_err(|e| e.to_string())?.is_some() {
+            // This node started from a checkpoint and doesn't hold the history
+            // before it: go back to the checkpoint until sync fetches it.
+            entry.state = None;
+            entry.needs_history = true;
+            drop(cache);
+            println!("ns {ns}: a late grant or revoke needs the history before the checkpoint; fetching it");
+            resume(d, ns)?;
+            d.ns_wake.notify_one();
             continue;
         }
         let cids: HashMap<[u8; 32], Cid> =
@@ -1999,6 +2178,13 @@ fn file_chunks(store: &SlabStore, file: &FileRef) -> Result<Vec<(Cid, ChunkToken
             }
         }
         level = next;
+    }
+    // A checkpoint file comes with its state tree (ADR-0018).
+    if file.size <= 1 << 20
+        && let Some(root) = manifest::read_all(store, file).ok().and_then(|b| Checkpoint::decode(&b).ok()).and_then(|c| c.state)
+    {
+        let nodes = prolly::nodes(store, &root).map_err(|_| "not all of the checkpoint's state is local".to_string())?;
+        out.extend(nodes.iter().map(|(c, s)| (*c, ChunkToken::for_seed(s))));
     }
     Ok(out)
 }

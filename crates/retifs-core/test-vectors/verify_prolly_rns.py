@@ -120,6 +120,8 @@ def stamped_state(creator, chains):
     for s, o in events:
         stamp = [s[0], s[1], s[2], s[3]]
         tag, w = o[0], s[1]
+        if tag == "checkpoint":
+            continue
         if tag in CONTROL:
             control.append([stamp, o])
             if tag in ("grant", "revoke") and "grant" in rights.get(w, ()) and o[1] != creator:

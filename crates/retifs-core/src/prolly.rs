@@ -269,6 +269,21 @@ pub fn nodes<S: Store>(store: &S, root: &Root) -> Result<Vec<Root>, TreeError<S:
     Ok(out)
 }
 
+/// Nodes not in `store` whose parent is (or the root): what to fetch next to
+/// hold the whole tree.
+pub fn missing<S: Store>(store: &S, root: &Root) -> Result<Vec<Root>, TreeError<S::Error>> {
+    let mut out = Vec::new();
+    let mut stack = vec![*root];
+    while let Some(n) = stack.pop() {
+        if store.get(&n.0).map_err(TreeError::Store)?.is_none() {
+            out.push(n);
+        } else if let Node::Internal(children) = read_node(store, &n)? {
+            stack.extend(children.into_iter().map(|(_, c)| c));
+        }
+    }
+    Ok(out)
+}
+
 /// The leaf nodes under `root`, in key order (reads only internal nodes).
 fn leaves<S: Store>(store: &S, root: &Root) -> Result<Vec<Root>, TreeError<S::Error>> {
     match read_node(store, root)? {

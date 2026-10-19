@@ -41,6 +41,7 @@ fn op(o: &Op) -> J {
         ]),
         Op::Revoke(w) => json!(["revoke", hex::encode(w)]),
         Op::Identity(p) => json!(["identity", hex::encode(p)]),
+        Op::Checkpoint(f) => json!(["checkpoint", [f.root.to_string(), hex::encode(f.seed.0), f.size]]),
         Op::Rekey(e, entries) => json!([
             "rekey",
             e,
@@ -77,7 +78,12 @@ fn main() {
             WriterCommit {
                 seq: 2,
                 time_ms: 3000,
-                ops: vec![Op::Set(page, "title".into(), s("Front page")), Op::Revoke(bob), Op::Rekey(1, vec![(alice, wrapped_for_alice.clone())])],
+                ops: vec![
+                    Op::Set(page, "title".into(), s("Front page")),
+                    Op::Revoke(bob),
+                    Op::Rekey(1, vec![(alice, wrapped_for_alice.clone())]),
+                    Op::Checkpoint(FileRef { root: Cid::of(b"checkpoint"), seed: Seed([0x43; 32]), size: 373 }),
+                ],
             },
         ],
     );

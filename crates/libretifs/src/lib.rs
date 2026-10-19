@@ -129,6 +129,9 @@ pub enum Request {
     NsGrant { ns: String, writer: String, grant: bool, from: Vec<String> },
     NsRevoke { ns: String, writer: String },
     NsInfo { ns: String },
+    /// Writes a checkpoint of the namespace now and, if this node holds
+    /// `grant`, names it in its chain for new members (ADR-0018).
+    NsCheckpoint { ns: String },
 }
 
 /// An attribute value (ADR-0016).
@@ -177,6 +180,9 @@ pub struct NsView {
     pub writers: Vec<(String, Vec<String>)>,
     pub records: usize,
     pub peers: usize,
+    /// The latest checkpoint kept here (a read capability), if any.
+    #[serde(default)]
+    pub checkpoint: Option<String>,
 }
 
 /// One version of a namespace as seen by one record.
