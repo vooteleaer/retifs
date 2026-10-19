@@ -6,6 +6,9 @@
 //! MEMBER_CHANNELS  channel name → ns_id (16)        own channels writing to another's namespace
 //! WRITER_HEADS     ns_id (16) ‖ writer (32) → latest head (258) ‖ commit cid (33) ‖ commit seed (32)
 //! NS_PEERS         name → peer (16) × n                 other members' nodes to sync with
+//! NS_IDENTITY      name → X25519 secret (32) ‖ Ed25519 seed (32)   this node's writer identity
+//! NS_KEYS          name → key (32) × n                  read keys after the first, by epoch
+//! KEY_HEADS        ns_id (16) ‖ writer (32) ‖ key id (16) → that writer's latest head under that key
 //! ```
 
 use redb::TableDefinition;
@@ -17,12 +20,18 @@ const NS_INFO: TableDefinition<&str, &[u8]> = TableDefinition::new("ns_info");
 const MEMBER_CHANNELS: TableDefinition<&str, &[u8]> = TableDefinition::new("member_channels");
 const WRITER_HEADS: TableDefinition<&[u8], &[u8]> = TableDefinition::new("writer_heads");
 const NS_PEERS: TableDefinition<&str, &[u8]> = TableDefinition::new("ns_peers");
+const NS_IDENTITY: TableDefinition<&str, &[u8]> = TableDefinition::new("ns_identity");
+const NS_KEYS: TableDefinition<&str, &[u8]> = TableDefinition::new("ns_keys");
+const KEY_HEADS: TableDefinition<&[u8], &[u8]> = TableDefinition::new("key_heads");
 
 pub(crate) fn open_tables(w: &redb::WriteTransaction) -> Result<(), StoreError> {
     w.open_table(NS_INFO)?;
     w.open_table(MEMBER_CHANNELS)?;
     w.open_table(WRITER_HEADS)?;
     w.open_table(NS_PEERS)?;
+    w.open_table(NS_IDENTITY)?;
+    w.open_table(NS_KEYS)?;
+    w.open_table(KEY_HEADS)?;
     Ok(())
 }
 
@@ -53,6 +62,59 @@ impl SlabStore {
             let v = v.value();
             (v[..32].try_into().unwrap(), v[32..64].try_into().unwrap())
         }))
+    }
+
+    /// This node's writer identity in namespace `name` (X25519 secret ‖ Ed25519 seed).
+    pub fn set_ns_identity(&self, name: &str, identity: &[u8; 64]) -> Result<(), StoreError> {
+        let w = self.db.begin_write()?;
+        w.open_table(NS_IDENTITY)?.insert(name, identity.as_slice())?;
+        w.commit()?;
+        Ok(())
+    }
+
+    pub fn ns_identity(&self, name: &str) -> Result<Option<[u8; 64]>, StoreError> {
+        let r = self.db.begin_read()?;
+        Ok(r.open_table(NS_IDENTITY)?.get(name)?.and_then(|v| v.value().try_into().ok()))
+    }
+
+    /// Read keys of namespace `name` known here, oldest first (ADR-0017 key
+    /// rotation); the namespace's first key comes from its address.
+    pub fn ns_keys(&self, name: &str) -> Result<Vec<[u8; 32]>, StoreError> {
+        let r = self.db.begin_read()?;
+        let mut keys: Vec<[u8; 32]> = self.ns_info(name)?.map(|(_, k)| vec![k]).unwrap_or_default();
+        if let Some(v) = r.open_table(NS_KEYS)?.get(name)? {
+            keys.extend(v.value().chunks(32).filter_map(|k| <[u8; 32]>::try_from(k).ok()));
+        }
+        Ok(keys)
+    }
+
+    /// Adds a newer read key; returns false if it was already known.
+    pub fn add_ns_key(&self, name: &str, key: &[u8; 32]) -> Result<bool, StoreError> {
+        let mut keys = self.ns_keys(name)?;
+        if keys.contains(key) {
+            return Ok(false);
+        }
+        keys.push(*key);
+        let w = self.db.begin_write()?;
+        w.open_table(NS_KEYS)?.insert(name, keys[1..].concat().as_slice())?;
+        w.commit()?;
+        Ok(true)
+    }
+
+    /// A writer's latest head encrypted under the read key with id `key_id`
+    /// (own or fetched): lets members cross a key rotation (ADR-0017).
+    pub fn set_key_head(&self, ns_id: &NsId, writer: &[u8; 32], key_id: &[u8; 16], head: &[u8]) -> Result<(), StoreError> {
+        let key = [ns_id.as_slice(), writer, key_id].concat();
+        let w = self.db.begin_write()?;
+        w.open_table(KEY_HEADS)?.insert(key.as_slice(), head)?;
+        w.commit()?;
+        Ok(())
+    }
+
+    pub fn key_head(&self, ns_id: &NsId, writer: &[u8; 32], key_id: &[u8; 16]) -> Result<Option<Vec<u8>>, StoreError> {
+        let key = [ns_id.as_slice(), writer, key_id].concat();
+        let r = self.db.begin_read()?;
+        Ok(r.open_table(KEY_HEADS)?.get(key.as_slice())?.map(|v| v.value().to_vec()))
     }
 
     /// Names of the namespaces this node writes or has joined.

@@ -76,6 +76,12 @@ impl std::fmt::Display for ChannelError {
 
 impl std::error::Error for ChannelError {}
 
+/// Names a read key without revealing it: SHA-256("retifs/v1/key-id" ‖ key)[0..16].
+/// Members ask for "your latest head under this key" to cross a key rotation (ADR-0017).
+pub fn key_id(read_key: &[u8; 32]) -> [u8; 16] {
+    Sha256::digest([b"retifs/v1/key-id".as_slice(), read_key].concat())[..16].try_into().unwrap()
+}
+
 pub fn ns_id(writer: &[u8; 32]) -> NsId {
     Sha256::digest([NS_LABEL, writer].concat())[..NS_ID_LEN].try_into().unwrap()
 }

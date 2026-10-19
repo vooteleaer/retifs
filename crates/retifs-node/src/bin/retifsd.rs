@@ -45,10 +45,11 @@ use libretifs::{
 };
 use personal_rns::prelude::*;
 use retifs_core::{
-    channel::{ChannelAddr, ChannelKey, Commit, Head},
+    channel::{key_id, ChannelAddr, ChannelKey, Commit, Head},
     lease::{self, node_destination, Lease, LeaseId, LeaseKey, Receipt, Renewal},
     stamp,
     manifest::{self, decode_node, decode_root, NodeEntry},
+    keywrap,
     ops::{merge, Op, OpsFile, Right, WriterCommit},
     record::{Record, RecordId, Snapshot, Value},
     open, ChunkToken, Cid, ConvergenceSecret, FileRef,
@@ -268,6 +269,17 @@ impl RequestEndpoint<Arc<Shared>> for HeadEndpoint {
             16 => store.head_for(context.data.try_into().unwrap()).ok().flatten().unwrap_or_default(),
             // ns_id ‖ writer: one writer's head of a multi-writer namespace (ADR-0017).
             48 => writer_head_bytes(store, context.data[..16].try_into().unwrap(), context.data[16..].try_into().unwrap()),
+            // ns_id ‖ writer ‖ key id: that writer's latest head under a given read key,
+            // so members can cross a key rotation.
+            64 => store
+                .key_head(
+                    context.data[..16].try_into().unwrap(),
+                    context.data[16..48].try_into().unwrap(),
+                    context.data[48..].try_into().unwrap(),
+                )
+                .ok()
+                .flatten()
+                .unwrap_or_default(),
             _ => return Err(Decline::Ignore),
         };
         context.respond(head)
@@ -953,7 +965,8 @@ async fn handle(d: &Daemon, req: Request) -> Result<Response, String> {
 
         Request::NsAddress { ns } => {
             writable(&ns)?;
-            Ok(Response::Channel { address: ensure_namespace(d, &ns)?.to_string() })
+            ensure_namespace(d, &ns)?;
+            Ok(Response::Channel { address: current_addr(d, &ns)?.to_string() })
         }
 
         Request::NsJoin { ns, address, from } => {
@@ -962,12 +975,17 @@ async fn handle(d: &Daemon, req: Request) -> Result<Response, String> {
                 return Err(format!("{ns} already exists here"));
             }
             let addr: ChannelAddr = address.parse().map_err(|e: retifs_core::channel::ChannelError| e.to_string())?;
-            let mut seed = [0u8; 32];
-            getrandom::fill(&mut seed).expect("OS entropy");
+            // This node's writer identity in the namespace (X25519 ‖ Ed25519): others
+            // wrap rotated read keys to it.
+            let mut identity = [0u8; 64];
+            getrandom::fill(&mut identity).expect("OS entropy");
+            let seed: [u8; 32] = identity[32..].try_into().unwrap();
             d.store.create_channel(&ns_channel(&ns), seed, addr.read_key).map_err(|e| e.to_string())?;
             d.store.set_member_channel(&ns_channel(&ns), &addr.ns_id()).map_err(|e| e.to_string())?;
             d.store.set_ns_info(&ns, &addr.writer, &addr.read_key).map_err(|e| e.to_string())?;
+            d.store.set_ns_identity(&ns, &identity).map_err(|e| e.to_string())?;
             d.store.add_ns_peers(&ns, &parse_peers(&from)?).map_err(|e| e.to_string())?;
+            write_ops(d, &ns, vec![Op::Identity(keywrap::public(&identity))]).await?;
             d.ns_wake.notify_one();
             Ok(Response::Namespace(ns_view(d, &ns)?))
         }
@@ -984,7 +1002,35 @@ async fn handle(d: &Daemon, req: Request) -> Result<Response, String> {
 
         Request::NsRevoke { ns, writer } => {
             writable(&ns)?;
-            write_ops(d, &ns, vec![Op::Revoke(parse_writer(&writer)?)]).await?;
+            let revoked = parse_writer(&writer)?;
+            // A new read key for everyone else, wrapped to each remaining writer's
+            // identity (RNS Identity.encrypt), committed with the revoke under the
+            // old key; later versions use the new one (ADR-0017).
+            let merged = materialize(d, &ns)?;
+            let mut new_key = [0u8; 32];
+            getrandom::fill(&mut new_key).expect("OS entropy");
+            let mut entries = Vec::new();
+            let mut unreachable = 0;
+            for (w, rights) in &merged.writers {
+                if *w == revoked || !rights.contains(&Right::Write) {
+                    continue;
+                }
+                match merged.identities.get(w) {
+                    Some(public) => {
+                        let mut rnd = [0u8; 48];
+                        getrandom::fill(&mut rnd).expect("OS entropy");
+                        let wrapped = keywrap::wrap(public, &new_key, rnd[..32].try_into().unwrap(), rnd[32..].try_into().unwrap());
+                        entries.push((*w, wrapped));
+                    }
+                    None => unreachable += 1,
+                }
+            }
+            let epoch = d.store.ns_keys(&ns).map_err(|e| e.to_string())?.len() as u64;
+            let n = entries.len();
+            write_ops(d, &ns, vec![Op::Revoke(revoked), Op::Rekey(epoch, entries)]).await?;
+            use_key(d, &ns, &new_key)?;
+            println!("ns {ns}: revoked {}…, read key rotated to epoch {epoch} for {n} writer(s){}", &writer[..12.min(writer.len())],
+                if unreachable > 0 { format!(", {unreachable} without a known identity left out") } else { String::new() });
             Ok(Response::Namespace(ns_view(d, &ns)?))
         }
 
@@ -1095,6 +1141,9 @@ async fn publish_channel(d: &Daemon, name: &str, data: Vec<u8>, compress: bool) 
     let mut iv = [0u8; 16];
     getrandom::fill(&mut iv).expect("OS entropy");
     let head = Head::sign(&key, c.seq + 1, now_s(), sealed.cid, &sealed.seed, iv);
+    if name.starts_with("ns:") {
+        d.store.set_key_head(&key.ns_id(), &key.writer(), &key_id(&c.read_key), &head.encode()).map_err(|e| e.to_string())?;
+    }
     c.seq += 1;
     c.last = Some((sealed.cid, sealed.seed));
     c.head = head.encode().to_vec();
@@ -1140,10 +1189,10 @@ fn parse_writer(s: &str) -> Result<[u8; 32], String> {
 
 fn ns_view(d: &Daemon, ns: &str) -> Result<NsView, String> {
     let merged = materialize(d, ns)?;
-    let (addr, own, _) = chains(d, ns)?;
+    let (_, own, _) = chains(d, ns)?;
     Ok(NsView {
         name: ns.to_string(),
-        address: addr.to_string(),
+        address: current_addr(d, ns)?.to_string(),
         own_writer: hex(&own),
         writers: merged
             .writers
@@ -1209,15 +1258,37 @@ async fn sync_ns(d: &Daemon, ns: &str) -> Result<(), String> {
             if raw.len() != retifs_core::channel::HEAD_LEN {
                 continue;
             }
-            let head = Head::decode(&raw).map_err(|e| format!("bad head: {e}"))?;
+            let mut head = Head::decode(&raw).map_err(|e| format!("bad head: {e}"))?;
+            let mut raw = raw;
             if head.ns_id != ns_id || head.writer != w {
                 continue;
             }
             let known = d.store.writer_head(&ns_id, &w).map_err(|e| e.to_string())?;
-            if known.as_ref().and_then(|k| Head::decode(&k.head).ok()).is_some_and(|k| k.seq >= head.seq) {
+            let known_seq = known.as_ref().and_then(|k| Head::decode(&k.head).ok()).map(|k| k.seq);
+            if known_seq.is_some_and(|k| k >= head.seq) {
                 continue; // nothing newer (and never go back)
             }
-            let seed = head.commit_seed(&addr).map_err(|e| e.to_string())?;
+            let keys = d.store.ns_keys(ns).map_err(|e| e.to_string())?;
+            let open_with = |h: &Head| keys.iter().rev().find_map(|k| h.commit_seed(&ChannelAddr { writer: addr.writer, read_key: *k }).ok().map(|s| (s, *k)));
+            let mut opened = open_with(&head);
+            if opened.is_none() {
+                // The latest version is under a key not held here: ask for this
+                // writer's latest head under a key that is. A rotation's rekey is
+                // in the last commit under the old key (ADR-0017).
+                for k in keys.iter().rev() {
+                    let Ok(r) = d.ask(link, HEAD_ENDPOINT, [ns_id.as_slice(), &w, &key_id(k)].concat()).await else { break };
+                    let Some(h) = (r.len() == retifs_core::channel::HEAD_LEN).then(|| Head::decode(&r).ok()).flatten() else { continue };
+                    if h.ns_id == ns_id && h.writer == w && known_seq.is_none_or(|s| h.seq > s) && let Some(o) = open_with(&h) {
+                        (head, raw, opened) = (h, r, Some(o));
+                        break;
+                    }
+                }
+            }
+            let Some((seed, used_key)) = opened else {
+                eprintln!("ns {ns}: can't read writer {}…'s version {}: its read key wasn't given to this node (revoked?)", &hex(&w)[..12], head.seq);
+                continue;
+            };
+            d.store.set_key_head(&ns_id, &w, &key_id(&used_key), &raw).map_err(|e| e.to_string())?;
             let got = fetch_chain(d, link, &addr, (head.commit, seed), &w).await?;
             d.store
                 .set_writer_head(&ns_id, &retifs_store::WriterHead { writer: w, head: raw, commit: (head.commit, seed) })
@@ -1227,7 +1298,11 @@ async fn sync_ns(d: &Daemon, ns: &str) -> Result<(), String> {
         }
     }
     if changed {
+        let keys_before = d.store.ns_keys(ns).map_err(|e| e.to_string())?.len();
         let merged = materialize(d, ns)?;
+        if d.store.ns_keys(ns).map_err(|e| e.to_string())?.len() > keys_before {
+            d.ns_wake.notify_one(); // a new read key: newer versions may be readable now
+        }
         // Content of records this node doesn't hold yet.
         let peers = d.store.ns_peers(ns).map_err(|e| e.to_string())?;
         for b in merged.records.iter().flat_map(|r| r.blocks.iter()) {
@@ -1306,13 +1381,37 @@ fn ensure_namespace(d: &Daemon, ns: &str) -> Result<ChannelAddr, String> {
     if let Some((creator, read_key)) = d.store.ns_info(ns).map_err(|e| e.to_string())? {
         return Ok(ChannelAddr { writer: creator, read_key });
     }
-    let mut secrets = [0u8; 64];
-    getrandom::fill(&mut secrets).expect("OS entropy");
-    let (seed, read_key): ([u8; 32], [u8; 32]) = (secrets[..32].try_into().unwrap(), secrets[32..].try_into().unwrap());
+    // The creator's writer identity (X25519 ‖ Ed25519) and the first read key.
+    let mut identity = [0u8; 64];
+    let mut read_key = [0u8; 32];
+    getrandom::fill(&mut identity).expect("OS entropy");
+    getrandom::fill(&mut read_key).expect("OS entropy");
+    let seed: [u8; 32] = identity[32..].try_into().unwrap();
     d.store.create_channel(&ns_channel(ns), seed, read_key).map_err(|e| e.to_string())?;
     let creator = ChannelKey::from_secrets(seed, read_key).writer();
+    d.store.set_ns_identity(ns, &identity).map_err(|e| e.to_string())?;
     d.store.set_ns_info(ns, &creator, &read_key).map_err(|e| e.to_string())?;
     Ok(ChannelAddr { writer: creator, read_key })
+}
+
+/// The namespace's address with its newest read key known here.
+fn current_addr(d: &Daemon, ns: &str) -> Result<ChannelAddr, String> {
+    let (creator, _) = d.store.ns_info(ns).map_err(|e| e.to_string())?.ok_or_else(|| format!("no namespace {ns}"))?;
+    let keys = d.store.ns_keys(ns).map_err(|e| e.to_string())?;
+    Ok(ChannelAddr { writer: creator, read_key: *keys.last().expect("a namespace has a key") })
+}
+
+/// Makes `key` this node's current read key for the namespace: later commits
+/// and heads are encrypted with it.
+fn use_key(d: &Daemon, ns: &str, key: &[u8; 32]) -> Result<(), String> {
+    d.store.add_ns_key(ns, key).map_err(|e| e.to_string())?;
+    if let Some(mut c) = d.store.own_channel(&ns_channel(ns)).map_err(|e| e.to_string())?
+        && c.read_key != *key
+    {
+        c.read_key = *key;
+        d.store.update_own_channel(&c).map_err(|e| e.to_string())?;
+    }
+    Ok(())
 }
 
 /// The signing key of an own channel: its own namespace, or a member's key
@@ -1327,8 +1426,12 @@ fn channel_key(d: &Daemon, c: &retifs_store::OwnChannel) -> ChannelKey {
 /// One modification of a namespace (ADR-0006, ADR-0017): its operations are
 /// committed to this node's writer chain, then the namespace is rebuilt by
 /// merging every writer chain held here.
-async fn write_ops(d: &Daemon, ns: &str, ops: Vec<Op>) -> Result<u64, String> {
+async fn write_ops(d: &Daemon, ns: &str, mut ops: Vec<Op>) -> Result<u64, String> {
+    let new = d.store.ns_info(ns).map_err(|e| e.to_string())?.is_none();
     ensure_namespace(d, ns)?;
+    if new && let Some(identity) = d.store.ns_identity(ns).map_err(|e| e.to_string())? {
+        ops.insert(0, Op::Identity(keywrap::public(&identity)));
+    }
     let (seq, _) = publish_channel(d, &ns_channel(ns), OpsFile { ops }.encode(), false).await?;
     materialize(d, ns)?;
     Ok(seq)
@@ -1389,6 +1492,19 @@ fn materialize(d: &Daemon, ns: &str) -> Result<retifs_core::ops::Merged, String>
     let plain = chains.into_iter().map(|(w, c)| (w, c.into_iter().map(|(_, c)| c).collect())).collect();
     let merged = merge(&addr.writer, &plain, now_ms());
     d.store.replace_namespace(ns, &merged.records).map_err(|e| e.to_string())?;
+    // Rotated read keys wrapped to this node: take them, newest last.
+    if let Some(identity) = d.store.ns_identity(ns).map_err(|e| e.to_string())? {
+        let me: [u8; 32] = keywrap::public(&identity)[32..].try_into().unwrap();
+        let known = d.store.ns_keys(ns).map_err(|e| e.to_string())?;
+        for ev in &merged.rekeys {
+            let Some((_, wrapped)) = ev.entries.iter().find(|(w, _)| *w == me) else { continue };
+            let Some(key) = keywrap::unwrap(&identity, wrapped).and_then(|k| <[u8; 32]>::try_from(k).ok()) else { continue };
+            if !known.contains(&key) {
+                println!("ns {ns}: new read key, epoch {}, from {}…", ev.epoch, &hex(&ev.by)[..12]);
+            }
+            use_key(d, ns, &key)?;
+        }
+    }
     Ok(merged)
 }
 

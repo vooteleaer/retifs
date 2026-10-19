@@ -107,5 +107,12 @@ fn namespace_info_member_channels_and_writer_heads() {
     st.set_writer_head(&[4; 16], &h(7)).unwrap();
     assert_eq!(st.writer_heads(&[3; 16]).unwrap(), vec![h(5), h(6)]);
     assert_eq!(st.writer_head(&[3; 16], &[6; 32]).unwrap(), Some(h(6)));
+
+    st.set_ns_identity("shared", &[8; 64]).unwrap();
+    assert_eq!(st.ns_identity("shared").unwrap(), Some([8; 64]));
+    assert_eq!(st.ns_keys("shared").unwrap(), vec![[2; 32]], "the first key comes from the address");
+    assert!(st.add_ns_key("shared", &[9; 32]).unwrap());
+    assert!(!st.add_ns_key("shared", &[9; 32]).unwrap(), "known keys aren't added twice");
+    assert_eq!(st.ns_keys("shared").unwrap(), vec![[2; 32], [9; 32]]);
 }
 
