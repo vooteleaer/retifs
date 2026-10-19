@@ -50,7 +50,7 @@ use retifs_core::{
     stamp,
     manifest::{self, decode_node, decode_root, NodeEntry},
     keywrap,
-    ops::{merge, Op, OpsFile, Right, WriterCommit},
+    ops::{is_control, merge, Op, OpsFile, Right, State, WriterCommit, MAX_CLOCK_AHEAD_MS},
     record::{Record, RecordId, Snapshot, Value},
     open, ChunkToken, Cid, ConvergenceSecret, FileRef,
 };
@@ -1450,6 +1450,10 @@ type CommitRef = (Cid, retifs_core::Seed);
 struct NsCache {
     chains: HashMap<[u8; 32], Vec<Walked>>,
     records: Option<std::collections::BTreeMap<RecordId, Record>>,
+    /// The merged state as a CRDT, and how far each writer's chain is applied
+    /// (sequence number, commit time): new commits apply one by one.
+    state: Option<State>,
+    applied: HashMap<[u8; 32], (u64, u64)>,
 }
 
 /// A writer's chain, oldest first, as far back as its commits and operations
@@ -1481,7 +1485,7 @@ fn walk_ops_chain(d: &Daemon, addr: &ChannelAddr, last: Option<(Cid, retifs_core
         else {
             break;
         };
-        newer.push((commit.seq, cid, WriterCommit { time_ms: commit.time_ms, ops: ops.ops }));
+        newer.push((commit.seq, cid, WriterCommit { seq: commit.seq, time_ms: commit.time_ms, ops: ops.ops }));
         next = commit.prev;
     }
     newer.reverse();
@@ -1547,8 +1551,40 @@ fn apply_view(d: &Daemon, ns: &str, records: &[Record]) -> Result<(), String> {
 /// Rebuilds a namespace's local view by merging every writer chain held here.
 fn materialize(d: &Daemon, ns: &str) -> Result<retifs_core::ops::Merged, String> {
     let (addr, _, chains) = chains(d, ns)?;
-    let plain = chains.into_iter().map(|(w, c)| (w, c.into_iter().map(|(_, c)| c).collect())).collect();
-    let merged = merge(&addr.writer, &plain, now_ms());
+    let now = now_ms();
+    let merged = {
+        let mut cache = d.ns_cache.lock().unwrap();
+        let entry = cache.entry(ns.to_string()).or_default();
+        // Apply only the new commits, unless one changes rights (grant, revoke,
+        // identity, rekey) or is misdated: then rebuild from every chain.
+        let mut rebuild = entry.state.is_none();
+        let mut new = Vec::new();
+        if !rebuild {
+            for (w, chain) in &chains {
+                let (done, last_time) = entry.applied.get(w).copied().unwrap_or((0, 0));
+                for (seq, c) in chain.iter().filter(|(seq, _)| *seq > done) {
+                    if c.ops.iter().any(is_control) || c.time_ms < last_time || c.time_ms > now + MAX_CLOCK_AHEAD_MS {
+                        rebuild = true;
+                    }
+                    new.push((*w, *seq, c));
+                }
+            }
+        }
+        if rebuild {
+            let plain = chains.iter().map(|(w, c)| (*w, c.iter().map(|(_, c)| c.clone()).collect())).collect();
+            entry.state = Some(State::build(&addr.writer, &plain, now));
+            entry.applied = chains
+                .iter()
+                .filter_map(|(w, c)| c.last().map(|(seq, wc)| (*w, (*seq, wc.time_ms))))
+                .collect();
+        } else if let Some(state) = entry.state.as_mut() {
+            for (w, seq, c) in new {
+                state.apply_commit(&w, c);
+                entry.applied.insert(w, (seq, c.time_ms));
+            }
+        }
+        entry.state.as_ref().expect("built above").merged()
+    };
     apply_view(d, ns, &merged.records)?;
     // Rotated read keys wrapped to this node: take them, newest last.
     if let Some(identity) = d.store.ns_identity(ns).map_err(|e| e.to_string())? {

@@ -64,6 +64,7 @@ fn main() {
         alice,
         vec![
             WriterCommit {
+                seq: 1,
                 time_ms: 1000,
                 ops: vec![
                     Op::Identity(keywrap::public(&alice_id)),
@@ -74,6 +75,7 @@ fn main() {
                 ],
             },
             WriterCommit {
+                seq: 2,
                 time_ms: 3000,
                 ops: vec![Op::Set(page, "title".into(), s("Front page")), Op::Revoke(bob), Op::Rekey(1, vec![(alice, wrapped_for_alice.clone())])],
             },
@@ -83,6 +85,7 @@ fn main() {
         bob,
         vec![
             WriterCommit {
+                seq: 1,
                 time_ms: 2000,
                 ops: vec![
                     Op::Identity(keywrap::public(&bob_id)),
@@ -92,20 +95,21 @@ fn main() {
                     Op::Grant(eve, vec![Right::Write]),
                 ],
             },
-            WriterCommit { time_ms: 4000, ops: vec![Op::Delete(page)] },
+            WriterCommit { seq: 2, time_ms: 4000, ops: vec![Op::Delete(page)] },
         ],
     );
-    chains.insert(eve, vec![WriterCommit { time_ms: 2500, ops: vec![Op::Set(photo, "spam".into(), Value::Bool(true))] }]);
+    chains.insert(eve, vec![WriterCommit { seq: 1, time_ms: 2500, ops: vec![Op::Set(photo, "spam".into(), Value::Bool(true))] }]);
     let merged = merge(&alice, &chains, 10_000);
     let snapshot = Snapshot::new(merged.records.clone()).unwrap();
 
     let doc = json!({
-        "construction": "retifs operations v1 (ADR-0017, proposed): ops file canonical msgpack; merge in stamp order (time, writer, index)",
+        "construction": "retifs operations v1 (ADR-0017, proposed): ops file canonical msgpack; merge in stamp order (time, writer, seq, index)",
         "creator": hex::encode(alice),
         "now_ms": 10_000,
         "chains": chains.iter().map(|(w, cs)| json!({
             "writer": hex::encode(w),
             "commits": cs.iter().map(|c| json!({
+                "seq": c.seq,
                 "time_ms": c.time_ms,
                 "ops": c.ops.iter().map(op).collect::<Vec<_>>(),
                 "encoded": hex::encode(OpsFile { ops: c.ops.clone() }.encode()),

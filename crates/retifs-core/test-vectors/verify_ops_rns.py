@@ -64,11 +64,11 @@ def merge(creator, chains, now):
                 continue
             last = c["time_ms"]
             for i, o in enumerate(c["ops"]):
-                events.append((c["time_ms"], writer, i, op(o)))
-    events.sort(key=lambda e: (e[0], e[1], e[2]))
+                events.append((c["time_ms"], writer, c["seq"], i, op(o)))
+    events.sort(key=lambda e: (e[0], e[1], e[2], e[3]))
     rights = {creator: {"grant", "write"}}
     records, ignored, identities, rekeys = {}, 0, {}, []
-    for t, w, _, o in events:
+    for t, w, _, _, o in events:
         tag = o[0]
         if tag == "identity":
             if o[1][32:] == w:

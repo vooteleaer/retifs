@@ -10,7 +10,7 @@
 //! right    = "grant" | "write"                                   sorted, unique
 //! ```
 //! Every reader replays all writers' operations in stamp order —
-//! `(commit time, writer key, index in commit)` — and so reaches the same
+//! `(commit time, writer key, commit sequence number, index in commit)` — and so reaches the same
 //! state from the same operations, whatever order they arrived in. Writes
 //! count only if their writer held `write` at that stamp; grants and revokes
 //! only if it held `grant`. The creator holds both, always.
@@ -241,6 +241,9 @@ fn read_op(r: &mut Reader) -> Result<Op, RecordError> {
 /// One commit of one writer, as the merge sees it.
 #[derive(Debug, Clone, PartialEq)]
 pub struct WriterCommit {
+    /// The commit's sequence number in its writer's chain: orders commits
+    /// made in the same millisecond.
+    pub seq: u64,
     pub time_ms: u64,
     pub ops: Vec<Op>,
 }
@@ -275,7 +278,7 @@ pub struct Merged {
 pub fn merge(creator: &WriterKey, chains: &BTreeMap<WriterKey, Vec<WriterCommit>>, now_ms: u64) -> Merged {
     let mut m = Merged::default();
     // Stamp every operation; drop commits dated before their predecessor or too far ahead.
-    let mut events: Vec<(u64, WriterKey, usize, &Op)> = Vec::new();
+    let mut events: Vec<(u64, WriterKey, u64, usize, &Op)> = Vec::new();
     for (writer, chain) in chains {
         let mut last = 0u64;
         for c in chain {
@@ -285,17 +288,17 @@ pub fn merge(creator: &WriterKey, chains: &BTreeMap<WriterKey, Vec<WriterCommit>
             }
             last = c.time_ms;
             for (i, op) in c.ops.iter().enumerate() {
-                events.push((c.time_ms, *writer, i, op));
+                events.push((c.time_ms, *writer, c.seq, i, op));
             }
         }
     }
-    events.sort_by_key(|a| (a.0, a.1, a.2));
+    events.sort_by_key(|a| (a.0, a.1, a.2, a.3));
 
     let mut rights: BTreeMap<WriterKey, Vec<Right>> = BTreeMap::new();
     rights.insert(*creator, vec![Right::Grant, Right::Write]);
     let mut records: BTreeMap<RecordId, Record> = BTreeMap::new();
     let has = |rights: &BTreeMap<WriterKey, Vec<Right>>, w: &WriterKey, r: Right| rights.get(w).is_some_and(|v| v.contains(&r));
-    for (time_ms, writer, _, op) in events {
+    for (time_ms, writer, _, _, op) in events {
         match op {
             Op::Identity(p) => {
                 if p[32..] == writer {
@@ -346,6 +349,214 @@ pub fn merge(creator: &WriterKey, chains: &BTreeMap<WriterKey, Vec<WriterCommit>
     m
 }
 
+/// An operation's place in the merge order: (commit time, writer, commit
+/// sequence number, index in commit).
+pub type Stamp = (u64, WriterKey, u64, u32);
+
+/// Grants, revokes, identities and rekeys: they decide what other operations
+/// mean, so they're evaluated as a whole, in stamp order.
+pub fn is_control(op: &Op) -> bool {
+    matches!(op, Op::Grant(..) | Op::Revoke(_) | Op::Identity(_) | Op::Rekey(..))
+}
+
+/// The commits of a chain that count: not dated before their predecessor,
+/// not more than a day ahead of `now_ms`.
+pub fn accepted(chain: &[WriterCommit], now_ms: u64) -> Vec<&WriterCommit> {
+    let mut last = 0u64;
+    let mut out = Vec::new();
+    for c in chain {
+        if c.time_ms < last || c.time_ms > now_ms.saturating_add(MAX_CLOCK_AHEAD_MS) {
+            continue;
+        }
+        last = c.time_ms;
+        out.push(c);
+    }
+    out
+}
+
+/// A namespace's state as a CRDT (ADR-0017): every field keeps the stamp
+/// that set it, so data operations apply one at a time, in any order, with
+/// the same result as [`merge`]'s replay. Control operations form a timeline
+/// evaluated as a whole; a new one means rebuilding with [`State::build`].
+#[derive(Debug, Clone, Default)]
+pub struct State {
+    /// Each writer's rights over time: (from stamp, rights; None once revoked).
+    rights: BTreeMap<WriterKey, RightsTimeline>,
+    identities: BTreeMap<WriterKey, [u8; 64]>,
+    rekeys: Vec<RekeyEvent>,
+    fields: BTreeMap<(RecordId, String), (Stamp, Option<Value>)>,
+    blocks: BTreeMap<RecordId, (Stamp, Vec<FileRef>)>,
+    /// Latest set or blocks per record: it exists if newer than its latest delete.
+    live: BTreeMap<RecordId, Stamp>,
+    deleted: BTreeMap<RecordId, Stamp>,
+    pub ignored_ops: usize,
+}
+
+const ZERO: Stamp = (0, [0; 32], 0, 0);
+
+/// A writer's rights from each stamp on (None: revoked).
+type RightsTimeline = Vec<(Stamp, Option<Vec<Right>>)>;
+
+impl State {
+    /// A state with this control timeline and no data yet.
+    pub fn with_control(creator: &WriterKey, mut control: Vec<(Stamp, Op)>) -> State {
+        control.sort_by_key(|(s, _)| *s);
+        let mut st = State::default();
+        st.rights.insert(*creator, vec![(ZERO, Some(vec![Right::Grant, Right::Write]))]);
+        for (s, op) in control {
+            let writer = s.1;
+            let can_grant = st.has(&writer, Right::Grant, &s);
+            match op {
+                Op::Identity(p) => {
+                    if p[32..] == writer {
+                        st.identities.insert(writer, p);
+                    } else {
+                        st.ignored_ops += 1;
+                    }
+                }
+                Op::Rekey(epoch, entries) if can_grant => st.rekeys.push(RekeyEvent { epoch, time_ms: s.0, by: writer, entries }),
+                Op::Grant(w, mut granted) if can_grant => {
+                    if w != *creator {
+                        granted.sort();
+                        granted.dedup();
+                        st.rights.entry(w).or_default().push((s, Some(granted)));
+                    }
+                }
+                Op::Revoke(w) if can_grant => {
+                    if w != *creator {
+                        st.rights.entry(w).or_default().push((s, None));
+                    }
+                }
+                _ => st.ignored_ops += 1,
+            }
+        }
+        st
+    }
+
+    /// Whether `writer` held `right` just before stamp `at`.
+    fn has(&self, writer: &WriterKey, right: Right, at: &Stamp) -> bool {
+        self.rights
+            .get(writer)
+            .and_then(|t| t.iter().rev().find(|(s, _)| s < at))
+            .is_some_and(|(_, r)| r.as_ref().is_some_and(|r| r.contains(&right)))
+    }
+
+    /// Applies one data operation; any order gives the same state.
+    pub fn apply(&mut self, s: Stamp, op: &Op) {
+        if is_control(op) {
+            return;
+        }
+        if !self.has(&s.1, Right::Write, &s) {
+            self.ignored_ops += 1;
+            return;
+        }
+        let newer = |old: Option<&Stamp>| old.is_none_or(|o| s > *o);
+        match op {
+            Op::Set(id, k, v) => {
+                if newer(self.fields.get(&(*id, k.clone())).map(|(st, _)| st)) {
+                    self.fields.insert((*id, k.clone()), (s, Some(v.clone())));
+                }
+                if newer(self.live.get(id)) {
+                    self.live.insert(*id, s);
+                }
+            }
+            Op::Unset(id, k) => {
+                if newer(self.fields.get(&(*id, k.clone())).map(|(st, _)| st)) {
+                    self.fields.insert((*id, k.clone()), (s, None));
+                }
+            }
+            Op::Blocks(id, b) => {
+                if newer(self.blocks.get(id).map(|(st, _)| st)) {
+                    self.blocks.insert(*id, (s, b.clone()));
+                }
+                if newer(self.live.get(id)) {
+                    self.live.insert(*id, s);
+                }
+            }
+            Op::Delete(id) if newer(self.deleted.get(id)) => {
+                self.deleted.insert(*id, s);
+            }
+            _ => {}
+        }
+    }
+
+    /// Applies a commit's data operations. Returns false if the commit has
+    /// control operations: the caller rebuilds with [`State::build`].
+    pub fn apply_commit(&mut self, writer: &WriterKey, c: &WriterCommit) -> bool {
+        if c.ops.iter().any(is_control) {
+            return false;
+        }
+        for (i, op) in c.ops.iter().enumerate() {
+            self.apply((c.time_ms, *writer, c.seq, i as u32), op);
+        }
+        true
+    }
+
+    /// The state of every writer's chain: control first, then data in any order.
+    pub fn build(creator: &WriterKey, chains: &BTreeMap<WriterKey, Vec<WriterCommit>>, now_ms: u64) -> State {
+        let mut control = Vec::new();
+        let mut data = Vec::new();
+        for (w, chain) in chains {
+            for c in accepted(chain, now_ms) {
+                for (i, op) in c.ops.iter().enumerate() {
+                    let s = (c.time_ms, *w, c.seq, i as u32);
+                    if is_control(op) {
+                        control.push((s, op.clone()));
+                    } else {
+                        data.push((s, op));
+                    }
+                }
+            }
+        }
+        let mut st = State::with_control(creator, control);
+        for (s, op) in data {
+            st.apply(s, op);
+        }
+        st
+    }
+
+    /// Visible records, by ID.
+    pub fn records(&self) -> Vec<Record> {
+        let mut out: BTreeMap<RecordId, Record> = BTreeMap::new();
+        for (id, live) in &self.live {
+            if self.deleted.get(id).is_none_or(|d| live > d) {
+                out.insert(*id, Record { id: *id, attrs: BTreeMap::new(), blocks: Vec::new() });
+            }
+        }
+        for ((id, k), (s, v)) in &self.fields {
+            if let (Some(r), Some(v)) = (out.get_mut(id), v)
+                && self.deleted.get(id).is_none_or(|d| s > d)
+            {
+                r.attrs.insert(k.clone(), v.clone());
+            }
+        }
+        for (id, (s, b)) in &self.blocks {
+            if let Some(r) = out.get_mut(id)
+                && self.deleted.get(id).is_none_or(|d| s > d)
+            {
+                r.blocks = b.clone();
+            }
+        }
+        out.into_values().collect()
+    }
+
+    /// The merged view, as [`merge`] gives it.
+    pub fn merged(&self) -> Merged {
+        Merged {
+            identities: self.identities.clone(),
+            rekeys: self.rekeys.clone(),
+            records: self.records(),
+            writers: self
+                .rights
+                .iter()
+                .filter_map(|(w, t)| t.last().and_then(|(_, r)| r.clone()).map(|r| (*w, r)))
+                .collect(),
+            ignored_ops: self.ignored_ops,
+            ignored_commits: 0,
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -356,15 +567,23 @@ mod tests {
     const R: RecordId = [7; 16];
 
     fn c(time_ms: u64, ops: Vec<Op>) -> WriterCommit {
-        WriterCommit { time_ms, ops }
+        WriterCommit { seq: 0, time_ms, ops }
     }
 
     fn s(v: &str) -> Value {
         Value::Str(v.into())
     }
 
+    /// Chains with sequence numbers by position (1, 2, …).
     fn chains(list: Vec<(WriterKey, Vec<WriterCommit>)>) -> BTreeMap<WriterKey, Vec<WriterCommit>> {
-        list.into_iter().collect()
+        list.into_iter()
+            .map(|(w, mut cs)| {
+                for (i, c) in cs.iter_mut().enumerate() {
+                    c.seq = i as u64 + 1;
+                }
+                (w, cs)
+            })
+            .collect()
     }
 
     #[test]
@@ -433,6 +652,72 @@ mod tests {
         let f = OpsFile { ops: vec![Op::Rekey(2, vec![(BOB, vec![5]), (ALICE, vec![6])])] };
         let back = OpsFile::decode(&f.encode()).unwrap();
         assert_eq!(back.ops[0], Op::Rekey(2, vec![(ALICE, vec![6]), (BOB, vec![5])]), "entries sorted by writer");
+    }
+
+    /// The CRDT state gives exactly what the sequential merge gives, whatever
+    /// order the data operations arrive in.
+    #[test]
+    fn state_matches_merge_in_any_order() {
+        let mut seed = 0x9e37_79b9_7f4a_7c15u64;
+        let mut rnd = move |n: u64| {
+            seed ^= seed << 13;
+            seed ^= seed >> 7;
+            seed ^= seed << 17;
+            seed % n
+        };
+        let writers = [ALICE, BOB, EVE];
+        let ids: Vec<RecordId> = (0..4u8).map(|i| [i; 16]).collect();
+        let keys = ["a", "b", "c"];
+        for _ in 0..2000 {
+            let mut chains: BTreeMap<WriterKey, Vec<WriterCommit>> = BTreeMap::new();
+            for w in writers {
+                let mut t = 0;
+                for _ in 0..rnd(4) {
+                    t += rnd(50);
+                    let ops = (0..1 + rnd(4))
+                        .map(|_| {
+                            let id = ids[rnd(4) as usize];
+                            let k = keys[rnd(3) as usize].to_string();
+                            match rnd(10) {
+                                0..=3 => Op::Set(id, k, Value::Int(rnd(5) as i64)),
+                                4 => Op::Unset(id, k),
+                                5 => Op::Blocks(id, vec![]),
+                                6 => Op::Delete(id),
+                                7 => Op::Grant(writers[rnd(3) as usize], if rnd(2) == 0 { vec![Right::Write] } else { vec![Right::Write, Right::Grant] }),
+                                8 => Op::Revoke(writers[rnd(3) as usize]),
+                                _ => Op::Set(id, k, Value::Bool(true)),
+                            }
+                        })
+                        .collect();
+                    let list = chains.entry(w).or_default();
+                    let seq = list.len() as u64 + 1;
+                    list.push(WriterCommit { seq, time_ms: t, ops });
+                }
+            }
+            let expect = merge(&ALICE, &chains, 10_000);
+            let built = State::build(&ALICE, &chains, 10_000);
+            assert_eq!(built.records(), expect.records);
+            assert_eq!(built.merged().writers, expect.writers);
+            // Data in a shuffled order, one operation at a time.
+            let mut control = Vec::new();
+            let mut data = Vec::new();
+            for (w, chain) in &chains {
+                for cm in accepted(chain, 10_000) {
+                    for (i, op) in cm.ops.iter().enumerate() {
+                        let st = (cm.time_ms, *w, cm.seq, i as u32);
+                        if is_control(op) { control.push((st, op.clone())) } else { data.push((st, op.clone())) }
+                    }
+                }
+            }
+            for i in (1..data.len()).rev() {
+                data.swap(i, rnd(i as u64 + 1) as usize);
+            }
+            let mut st = State::with_control(&ALICE, control);
+            for (s, op) in &data {
+                st.apply(*s, op);
+            }
+            assert_eq!(st.records(), expect.records, "shuffled order");
+        }
     }
 
     #[test]

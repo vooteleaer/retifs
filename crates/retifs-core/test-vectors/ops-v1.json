@@ -16,6 +16,7 @@
               }
             ]
           ],
+          "seq": 1,
           "time_ms": 2500
         }
       ],
@@ -70,6 +71,7 @@
               ]
             ]
           ],
+          "seq": 1,
           "time_ms": 2000
         },
         {
@@ -80,6 +82,7 @@
               "01010101010101010101010101010101"
             ]
           ],
+          "seq": 2,
           "time_ms": 4000
         }
       ],
@@ -131,6 +134,7 @@
               }
             ]
           ],
+          "seq": 1,
           "time_ms": 1000
         },
         {
@@ -160,13 +164,14 @@
               ]
             ]
           ],
+          "seq": 2,
           "time_ms": 3000
         }
       ],
       "writer": "bc7cbcb5636375fa1d82434d466724d92377f53b980695dd49d26d0ce12205a5"
     }
   ],
-  "construction": "retifs operations v1 (ADR-0017, proposed): ops file canonical msgpack; merge in stamp order (time, writer, index)",
+  "construction": "retifs operations v1 (ADR-0017, proposed): ops file canonical msgpack; merge in stamp order (time, writer, seq, index)",
   "creator": "bc7cbcb5636375fa1d82434d466724d92377f53b980695dd49d26d0ce12205a5",
   "identities_after": [
     "705fbac01f5519899f437bc42e40255ae9ab54bff00de3433af7d687d9e71ad5",
