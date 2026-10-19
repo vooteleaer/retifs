@@ -494,6 +494,7 @@ struct Daemon {
     follow_wake: Notify,
     /// Wakes namespace sync (joined, granted).
     ns_wake: Notify,
+    ns_cache: Mutex<HashMap<String, NsCache>>,
 }
 
 impl Daemon {
@@ -617,6 +618,7 @@ async fn serve(store: Arc<SlabStore>, identity: node::IdentitySecret, endpoint: 
         max_stamp_cost: args.max_stamp_cost,
         follow_wake: Notify::new(),
         ns_wake: Notify::new(),
+        ns_cache: Mutex::new(HashMap::new()),
     });
     println!("attached to shared instance {of}");
     println!("serving {} chunks as retifs.node <{}>", store.len().unwrap_or(0), daemon.node_hex);
@@ -1437,12 +1439,31 @@ async fn write_ops(d: &Daemon, ns: &str, mut ops: Vec<Op>) -> Result<u64, String
     Ok(seq)
 }
 
+/// One walked commit of a writer chain.
+type Walked = (u64, Cid, WriterCommit);
+/// A commit chunk by CID and seed.
+type CommitRef = (Cid, retifs_core::Seed);
+
+/// What's been walked and merged per namespace, so a write only reads the
+/// new commits and writes the records that changed (chains are append-only).
+#[derive(Default)]
+struct NsCache {
+    chains: HashMap<[u8; 32], Vec<Walked>>,
+    records: Option<std::collections::BTreeMap<RecordId, Record>>,
+}
+
 /// A writer's chain, oldest first, as far back as its commits and operations
-/// files are local: (sequence number, commit).
-fn walk_ops_chain(d: &Daemon, addr: &ChannelAddr, last: Option<(Cid, retifs_core::Seed)>) -> Vec<(u64, WriterCommit)> {
-    let mut out = Vec::new();
+/// files are local. Only commits newer than `cached` are read from the store.
+fn walk_ops_chain(d: &Daemon, addr: &ChannelAddr, last: Option<(Cid, retifs_core::Seed)>, cached: &[Walked]) -> Vec<Walked> {
+    let stop = cached.last().map(|(_, cid, _)| *cid);
+    let mut newer = Vec::new();
     let mut next = last;
+    let mut reached_cache = false;
     while let Some((cid, seed)) = next {
+        if Some(cid) == stop {
+            reached_cache = true;
+            break;
+        }
         let Some(commit) = d
             .store
             .fetch(&cid)
@@ -1460,11 +1481,17 @@ fn walk_ops_chain(d: &Daemon, addr: &ChannelAddr, last: Option<(Cid, retifs_core
         else {
             break;
         };
-        out.push((commit.seq, WriterCommit { time_ms: commit.time_ms, ops: ops.ops }));
+        newer.push((commit.seq, cid, WriterCommit { time_ms: commit.time_ms, ops: ops.ops }));
         next = commit.prev;
     }
-    out.reverse();
-    out
+    newer.reverse();
+    if reached_cache || (next.is_none() && stop.is_none()) {
+        let mut out = if reached_cache { cached.to_vec() } else { Vec::new() };
+        out.extend(newer);
+        out
+    } else {
+        newer // the walk stopped early (missing history): only what's contiguous to the head
+    }
 }
 
 type Chains = std::collections::BTreeMap<[u8; 32], Vec<(u64, WriterCommit)>>;
@@ -1472,18 +1499,49 @@ type Chains = std::collections::BTreeMap<[u8; 32], Vec<(u64, WriterCommit)>>;
 /// Every writer chain of a namespace held here: this node's and the others'.
 fn chains(d: &Daemon, ns: &str) -> Result<(ChannelAddr, [u8; 32], Chains), String> {
     let addr = ensure_namespace(d, ns)?;
-    let mut out = Chains::new();
+    let mut heads: Vec<([u8; 32], Option<CommitRef>)> = Vec::new();
     let mut own_writer = addr.writer;
     if let Some(c) = d.store.own_channel(&ns_channel(ns)).map_err(|e| e.to_string())? {
         own_writer = channel_key(d, &c).writer();
-        out.insert(own_writer, walk_ops_chain(d, &addr, c.last));
+        heads.push((own_writer, c.last));
     }
     for h in d.store.writer_heads(&addr.ns_id()).map_err(|e| e.to_string())? {
         if h.writer != own_writer {
-            out.insert(h.writer, walk_ops_chain(d, &addr, Some(h.commit)));
+            heads.push((h.writer, Some(h.commit)));
         }
     }
+    let mut cache = d.ns_cache.lock().unwrap();
+    let entry = cache.entry(ns.to_string()).or_default();
+    let mut out = Chains::new();
+    for (writer, last) in heads {
+        let cached = entry.chains.get(&writer).cloned().unwrap_or_default();
+        let walked = walk_ops_chain(d, &addr, last, &cached);
+        out.insert(writer, walked.iter().map(|(seq, _, c)| (*seq, c.clone())).collect());
+        entry.chains.insert(writer, walked);
+    }
     Ok((addr, own_writer, out))
+}
+
+/// Writes the records that changed since the last merge (all of them the first time).
+fn apply_view(d: &Daemon, ns: &str, records: &[Record]) -> Result<(), String> {
+    let mut cache = d.ns_cache.lock().unwrap();
+    let entry = cache.entry(ns.to_string()).or_default();
+    let new: std::collections::BTreeMap<RecordId, Record> = records.iter().map(|r| (r.id, r.clone())).collect();
+    match &entry.records {
+        None => d.store.replace_namespace(ns, records).map_err(|e| e.to_string())?,
+        Some(old) => {
+            for id in old.keys().filter(|id| !new.contains_key(*id)) {
+                d.store.delete_record(ns, id).map_err(|e| e.to_string())?;
+            }
+            for (id, r) in &new {
+                if old.get(id) != Some(r) {
+                    d.store.put_record(ns, r).map_err(|e| e.to_string())?;
+                }
+            }
+        }
+    }
+    entry.records = Some(new);
+    Ok(())
 }
 
 /// Rebuilds a namespace's local view by merging every writer chain held here.
@@ -1491,7 +1549,7 @@ fn materialize(d: &Daemon, ns: &str) -> Result<retifs_core::ops::Merged, String>
     let (addr, _, chains) = chains(d, ns)?;
     let plain = chains.into_iter().map(|(w, c)| (w, c.into_iter().map(|(_, c)| c).collect())).collect();
     let merged = merge(&addr.writer, &plain, now_ms());
-    d.store.replace_namespace(ns, &merged.records).map_err(|e| e.to_string())?;
+    apply_view(d, ns, &merged.records)?;
     // Rotated read keys wrapped to this node: take them, newest last.
     if let Some(identity) = d.store.ns_identity(ns).map_err(|e| e.to_string())? {
         let me: [u8; 32] = keywrap::public(&identity)[32..].try_into().unwrap();
