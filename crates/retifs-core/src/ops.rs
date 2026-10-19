@@ -106,7 +106,7 @@ impl OpsFile {
     }
 }
 
-fn write_op(out: &mut Vec<u8>, op: &Op) {
+pub(crate) fn write_op(out: &mut Vec<u8>, op: &Op) {
     match op {
         Op::Set(id, k, v) => {
             write_array_len(out, 4);
@@ -173,7 +173,7 @@ fn write_op(out: &mut Vec<u8>, op: &Op) {
     }
 }
 
-fn read_op(r: &mut Reader) -> Result<Op, RecordError> {
+pub(crate) fn read_op(r: &mut Reader) -> Result<Op, RecordError> {
     let n = r.array_len()?;
     let tag = r.str()?;
     let id = |r: &mut Reader| -> Result<RecordId, RecordError> {
@@ -377,9 +377,18 @@ pub fn accepted(chain: &[WriterCommit], now_ms: u64) -> Vec<&WriterCommit> {
 /// A namespace's state as a CRDT (ADR-0017): every field keeps the stamp
 /// that set it, so data operations apply one at a time, in any order, with
 /// the same result as [`merge`]'s replay. Control operations form a timeline
-/// evaluated as a whole; a new one means rebuilding with [`State::build`].
+/// evaluated as a whole. A new one is added in place if it's newer than every
+/// data operation seen (it can't change what they meant); otherwise the
+/// state has to be rebuilt from the chains with [`State::build`].
 #[derive(Debug, Clone, Default)]
 pub struct State {
+    creator: WriterKey,
+    /// Every control operation seen, valid or not, by stamp.
+    control: Vec<(Stamp, Op)>,
+    /// The highest stamp of any data operation seen (applied or ignored).
+    high: Option<Stamp>,
+    ignored_control: usize,
+    ignored_data: usize,
     /// Each writer's rights over time: (from stamp, rights; None once revoked).
     rights: BTreeMap<WriterKey, RightsTimeline>,
     identities: BTreeMap<WriterKey, [u8; 64]>,
@@ -389,7 +398,6 @@ pub struct State {
     /// Latest set or blocks per record: it exists if newer than its latest delete.
     live: BTreeMap<RecordId, Stamp>,
     deleted: BTreeMap<RecordId, Stamp>,
-    pub ignored_ops: usize,
 }
 
 const ZERO: Stamp = (0, [0; 32], 0, 0);
@@ -401,36 +409,76 @@ impl State {
     /// A state with this control timeline and no data yet.
     pub fn with_control(creator: &WriterKey, mut control: Vec<(Stamp, Op)>) -> State {
         control.sort_by_key(|(s, _)| *s);
-        let mut st = State::default();
-        st.rights.insert(*creator, vec![(ZERO, Some(vec![Right::Grant, Right::Write]))]);
-        for (s, op) in control {
+        let mut st = State { creator: *creator, control, ..Default::default() };
+        st.timeline();
+        st
+    }
+
+    /// Re-evaluates the control operations: rights, identities, rekeys.
+    fn timeline(&mut self) {
+        let creator = self.creator;
+        self.rights = BTreeMap::from([(creator, vec![(ZERO, Some(vec![Right::Grant, Right::Write]))])]);
+        self.identities.clear();
+        self.rekeys.clear();
+        self.ignored_control = 0;
+        let control = std::mem::take(&mut self.control);
+        for (s, op) in &control {
             let writer = s.1;
-            let can_grant = st.has(&writer, Right::Grant, &s);
+            let can_grant = self.has(&writer, Right::Grant, s);
             match op {
                 Op::Identity(p) => {
                     if p[32..] == writer {
-                        st.identities.insert(writer, p);
+                        self.identities.insert(writer, *p);
                     } else {
-                        st.ignored_ops += 1;
+                        self.ignored_control += 1;
                     }
                 }
-                Op::Rekey(epoch, entries) if can_grant => st.rekeys.push(RekeyEvent { epoch, time_ms: s.0, by: writer, entries }),
-                Op::Grant(w, mut granted) if can_grant => {
-                    if w != *creator {
+                Op::Rekey(epoch, entries) if can_grant => {
+                    self.rekeys.push(RekeyEvent { epoch: *epoch, time_ms: s.0, by: writer, entries: entries.clone() })
+                }
+                Op::Grant(w, granted) if can_grant => {
+                    if *w != creator {
+                        let mut granted = granted.clone();
                         granted.sort();
                         granted.dedup();
-                        st.rights.entry(w).or_default().push((s, Some(granted)));
+                        self.rights.entry(*w).or_default().push((*s, Some(granted)));
                     }
                 }
                 Op::Revoke(w) if can_grant => {
-                    if w != *creator {
-                        st.rights.entry(w).or_default().push((s, None));
+                    if *w != creator {
+                        self.rights.entry(*w).or_default().push((*s, None));
                     }
                 }
-                _ => st.ignored_ops += 1,
+                _ => self.ignored_control += 1,
             }
         }
-        st
+        self.control = control;
+    }
+
+    /// Adds a control operation. Returns false, changing nothing, if a data
+    /// operation already seen is newer: its meaning may change, so the caller
+    /// rebuilds from the chains.
+    pub fn add_control(&mut self, s: Stamp, op: Op) -> bool {
+        if self.high.is_some_and(|h| h > s) {
+            return false;
+        }
+        if self.control.iter().any(|(c, _)| *c == s) {
+            return true;
+        }
+        let at = self.control.partition_point(|(c, _)| *c < s);
+        self.control.insert(at, (s, op));
+        self.timeline();
+        true
+    }
+
+    /// Every control operation seen, by stamp.
+    pub fn control(&self) -> &[(Stamp, Op)] {
+        &self.control
+    }
+
+    /// The highest stamp of any data operation seen.
+    pub fn high(&self) -> Option<Stamp> {
+        self.high
     }
 
     /// Whether `writer` held `right` just before stamp `at`.
@@ -446,8 +494,11 @@ impl State {
         if is_control(op) {
             return;
         }
+        if self.high.is_none_or(|h| s > h) {
+            self.high = Some(s);
+        }
         if !self.has(&s.1, Right::Write, &s) {
-            self.ignored_ops += 1;
+            self.ignored_data += 1;
             return;
         }
         let newer = |old: Option<&Stamp>| old.is_none_or(|o| s > *o);
@@ -480,14 +531,32 @@ impl State {
         }
     }
 
-    /// Applies a commit's data operations. Returns false if the commit has
-    /// control operations: the caller rebuilds with [`State::build`].
+    /// Applies one commit. Returns false if it has a control operation older
+    /// than data already seen: the caller rebuilds with [`State::build`].
     pub fn apply_commit(&mut self, writer: &WriterKey, c: &WriterCommit) -> bool {
-        if c.ops.iter().any(is_control) {
-            return false;
+        self.apply_commits(&[(*writer, c)])
+    }
+
+    /// Applies new commits: their control operations first, then their data,
+    /// so arrival order doesn't matter. Returns false (the state is then
+    /// incomplete) if a control operation is older than data already seen.
+    pub fn apply_commits(&mut self, commits: &[(WriterKey, &WriterCommit)]) -> bool {
+        let mut control: Vec<(Stamp, &Op)> = Vec::new();
+        for (w, c) in commits {
+            for (i, op) in c.ops.iter().enumerate().filter(|(_, op)| is_control(op)) {
+                control.push(((c.time_ms, *w, c.seq, i as u32), op));
+            }
         }
-        for (i, op) in c.ops.iter().enumerate() {
-            self.apply((c.time_ms, *writer, c.seq, i as u32), op);
+        control.sort_by_key(|(s, _)| *s);
+        for (s, op) in control {
+            if !self.add_control(s, op.clone()) {
+                return false;
+            }
+        }
+        for (w, c) in commits {
+            for (i, op) in c.ops.iter().enumerate() {
+                self.apply((c.time_ms, *w, c.seq, i as u32), op);
+            }
         }
         true
     }
@@ -551,7 +620,7 @@ impl State {
                 .iter()
                 .filter_map(|(w, t)| t.last().and_then(|(_, r)| r.clone()).map(|r| (*w, r)))
                 .collect(),
-            ignored_ops: self.ignored_ops,
+            ignored_ops: self.ignored_control + self.ignored_data,
             ignored_commits: 0,
         }
     }
@@ -572,7 +641,7 @@ pub struct StampedRecord {
     pub live: Option<Stamp>,
 }
 
-fn write_stamp(out: &mut Vec<u8>, s: &Stamp) {
+pub(crate) fn write_stamp(out: &mut Vec<u8>, s: &Stamp) {
     write_array_len(out, 4);
     crate::record::write_int(out, s.0 as i64);
     write_bin(out, &s.1);
@@ -580,7 +649,7 @@ fn write_stamp(out: &mut Vec<u8>, s: &Stamp) {
     crate::record::write_int(out, s.3 as i64);
 }
 
-fn read_stamp(r: &mut Reader) -> Result<Stamp, RecordError> {
+pub(crate) fn read_stamp(r: &mut Reader) -> Result<Stamp, RecordError> {
     if r.array_len()? != 4 {
         return Err(RecordError::Malformed("stamp"));
     }
@@ -597,7 +666,7 @@ fn read_stamp(r: &mut Reader) -> Result<Stamp, RecordError> {
     Ok((time, writer, seq, index as u32))
 }
 
-fn read_opt_stamp(r: &mut Reader) -> Result<Option<Stamp>, RecordError> {
+pub(crate) fn read_opt_stamp(r: &mut Reader) -> Result<Option<Stamp>, RecordError> {
     if r.0.first() == Some(&0xc0) {
         r.byte()?;
         return Ok(None);
@@ -716,24 +785,31 @@ impl State {
         out.into_iter().collect()
     }
 
-    /// Restores records' CRDT state (from a checkpoint) into a state that
-    /// already has its control timeline.
-    pub fn with_stamped(mut self, entries: impl IntoIterator<Item = (RecordId, StampedRecord)>) -> State {
+    /// Restores a state from a checkpoint: its control operations, highest
+    /// data stamp and records' CRDT state.
+    pub fn restore(
+        creator: &WriterKey,
+        control: Vec<(Stamp, Op)>,
+        high: Option<Stamp>,
+        entries: impl IntoIterator<Item = (RecordId, StampedRecord)>,
+    ) -> State {
+        let mut st = State::with_control(creator, control);
+        st.high = high;
         for (id, r) in entries {
             if let Some(s) = r.live {
-                self.live.insert(id, s);
+                st.live.insert(id, s);
             }
             if let Some(s) = r.deleted {
-                self.deleted.insert(id, s);
+                st.deleted.insert(id, s);
             }
             for (k, f) in r.fields {
-                self.fields.insert((id, k), f);
+                st.fields.insert((id, k), f);
             }
             if let Some(b) = r.blocks {
-                self.blocks.insert(id, b);
+                st.blocks.insert(id, b);
             }
         }
-        self
+        st
     }
 }
 
@@ -897,92 +973,6 @@ mod tests {
                 st.apply(*s, op);
             }
             assert_eq!(st.records(), expect.records, "shuffled order");
-        }
-    }
-
-    /// A checkpoint (the state stored as a Prolly tree) plus the operations
-    /// after it gives exactly what replaying everything gives.
-    #[test]
-    fn checkpoint_then_more_operations_equals_full_replay() {
-        use crate::{manifest::Store, prolly, secret::ConvergenceSecret, Cid};
-        #[derive(Default)]
-        struct Mem(std::collections::HashMap<Cid, Vec<u8>>);
-        impl Store for Mem {
-            type Error = std::convert::Infallible;
-            fn put(&mut self, cid: Cid, ct: Vec<u8>) -> Result<(), Self::Error> {
-                self.0.insert(cid, ct);
-                Ok(())
-            }
-            fn get(&self, cid: &Cid) -> Result<Option<Vec<u8>>, Self::Error> {
-                Ok(self.0.get(cid).cloned())
-            }
-        }
-        let mut seed = 0x2545_f491_4f6c_dd1du64;
-        let mut rnd = move |n: u64| {
-            seed ^= seed << 13;
-            seed ^= seed >> 7;
-            seed ^= seed << 17;
-            seed % n
-        };
-        let writers = [ALICE, BOB];
-        let ids: Vec<RecordId> = (0..6u8).map(|i| [i; 16]).collect();
-        let mut store = Mem::default();
-        let secret = ConvergenceSecret::for_record(&[1; 32], b"checkpoint test");
-        for _ in 0..300 {
-            let mut chains: BTreeMap<WriterKey, Vec<WriterCommit>> = BTreeMap::new();
-            chains.insert(ALICE, vec![WriterCommit { seq: 1, time_ms: 1, ops: vec![Op::Grant(BOB, vec![Right::Write])] }]);
-            let mut t = 1;
-            for round in 0..12 {
-                t += rnd(3);
-                let w = writers[rnd(2) as usize];
-                let ops = (0..1 + rnd(3))
-                    .map(|_| {
-                        let id = ids[rnd(6) as usize];
-                        let k = ["a", "b"][rnd(2) as usize].to_string();
-                        match rnd(6) {
-                            0 | 1 => Op::Set(id, k, if rnd(3) == 0 { Value::Null } else { Value::Int(rnd(9) as i64) }),
-                            2 => Op::Unset(id, k),
-                            3 => Op::Blocks(id, vec![]),
-                            _ => Op::Delete(id),
-                        }
-                    })
-                    .collect();
-                let list = chains.entry(w).or_default();
-                let seq = list.len() as u64 + 1;
-                list.push(WriterCommit { seq, time_ms: t, ops });
-                if round == 6 {
-                    // Checkpoint here: the state as a tree, restored, then the rest applied.
-                    let st = State::build(&ALICE, &chains, 10_000);
-                    let entries: Vec<(RecordId, Vec<u8>)> = st.stamped().into_iter().map(|(id, r)| (id, r.encode())).collect();
-                    let root = prolly::build(&mut store, &secret, entries).unwrap();
-                    let restored_entries = match root {
-                        Some(root) => prolly::read_all(&store, &root).unwrap(),
-                        None => Vec::new(),
-                    };
-                    let control = vec![((1, ALICE, 1, 0), Op::Grant(BOB, vec![Right::Write]))];
-                    let mut restored = State::with_control(&ALICE, control)
-                        .with_stamped(restored_entries.into_iter().map(|(id, b)| (id, StampedRecord::decode(&b).unwrap())));
-                    assert_eq!(restored.records(), st.records(), "restored checkpoint");
-                    // Keep going from the checkpoint with later commits.
-                    let snapshot_len: BTreeMap<WriterKey, usize> = chains.iter().map(|(w, c)| (*w, c.len())).collect();
-                    for _ in 0..5 {
-                        t += rnd(3);
-                        let w = writers[rnd(2) as usize];
-                        let id = ids[rnd(6) as usize];
-                        let op = if rnd(2) == 0 { Op::Set(id, "a".into(), Value::Int(rnd(9) as i64)) } else { Op::Delete(id) };
-                        let list = chains.entry(w).or_default();
-                        let seq = list.len() as u64 + 1;
-                        list.push(WriterCommit { seq, time_ms: t, ops: vec![op] });
-                    }
-                    for (w, chain) in &chains {
-                        for c in &chain[snapshot_len.get(w).copied().unwrap_or(0)..] {
-                            restored.apply_commit(w, c);
-                        }
-                    }
-                    assert_eq!(restored.records(), merge(&ALICE, &chains, 10_000).records, "checkpoint + later commits");
-                    break;
-                }
-            }
         }
     }
 

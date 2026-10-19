@@ -5,6 +5,7 @@
 
 pub mod access;
 pub mod channel;
+pub mod checkpoint;
 pub mod chunk;
 pub mod chunker;
 pub mod cid;

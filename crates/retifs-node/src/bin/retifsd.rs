@@ -50,7 +50,9 @@ use retifs_core::{
     stamp,
     manifest::{self, decode_node, decode_root, NodeEntry},
     keywrap,
-    ops::{is_control, merge, Op, OpsFile, Right, State, WriterCommit, MAX_CLOCK_AHEAD_MS},
+    checkpoint::{state_secret, Checkpoint, Frontier},
+    ops::{merge, Op, OpsFile, Right, State, WriterCommit, MAX_CLOCK_AHEAD_MS},
+    prolly,
     record::{Record, RecordId, Snapshot, Value},
     open, ChunkToken, Cid, ConvergenceSecret, FileRef,
 };
@@ -1191,7 +1193,7 @@ fn parse_writer(s: &str) -> Result<[u8; 32], String> {
 
 fn ns_view(d: &Daemon, ns: &str) -> Result<NsView, String> {
     let merged = materialize(d, ns)?;
-    let (_, own, _) = chains(d, ns)?;
+    let (_, own, _) = chains(d, ns, false)?;
     Ok(NsView {
         name: ns.to_string(),
         address: current_addr(d, ns)?.to_string(),
@@ -1230,7 +1232,7 @@ async fn sync_ns(d: &Daemon, ns: &str) -> Result<(), String> {
     if peers.is_empty() {
         return Ok(());
     }
-    let (addr, own, _) = chains(d, ns)?;
+    let (addr, own, _) = chains(d, ns, false)?;
     let ns_id = addr.ns_id();
     let mut changed = false;
     for peer in peers {
@@ -1451,15 +1453,29 @@ struct NsCache {
     chains: HashMap<[u8; 32], Vec<Walked>>,
     records: Option<std::collections::BTreeMap<RecordId, Record>>,
     /// The merged state as a CRDT, and how far each writer's chain is applied
-    /// (sequence number, commit time): new commits apply one by one.
+    /// (sequence number, commit time, commit): new commits apply one by one.
     state: Option<State>,
-    applied: HashMap<[u8; 32], (u64, u64)>,
+    applied: HashMap<[u8; 32], (u64, u64, Cid)>,
+    /// Resumed from a checkpoint: chains are walked back only to these
+    /// commits (the history before them is read only when a rebuild needs it).
+    floors: HashMap<[u8; 32], Cid>,
+    /// Commits applied since the last checkpoint.
+    since_checkpoint: usize,
 }
+
+/// A checkpoint is written after this many new commits (ADR-0018).
+const CHECKPOINT_EVERY: usize = 64;
 
 /// A writer's chain, oldest first, as far back as its commits and operations
 /// files are local. Only commits newer than `cached` are read from the store.
-fn walk_ops_chain(d: &Daemon, addr: &ChannelAddr, last: Option<(Cid, retifs_core::Seed)>, cached: &[Walked]) -> Vec<Walked> {
-    let stop = cached.last().map(|(_, cid, _)| *cid);
+fn walk_ops_chain(
+    d: &Daemon,
+    addr: &ChannelAddr,
+    last: Option<(Cid, retifs_core::Seed)>,
+    cached: &[Walked],
+    floor: Option<Cid>,
+) -> Vec<Walked> {
+    let stop = cached.last().map(|(_, cid, _)| *cid).or(floor);
     let mut newer = Vec::new();
     let mut next = last;
     let mut reached_cache = false;
@@ -1501,7 +1517,8 @@ fn walk_ops_chain(d: &Daemon, addr: &ChannelAddr, last: Option<(Cid, retifs_core
 type Chains = std::collections::BTreeMap<[u8; 32], Vec<(u64, WriterCommit)>>;
 
 /// Every writer chain of a namespace held here: this node's and the others'.
-fn chains(d: &Daemon, ns: &str) -> Result<(ChannelAddr, [u8; 32], Chains), String> {
+/// Resumed from a checkpoint, only commits after it, unless `full`.
+fn chains(d: &Daemon, ns: &str, full: bool) -> Result<(ChannelAddr, [u8; 32], Chains), String> {
     let addr = ensure_namespace(d, ns)?;
     let mut heads: Vec<([u8; 32], Option<CommitRef>)> = Vec::new();
     let mut own_writer = addr.writer;
@@ -1516,10 +1533,14 @@ fn chains(d: &Daemon, ns: &str) -> Result<(ChannelAddr, [u8; 32], Chains), Strin
     }
     let mut cache = d.ns_cache.lock().unwrap();
     let entry = cache.entry(ns.to_string()).or_default();
+    if full && !entry.floors.is_empty() {
+        entry.floors.clear();
+        entry.chains.clear();
+    }
     let mut out = Chains::new();
     for (writer, last) in heads {
         let cached = entry.chains.get(&writer).cloned().unwrap_or_default();
-        let walked = walk_ops_chain(d, &addr, last, &cached);
+        let walked = walk_ops_chain(d, &addr, last, &cached, entry.floors.get(&writer).copied());
         out.insert(writer, walked.iter().map(|(seq, _, c)| (*seq, c.clone())).collect());
         entry.chains.insert(writer, walked);
     }
@@ -1548,43 +1569,138 @@ fn apply_view(d: &Daemon, ns: &str, records: &[Record]) -> Result<(), String> {
     Ok(())
 }
 
+/// Resumes a namespace from its local checkpoint, if the cache is empty
+/// (after a restart): the state and the point each chain was applied to.
+fn resume(d: &Daemon, ns: &str) -> Result<(), String> {
+    if d.ns_cache.lock().unwrap().get(ns).is_some_and(|e| e.state.is_some()) {
+        return Ok(());
+    }
+    let Some(file) = d.store.ns_checkpoint(ns).map_err(|e| e.to_string())? else { return Ok(()) };
+    let Some((creator, _)) = d.store.ns_info(ns).map_err(|e| e.to_string())? else { return Ok(()) };
+    let loaded = manifest::read_all(&*d.store, &file)
+        .map_err(|e| e.to_string())
+        .and_then(|b| Checkpoint::decode(&b).map_err(|e| e.to_string()))
+        .and_then(|cp| cp.load(&*d.store, &creator).map(|st| (cp, st)).map_err(|e| e.to_string()));
+    let (cp, state) = match loaded {
+        Ok(x) => x,
+        Err(e) => {
+            println!("ns {ns}: checkpoint unusable ({e}); replaying the chains");
+            return Ok(());
+        }
+    };
+    let mut cache = d.ns_cache.lock().unwrap();
+    let entry = cache.entry(ns.to_string()).or_default();
+    entry.applied = cp.frontier.iter().map(|f| (f.writer, (f.seq, f.time_ms, f.commit))).collect();
+    entry.floors = cp.frontier.iter().map(|f| (f.writer, f.commit)).collect();
+    entry.chains.clear();
+    entry.state = Some(state);
+    entry.since_checkpoint = 0;
+    println!("ns {ns}: resumed from checkpoint ({} writer(s))", cp.frontier.len());
+    Ok(())
+}
+
+/// Stores the namespace's state as a checkpoint (ADR-0018): its records as a
+/// Prolly tree under the state secret, and the checkpoint file. The previous
+/// checkpoint's chunks that the new one doesn't share become evictable.
+fn save_checkpoint(d: &Daemon, ns: &str, state: &State, frontier: Vec<Frontier>) -> Result<FileRef, String> {
+    let addr = current_addr(d, ns)?;
+    let secret = state_secret(&addr.read_key);
+    let mut pinned = retifs_store::TrackedPinned::new(&d.store);
+    let cp = Checkpoint::save(&mut pinned, &secret, state, frontier).map_err(|e| e.to_string())?;
+    let (file, blobs) = manifest::write_tracked(&mut pinned, &secret, &cp.encode(), manifest::WriteOpts::default())
+        .map_err(|e| e.to_string())?;
+    let new_nodes = match &cp.state {
+        Some(root) => prolly::nodes(&*d.store, root).map_err(|e| e.to_string())?,
+        None => Vec::new(),
+    };
+    let mut tokens: Vec<_> = blobs.iter().map(|(c, s)| (*c, ChunkToken::for_seed(s))).collect();
+    tokens.extend(new_nodes.iter().map(|(c, s)| (*c, ChunkToken::for_seed(s))));
+    d.store.register_serving(&tokens).map_err(|e| e.to_string())?;
+    if let Some(old) = d.store.ns_checkpoint(ns).map_err(|e| e.to_string())?
+        && old.root != file.root
+    {
+        let keep: std::collections::HashSet<Cid> = tokens.iter().map(|(c, _)| *c).collect();
+        let mut gone: Vec<Cid> = file_chunks(&d.store, &old).unwrap_or_default().into_iter().map(|(c, _)| c).collect();
+        if let Some(old_root) = manifest::read_all(&*d.store, &old).ok().and_then(|b| Checkpoint::decode(&b).ok()).and_then(|c| c.state) {
+            gone.extend(prolly::nodes(&*d.store, &old_root).unwrap_or_default().into_iter().map(|(c, _)| c));
+        }
+        gone.retain(|c| !keep.contains(c));
+        d.store.release_chunks(&gone).map_err(|e| e.to_string())?;
+    }
+    d.store.set_ns_checkpoint(ns, &file).map_err(|e| e.to_string())?;
+    Ok(file)
+}
+
 /// Rebuilds a namespace's local view by merging every writer chain held here.
 fn materialize(d: &Daemon, ns: &str) -> Result<retifs_core::ops::Merged, String> {
-    let (addr, _, chains) = chains(d, ns)?;
+    resume(d, ns)?;
+    let (addr, _, mut chains) = chains(d, ns, false)?;
     let now = now_ms();
-    let merged = {
+    let mut checkpoint = None;
+    let merged = loop {
         let mut cache = d.ns_cache.lock().unwrap();
         let entry = cache.entry(ns.to_string()).or_default();
-        // Apply only the new commits, unless one changes rights (grant, revoke,
-        // identity, rekey) or is misdated: then rebuild from every chain.
+        // Apply only the new commits, unless one is misdated or brings a
+        // control operation older than data already applied: then rebuild
+        // from every chain (whole, if resumed from a checkpoint).
         let mut rebuild = entry.state.is_none();
         let mut new = Vec::new();
         if !rebuild {
             for (w, chain) in &chains {
-                let (done, last_time) = entry.applied.get(w).copied().unwrap_or((0, 0));
+                let (done, last_time, _) = entry.applied.get(w).copied().unwrap_or((0, 0, Cid::of(b"")));
                 for (seq, c) in chain.iter().filter(|(seq, _)| *seq > done) {
-                    if c.ops.iter().any(is_control) || c.time_ms < last_time || c.time_ms > now + MAX_CLOCK_AHEAD_MS {
+                    if c.time_ms < last_time || c.time_ms > now + MAX_CLOCK_AHEAD_MS {
                         rebuild = true;
                     }
                     new.push((*w, *seq, c));
                 }
             }
+            if !rebuild {
+                let commits: Vec<([u8; 32], &WriterCommit)> = new.iter().map(|(w, _, c)| (*w, *c)).collect();
+                rebuild = !entry.state.as_mut().expect("checked").apply_commits(&commits);
+            }
         }
+        if rebuild && !entry.floors.is_empty() {
+            // The history before the checkpoint is needed: walk the chains whole.
+            entry.state = None;
+            drop(cache);
+            chains = self::chains(d, ns, true)?.2;
+            continue;
+        }
+        let cids: HashMap<[u8; 32], Cid> =
+            entry.chains.iter().filter_map(|(w, c)| c.last().map(|(_, cid, _)| (*w, *cid))).collect();
         if rebuild {
             let plain = chains.iter().map(|(w, c)| (*w, c.iter().map(|(_, c)| c.clone()).collect())).collect();
             entry.state = Some(State::build(&addr.writer, &plain, now));
             entry.applied = chains
                 .iter()
-                .filter_map(|(w, c)| c.last().map(|(seq, wc)| (*w, (*seq, wc.time_ms))))
+                .filter_map(|(w, c)| c.last().map(|(seq, wc)| (*w, (*seq, wc.time_ms, cids[w]))))
                 .collect();
-        } else if let Some(state) = entry.state.as_mut() {
+            entry.since_checkpoint += chains.values().map(Vec::len).sum::<usize>();
+        } else {
+            entry.since_checkpoint += new.len();
             for (w, seq, c) in new {
-                state.apply_commit(&w, c);
-                entry.applied.insert(w, (seq, c.time_ms));
+                entry.applied.insert(w, (seq, c.time_ms, cids[&w]));
             }
         }
-        entry.state.as_ref().expect("built above").merged()
+        let state = entry.state.as_ref().expect("built above");
+        if entry.since_checkpoint >= CHECKPOINT_EVERY {
+            entry.since_checkpoint = 0;
+            let frontier = entry
+                .applied
+                .iter()
+                .map(|(w, (seq, time_ms, commit))| Frontier { writer: *w, seq: *seq, time_ms: *time_ms, commit: *commit })
+                .collect();
+            checkpoint = Some((state.clone(), frontier));
+        }
+        break state.merged();
     };
+    if let Some((state, frontier)) = checkpoint {
+        match save_checkpoint(d, ns, &state, frontier) {
+            Ok(file) => println!("ns {ns}: checkpoint {file}"),
+            Err(e) => println!("ns {ns}: checkpoint failed: {e}"),
+        }
+    }
     apply_view(d, ns, &merged.records)?;
     // Rotated read keys wrapped to this node: take them, newest last.
     if let Some(identity) = d.store.ns_identity(ns).map_err(|e| e.to_string())? {
@@ -1609,7 +1725,7 @@ fn versions(d: &Daemon, ns: &str) -> Result<Vec<(u64, u64, Vec<Record>)>, String
     if ns.starts_with("ch-") || d.store.ns_info(ns).map_err(|e| e.to_string())?.is_none() {
         return Err(format!("{ns} has no version history here"));
     }
-    let (addr, own, chains) = chains(d, ns)?;
+    let (addr, own, chains) = chains(d, ns, true)?;
     let own_chain = chains.get(&own).cloned().unwrap_or_default();
     let mut out = Vec::new();
     for (seq, c) in own_chain.iter().rev() {

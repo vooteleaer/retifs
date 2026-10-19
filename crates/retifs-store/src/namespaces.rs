@@ -23,6 +23,8 @@ const NS_PEERS: TableDefinition<&str, &[u8]> = TableDefinition::new("ns_peers");
 const NS_IDENTITY: TableDefinition<&str, &[u8]> = TableDefinition::new("ns_identity");
 const NS_KEYS: TableDefinition<&str, &[u8]> = TableDefinition::new("ns_keys");
 const KEY_HEADS: TableDefinition<&[u8], &[u8]> = TableDefinition::new("key_heads");
+/// Namespace name → its latest local checkpoint file (root ‖ seed ‖ u64 size).
+const NS_CHECKPOINT: TableDefinition<&str, &[u8]> = TableDefinition::new("ns_checkpoint");
 
 pub(crate) fn open_tables(w: &redb::WriteTransaction) -> Result<(), StoreError> {
     w.open_table(NS_INFO)?;
@@ -32,6 +34,7 @@ pub(crate) fn open_tables(w: &redb::WriteTransaction) -> Result<(), StoreError> 
     w.open_table(NS_IDENTITY)?;
     w.open_table(NS_KEYS)?;
     w.open_table(KEY_HEADS)?;
+    w.open_table(NS_CHECKPOINT)?;
     Ok(())
 }
 
@@ -68,6 +71,27 @@ impl SlabStore {
     pub fn set_ns_identity(&self, name: &str, identity: &[u8; 64]) -> Result<(), StoreError> {
         let w = self.db.begin_write()?;
         w.open_table(NS_IDENTITY)?.insert(name, identity.as_slice())?;
+        w.commit()?;
+        Ok(())
+    }
+
+    /// The namespace's latest checkpoint file kept here (ADR-0018).
+    pub fn ns_checkpoint(&self, name: &str) -> Result<Option<retifs_core::FileRef>, StoreError> {
+        let r = self.db.begin_read()?;
+        Ok(r.open_table(NS_CHECKPOINT)?.get(name)?.and_then(|v| {
+            let v = v.value();
+            (v.len() == 73).then(|| retifs_core::FileRef {
+                root: Cid::from_bytes(v[..33].try_into().unwrap()).expect("CID version"),
+                seed: Seed(v[33..65].try_into().unwrap()),
+                size: u64::from_be_bytes(v[65..73].try_into().unwrap()),
+            })
+        }))
+    }
+
+    pub fn set_ns_checkpoint(&self, name: &str, file: &retifs_core::FileRef) -> Result<(), StoreError> {
+        let v = [file.root.as_bytes().as_slice(), &file.seed.0, &file.size.to_be_bytes()].concat();
+        let w = self.db.begin_write()?;
+        w.open_table(NS_CHECKPOINT)?.insert(name, v.as_slice())?;
         w.commit()?;
         Ok(())
     }

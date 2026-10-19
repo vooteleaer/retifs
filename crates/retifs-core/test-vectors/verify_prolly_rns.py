@@ -2,7 +2,10 @@
 """Cross-checks prolly-v1.json: re-encodes the stamped records with RNS's
 umsgpack and rebuilds every Prolly tree independently (ADR-0018) — boundary
 rule, size cut, node encoding, and sealing with RNS primitives (ADR-0008) —
-comparing the root CID, root seed and the full set of node CIDs.
+comparing the root CID, root seed and the full set of node CIDs. For the
+checkpoint, replays the chains independently into stamped records (last
+writer wins per field, rights at each stamp), builds the state tree under
+HKDF(read key, "retifs/v1/state") and re-encodes the checkpoint.
 
     python verify_prolly_rns.py [prolly-v1.json]
 """
@@ -13,7 +16,9 @@ import sys
 from pathlib import Path
 
 import RNS.vendor.umsgpack as umsgpack
+from RNS.Cryptography.HKDF import hkdf
 
+from verify_ops_rns import op as ops_op
 from verify_rns import seal
 
 CLASSES = [1 << k for k in range(10, 19)]
@@ -99,6 +104,79 @@ def build(doc, secret, entries):
     return level[0][1], store
 
 
+CONTROL = ("grant", "revoke", "identity", "rekey")
+
+
+def stamped_state(creator, chains):
+    """Sequential replay in stamp order; the last applied operation per field wins."""
+    events = []
+    for writer, commits in chains.items():
+        for c in commits:
+            for i, o in enumerate(c["ops"]):
+                events.append(((c["time_ms"], writer, c["seq"], i), ops_op(o)))
+    events.sort(key=lambda e: e[0])
+    rights = {creator: {"grant", "write"}}
+    control, high, recs = [], None, {}
+    for s, o in events:
+        stamp = [s[0], s[1], s[2], s[3]]
+        tag, w = o[0], s[1]
+        if tag in CONTROL:
+            control.append([stamp, o])
+            if tag in ("grant", "revoke") and "grant" in rights.get(w, ()) and o[1] != creator:
+                if tag == "grant":
+                    rights[o[1]] = set(o[2])
+                else:
+                    rights.pop(o[1], None)
+            continue
+        high = stamp
+        if "write" not in rights.get(w, ()):
+            continue
+        r = recs.setdefault(o[1], {"blocks": None, "deleted": None, "fields": {}, "live": None})
+        if tag == "set":
+            r["fields"][o[2]] = [stamp, o[3]]
+            r["live"] = stamp
+        elif tag == "unset":
+            r["fields"][o[2]] = [stamp]
+        elif tag == "blocks":
+            r["blocks"] = [stamp, o[2]]
+            r["live"] = stamp
+        elif tag == "delete":
+            r["deleted"] = stamp
+    for r in recs.values():
+        r["fields"] = {k: r["fields"][k] for k in sorted(r["fields"], key=lambda k: k.encode("utf-8"))}
+    return control, high, recs
+
+
+def visible(recs):
+    n = 0
+    for r in recs.values():
+        if r["live"] is not None and (r["deleted"] is None or r["live"] > r["deleted"]):
+            n += 1
+    return n
+
+
+def check_checkpoint(doc, checks):
+    v = doc["checkpoint"]
+    creator = bytes.fromhex(v["creator"])
+    chains = {bytes.fromhex(c["writer"]): c["commits"] for c in v["chains"]}
+    control, high, recs = stamped_state(creator, chains)
+    secret = hkdf(32, bytes.fromhex(v["read_key"]), b"retifs/v1/record", b"retifs/v1/state")
+    (cid, seed), store = build(doc, secret, sorted(recs.items()))
+    checks["checkpoint state root cid"] = cid.hex() == v["state_root_cid"]
+    checks["checkpoint state root seed"] = seed.hex() == v["state_root_seed"]
+    checks[f"checkpoint state nodes ({len(store)})"] = sorted(c.hex() for c in store) == v["state_nodes"]
+    checks["checkpoint visible records"] = visible(recs) == v["visible_records"]
+    frontier = [[bytes.fromhex(w), s, t, bytes.fromhex(c)] for w, s, t, c in v["frontier"]]
+    cp = {
+        "control": control,
+        "frontier": frontier,
+        "high": high,
+        "retifs": "ns-checkpoint/1",
+        "state": [cid, seed],
+    }
+    checks["checkpoint encoding"] = umsgpack.packb(cp).hex() == v["encoded"]
+
+
 def key(i):
     return hashlib.sha256(struct.pack(">I", i) + bytes(12)).digest()[:16]
 
@@ -128,6 +206,7 @@ def main():
         checks[f"tree '{t['name']}' root cid"] = cid.hex() == res["root_cid"]
         checks[f"tree '{t['name']}' root seed"] = seed.hex() == res["root_seed"]
         checks[f"tree '{t['name']}' nodes ({len(store)})"] = sorted(c.hex() for c in store) == res["nodes"]
+    check_checkpoint(doc, checks)
     trees = {t["name"]: set(t["result"]["nodes"]) for t in doc["trees"]}
     names = [t["name"] for t in doc["trees"]]
     new = len(trees[names[1]] - trees[names[0]])

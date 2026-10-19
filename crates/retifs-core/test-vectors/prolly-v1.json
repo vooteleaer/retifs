@@ -1,4 +1,174 @@
 {
+  "checkpoint": {
+    "chains": [
+      {
+        "commits": [
+          {
+            "ops": [
+              [
+                "grant",
+                "b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0",
+                [
+                  "write"
+                ]
+              ],
+              [
+                "set",
+                "01010101010101010101010101010101",
+                "title",
+                {
+                  "t": "str",
+                  "v": "Home"
+                }
+              ],
+              [
+                "set",
+                "03030303030303030303030303030303",
+                "x",
+                {
+                  "t": "int",
+                  "v": 1
+                }
+              ]
+            ],
+            "seq": 1,
+            "time_ms": 1000
+          },
+          {
+            "ops": [
+              [
+                "revoke",
+                "b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0"
+              ],
+              [
+                "unset",
+                "01010101010101010101010101010101",
+                "draft"
+              ],
+              [
+                "delete",
+                "03030303030303030303030303030303"
+              ]
+            ],
+            "seq": 2,
+            "time_ms": 3000
+          },
+          {
+            "ops": [
+              [
+                "set",
+                "01010101010101010101010101010101",
+                "title",
+                {
+                  "t": "str",
+                  "v": "Front page"
+                }
+              ]
+            ],
+            "seq": 3,
+            "time_ms": 3000
+          }
+        ],
+        "writer": "a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1"
+      },
+      {
+        "commits": [
+          {
+            "ops": [
+              [
+                "set",
+                "01010101010101010101010101010101",
+                "draft",
+                {
+                  "t": "bool",
+                  "v": true
+                }
+              ],
+              [
+                "blocks",
+                "02020202020202020202020202020202",
+                [
+                  [
+                    "01aff6100bd4df0ea66736e1d3304208069a0f24303e21b43422398c935540a236",
+                    "4242424242424242424242424242424242424242424242424242424242424242",
+                    52000
+                  ]
+                ]
+              ]
+            ],
+            "seq": 1,
+            "time_ms": 2000
+          },
+          {
+            "ops": [
+              [
+                "set",
+                "01010101010101010101010101010101",
+                "title",
+                {
+                  "t": "str",
+                  "v": "Bob was here"
+                }
+              ]
+            ],
+            "seq": 2,
+            "time_ms": 4000
+          }
+        ],
+        "writer": "b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0"
+      },
+      {
+        "commits": [
+          {
+            "ops": [
+              [
+                "set",
+                "02020202020202020202020202020202",
+                "owner",
+                {
+                  "t": "str",
+                  "v": "eve"
+                }
+              ]
+            ],
+            "seq": 1,
+            "time_ms": 2500
+          }
+        ],
+        "writer": "e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5"
+      }
+    ],
+    "creator": "a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1",
+    "encoded": "85a7636f6e74726f6c929294cd03e8c420a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1010093a56772616e74c420b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b091a577726974659294cd0bb8c420a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1020092a67265766f6b65c420b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0a866726f6e746965729394c420a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a103cd0bb8c42101c8ca6dad73d6cf433cd188a37a888fdac7ae326880033d472e11f8f4692bb24194c420b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b002cd0fa0c421013dfde10a1783a35e294bff2ec72d207c934aec0e483002adcf90f87e97b34cc594c420e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e501cd09c4c421013fad96a9d3c766616d9239f555bc5f093a8a18578ddc2ccfa12e4ea14e199059a46869676894cd0fa0c420b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b00200a6726574696673af6e732d636865636b706f696e742f31a5737461746592c4210156b52cd081193e0431110aac9c4bec7316dedea22b6fa00a6a7e8210e14f76a3c42019cc4fe5f18576ec701d33627b5989c4ca576b0450a1755bafefc3b729599081",
+    "frontier": [
+      [
+        "a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1",
+        3,
+        3000,
+        "01c8ca6dad73d6cf433cd188a37a888fdac7ae326880033d472e11f8f4692bb241"
+      ],
+      [
+        "b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0",
+        2,
+        4000,
+        "013dfde10a1783a35e294bff2ec72d207c934aec0e483002adcf90f87e97b34cc5"
+      ],
+      [
+        "e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5",
+        1,
+        2500,
+        "013fad96a9d3c766616d9239f555bc5f093a8a18578ddc2ccfa12e4ea14e199059"
+      ]
+    ],
+    "now_ms": 10000,
+    "read_key": "5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a",
+    "state_nodes": [
+      "0156b52cd081193e0431110aac9c4bec7316dedea22b6fa00a6a7e8210e14f76a3"
+    ],
+    "state_root_cid": "0156b52cd081193e0431110aac9c4bec7316dedea22b6fa00a6a7e8210e14f76a3",
+    "state_root_seed": "19cc4fe5f18576ec701d33627b5989c4ca576b0450a1755bafefc3b729599081",
+    "visible_records": 2
+  },
   "description": "retifs Prolly trees v1 (ADR-0018). Stamped records are canonical msgpack; a tree's nodes are sealed (ADR-0008) under `secret` with the personal scheme. Entry keys: SHA-256(u32_be(i) ‖ 12 zero bytes)[..16]; small values: msgpack str \"value <i>\"; large values: msgpack bin 16 of 4000 bytes equal to i mod 256.",
   "fanout": 32,
   "max_node": 65536,

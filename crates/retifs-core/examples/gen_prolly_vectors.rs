@@ -1,11 +1,12 @@
-//! Regenerates `test-vectors/prolly-v1.json` (ADR-0018: stamped records and Prolly trees).
+//! Regenerates `test-vectors/prolly-v1.json` (ADR-0018: stamped records, Prolly trees, checkpoints).
 //!
 //!     cargo run -p retifs-core --example gen_prolly_vectors > crates/retifs-core/test-vectors/prolly-v1.json
 
-use std::collections::HashMap;
+use std::collections::{BTreeMap, HashMap};
 
 use retifs_core::{
-    ops::{Stamp, StampedRecord},
+    checkpoint::{state_secret, Checkpoint, Frontier},
+    ops::{Op, Right, Stamp, StampedRecord, State, WriterCommit},
     prolly,
     record::{RecordId, Value},
     Cid, ConvergenceSecret, FileRef, Seed, Store,
@@ -68,6 +69,87 @@ fn tree(secret: &ConvergenceSecret, entries: Vec<(RecordId, Vec<u8>)>) -> J {
     json!({"root_cid": cid.to_string(), "root_seed": hex::encode(seed.0), "nodes": nodes})
 }
 
+fn op(o: &Op) -> J {
+    match o {
+        Op::Set(id, k, x) => json!(["set", hex::encode(id), k, v(x)]),
+        Op::Unset(id, k) => json!(["unset", hex::encode(id), k]),
+        Op::Blocks(id, bs) => json!([
+            "blocks",
+            hex::encode(id),
+            bs.iter().map(|b| json!([b.root.to_string(), hex::encode(b.seed.0), b.size])).collect::<Vec<_>>()
+        ]),
+        Op::Delete(id) => json!(["delete", hex::encode(id)]),
+        Op::Grant(w, rs) => json!([
+            "grant",
+            hex::encode(w),
+            rs.iter().map(|r| if *r == Right::Grant { "grant" } else { "write" }).collect::<Vec<_>>()
+        ]),
+        Op::Revoke(w) => json!(["revoke", hex::encode(w)]),
+        Op::Identity(p) => json!(["identity", hex::encode(p)]),
+        Op::Rekey(e, entries) => json!(["rekey", e, entries.iter().map(|(w, x)| json!([hex::encode(w), hex::encode(x)])).collect::<Vec<_>>()]),
+    }
+}
+
+/// A small multi-writer history and its checkpoint: Bob is granted, writes,
+/// is revoked (his later write doesn't count), Eve is never granted.
+fn checkpoint_vector() -> J {
+    let (alice, bob, eve) = ([0xa1u8; 32], [0xb0u8; 32], [0xe5u8; 32]);
+    let (page, photo, gone) = ([0x01u8; 16], [0x02u8; 16], [0x03u8; 16]);
+    let s = |x: &str| Value::Str(x.into());
+    let block = FileRef { root: Cid::of(b"photo.jpg"), seed: Seed([0x42; 32]), size: 52_000 };
+    let mut chains: BTreeMap<[u8; 32], Vec<WriterCommit>> = BTreeMap::new();
+    chains.insert(
+        alice,
+        vec![
+            WriterCommit {
+                seq: 1,
+                time_ms: 1000,
+                ops: vec![Op::Grant(bob, vec![Right::Write]), Op::Set(page, "title".into(), s("Home")), Op::Set(gone, "x".into(), Value::Int(1))],
+            },
+            WriterCommit { seq: 2, time_ms: 3000, ops: vec![Op::Revoke(bob), Op::Unset(page, "draft".into()), Op::Delete(gone)] },
+            WriterCommit { seq: 3, time_ms: 3000, ops: vec![Op::Set(page, "title".into(), s("Front page"))] },
+        ],
+    );
+    chains.insert(
+        bob,
+        vec![
+            WriterCommit { seq: 1, time_ms: 2000, ops: vec![Op::Set(page, "draft".into(), Value::Bool(true)), Op::Blocks(photo, vec![block])] },
+            WriterCommit { seq: 2, time_ms: 4000, ops: vec![Op::Set(page, "title".into(), s("Bob was here"))] },
+        ],
+    );
+    chains.insert(eve, vec![WriterCommit { seq: 1, time_ms: 2500, ops: vec![Op::Set(photo, "owner".into(), s("eve"))] }]);
+    let state = State::build(&alice, &chains, 10_000);
+    let frontier: Vec<Frontier> = chains
+        .iter()
+        .map(|(w, c)| {
+            let last = c.last().unwrap();
+            Frontier { writer: *w, seq: last.seq, time_ms: last.time_ms, commit: Cid::of(&[&w[..1], &last.seq.to_be_bytes()[..]].concat()) }
+        })
+        .collect();
+    let read_key = [0x5au8; 32];
+    let mut store = Mem::default();
+    let cp = Checkpoint::save(&mut store, &state_secret(&read_key), &state, frontier.clone()).unwrap();
+    assert_eq!(cp.load(&store, &alice).unwrap().records(), state.records());
+    let (root_cid, root_seed) = cp.state.unwrap();
+    let mut nodes: Vec<String> = store.0.keys().map(|c| c.to_string()).collect();
+    nodes.sort();
+    json!({
+        "creator": hex::encode(alice),
+        "read_key": hex::encode(read_key),
+        "now_ms": 10_000,
+        "chains": chains.iter().map(|(w, cs)| json!({
+            "writer": hex::encode(w),
+            "commits": cs.iter().map(|c| json!({"seq": c.seq, "time_ms": c.time_ms, "ops": c.ops.iter().map(op).collect::<Vec<_>>()})).collect::<Vec<_>>(),
+        })).collect::<Vec<_>>(),
+        "frontier": frontier.iter().map(|f| json!([hex::encode(f.writer), f.seq, f.time_ms, f.commit.to_string()])).collect::<Vec<_>>(),
+        "state_root_cid": root_cid.to_string(),
+        "state_root_seed": hex::encode(root_seed.0),
+        "state_nodes": nodes,
+        "encoded": hex::encode(cp.encode()),
+        "visible_records": state.records().len(),
+    })
+}
+
 fn main() {
     let secret_bytes = [0x7au8; 32];
     let secret = ConvergenceSecret::personal(secret_bytes);
@@ -113,6 +195,7 @@ fn main() {
     large_entries.sort_by_key(|(k, _)| *k);
 
     let doc = json!({
+        "checkpoint": checkpoint_vector(),
         "description": "retifs Prolly trees v1 (ADR-0018). Stamped records are canonical msgpack; a tree's nodes are sealed (ADR-0008) under `secret` with the personal scheme. Entry keys: SHA-256(u32_be(i) ‖ 12 zero bytes)[..16]; small values: msgpack str \"value <i>\"; large values: msgpack bin 16 of 4000 bytes equal to i mod 256.",
         "fanout": prolly::FANOUT,
         "max_node": prolly::MAX_NODE,

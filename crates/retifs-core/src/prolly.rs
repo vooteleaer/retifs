@@ -256,6 +256,19 @@ pub fn read_all<S: Store>(store: &S, root: &Root) -> Result<Entries, TreeError<S
     Ok(out)
 }
 
+/// Every node of the tree (its chunks), root first.
+pub fn nodes<S: Store>(store: &S, root: &Root) -> Result<Vec<Root>, TreeError<S::Error>> {
+    let mut out = vec![*root];
+    let mut i = 0;
+    while i < out.len() {
+        if let Node::Internal(children) = read_node(store, &out[i])? {
+            out.extend(children.into_iter().map(|(_, c)| c));
+        }
+        i += 1;
+    }
+    Ok(out)
+}
+
 /// The leaf nodes under `root`, in key order (reads only internal nodes).
 fn leaves<S: Store>(store: &S, root: &Root) -> Result<Vec<Root>, TreeError<S::Error>> {
     match read_node(store, root)? {
