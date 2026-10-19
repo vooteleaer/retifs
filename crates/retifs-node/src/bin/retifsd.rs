@@ -878,14 +878,14 @@ async fn handle(d: &Daemon, req: Request) -> Result<Response, String> {
         }
 
         Request::ChannelPublish { name, data, compress } => {
-            let (seq, file) = publish_channel(d, &name, data, compress).await?;
+            let (seq, file) = publish_channel(d, &name, data, compress, 0).await?;
             Ok(Response::Published { seq, cap: file.to_string() })
         }
 
         Request::ChannelPublishNs { name, ns } => {
             let snap = Snapshot::new(d.store.records(&ns).map_err(|e| e.to_string())?).map_err(|e| e.to_string())?;
             println!("channel {name}: snapshot of {ns}, {} record(s)", snap.records.len());
-            let (seq, file) = publish_channel(d, &name, snap.encode(), true).await?;
+            let (seq, file) = publish_channel(d, &name, snap.encode(), true, 0).await?;
             Ok(Response::Published { seq, cap: file.to_string() })
         }
 
@@ -1166,7 +1166,8 @@ fn full_status(d: &Daemon, cap: &FileRef) -> Status {
 
 /// Stores `data` as the channel's next version: a commit linking the last one,
 /// and a new signed head (ADR-0015).
-async fn publish_channel(d: &Daemon, name: &str, data: Vec<u8>, compress: bool) -> Result<(u64, FileRef), String> {
+/// `not_before`: the commit's time is at least this (ms), whatever the clock says.
+async fn publish_channel(d: &Daemon, name: &str, data: Vec<u8>, compress: bool, not_before: u64) -> Result<(u64, FileRef), String> {
     let mut c = d.store.own_channel(name).map_err(|e| e.to_string())?.ok_or_else(|| format!("no channel {name}"))?;
     let store = d.store.clone();
     let opts = manifest::WriteOpts {
@@ -1179,7 +1180,7 @@ async fn publish_channel(d: &Daemon, name: &str, data: Vec<u8>, compress: bool) 
         .await
         .map_err(|e| e.to_string())??;
     let key = channel_key(d, &c);
-    let (_, sealed) = Commit::create(&key, c.seq + 1, now_ms(), c.last, file);
+    let (_, sealed) = Commit::create(&key, c.seq + 1, now_ms().max(not_before), c.last, file);
     d.store.insert(&sealed.cid, &sealed.ciphertext, tier::PINNED).map_err(|e| e.to_string())?;
     d.store.register_serving(&[(sealed.cid, ChunkToken::for_seed(&sealed.seed))]).map_err(|e| e.to_string())?;
     let mut iv = [0u8; 16];
@@ -1733,7 +1734,17 @@ async fn write_ops(d: &Daemon, ns: &str, mut ops: Vec<Op>) -> Result<u64, String
     if new && let Some(identity) = d.store.ns_identity(ns).map_err(|e| e.to_string())? {
         ops.insert(0, Op::Identity(keywrap::public(&identity)));
     }
-    let (seq, _) = publish_channel(d, &ns_channel(ns), OpsFile { ops }.encode(), false).await?;
+    // A hybrid logical clock (ADR-0017): a commit is never stamped before one
+    // already merged here. Otherwise a writer whose clock is behind the granter's
+    // would stamp its first writes before its own grant, and every reader
+    // would ignore them.
+    let not_before = if new {
+        0
+    } else {
+        materialize(d, ns)?;
+        d.ns_cache.lock().unwrap().get(ns).and_then(|e| e.applied.values().map(|(_, t, _)| t + 1).max()).unwrap_or(0)
+    };
+    let (seq, _) = publish_channel(d, &ns_channel(ns), OpsFile { ops }.encode(), false, not_before).await?;
     materialize(d, ns)?;
     Ok(seq)
 }

@@ -48,7 +48,10 @@ One commit is one modification (or one transaction): its operations take effect 
 - The writers are known from the grants, so a member learns new writers by merging.
 
 ### Left open (known limits)
-- **Clocks:** stamps use writers' clocks; a writer with a wrong clock wins or loses conflicts unfairly. Hybrid logical clocks could replace wall time later; the stamp is per commit, so this is contained.
+- **Clocks:** stamps use writers' clocks, so a writer with a wrong clock wins or loses conflicts unfairly. The stamp is per commit, so this is contained.
+  - Since 2026-10-19 writers use a hybrid logical clock: a commit's time is the later of the wall clock and 1 ms after the newest commit already merged. Readers are unchanged.
+  - This matters beyond fairness. Without it, a member whose clock is behind its granter's stamps its first writes before its own grant, and everyone ignores them. The live test that found this had a server clock 21 s ahead of a Raspberry Pi's.
+  - A clock far ahead still pulls everyone forward, bounded by the one-day limit.
 - **Revocation and keys:** the read key is shared; revoking a writer stops its later writes from counting but doesn't rotate the key (ADR-0006's rotation comes later). Writes made concurrently with a revocation count by stamp.
 - **Concurrent content:** ADR-0006 wants concurrent content versions kept until a merge commit; here the latest `blocks` wins for now.
 - **Filtered capabilities** (e.g. write only `type = document`) and expiry.
@@ -75,5 +78,5 @@ See the [threat model](../04-threat-model.md).
   - A revoked member still reads everything it had, and the rekey commit itself (learning only that it was revoked).
 - **Cost of a write stays flat (2026-10-19):** a write used to walk every writer's whole chain from the store and rewrite the whole view: per write 68 ms at 100 records, 123 ms at 500 (O(history)). The daemon now caches, per namespace, the walked chains (a new walk reads back only to the last cached commit; chains are append-only) and the merged view (only changed records are written). Measured: 60–77 ms per write from the first to the 2 000th record (2 000 writes in 127 s, mostly the CLI call, signing and fsync); a range query over 2 000 records takes 19 ms. The merge itself still replays all operations, in memory.
 - **Merge as a CRDT (2026-10-19):** `retifs_core::ops::State` keeps every field with the stamp that set it, and each record's latest write and latest delete; a data operation applies if it is newer, so operations apply one at a time in any order. Control operations (grant, revoke, identity, rekey) form a timeline evaluated as a whole, giving each writer's rights at any stamp. A property test checks the state against the sequential `merge` on 2 000 random cases (three writers, grants and revokes, deletes, same-millisecond commits), applied both in stamp order and shuffled; it found the same-millisecond ambiguity, fixed by putting `seq` in the stamp. The daemon now applies only new commits to the cached state, and rebuilds only when a new commit changes rights or is misdated. History, `--at`, multi-writer convergence and key rotation tests give the same results.
-- **Not yet:** filtered and expiring grants, hybrid logical clocks, keeping concurrent content versions side by side, checkpoints for new members (local checkpoints and resuming from them: [ADR-0018](0018-state-trees.md)), announcing new writers without a known peer.
+- **Not yet:** filtered and expiring grants, keeping concurrent content versions side by side, checkpoints for new members (local checkpoints and resuming from them: [ADR-0018](0018-state-trees.md)), announcing new writers without a known peer.
 
