@@ -120,6 +120,15 @@ pub enum Request {
     },
     /// Every version of a record, newest first (ADR-0006: every modification is a version).
     RecordHistory { ns: String, id: String },
+    /// The namespace's address: lets others read it, and join it if granted (ADR-0017).
+    NsAddress { ns: String },
+    /// Joins another's namespace under local name `ns`, with a new writer key
+    /// (returned; the creator grants it). `from`: other members' nodes.
+    NsJoin { ns: String, address: String, from: Vec<String> },
+    /// Grants a writer key `write` (and `grant` if asked); `from`: its node, to sync with.
+    NsGrant { ns: String, writer: String, grant: bool, from: Vec<String> },
+    NsRevoke { ns: String, writer: String },
+    NsInfo { ns: String },
 }
 
 /// An attribute value (ADR-0016).
@@ -155,6 +164,19 @@ impl std::fmt::Display for AttrValue {
             }
         }
     }
+}
+
+/// A multi-writer namespace as this node sees it.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct NsView {
+    pub name: String,
+    pub address: String,
+    /// This node's writer key for it (64 hex digits).
+    pub own_writer: String,
+    /// Writers with their rights ("grant", "write"), from the merged grants.
+    pub writers: Vec<(String, Vec<String>)>,
+    pub records: usize,
+    pub peers: usize,
 }
 
 /// One version of a namespace as seen by one record.
@@ -211,6 +233,7 @@ pub enum Response {
     History {
         entries: Vec<HistoryEntry>,
     },
+    Namespace(NsView),
     Error {
         message: String,
     },

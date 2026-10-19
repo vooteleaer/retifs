@@ -5,21 +5,24 @@
 //! NS_INFO          name → creator (32) ‖ read key (32)
 //! MEMBER_CHANNELS  channel name → ns_id (16)        own channels writing to another's namespace
 //! WRITER_HEADS     ns_id (16) ‖ writer (32) → latest head (258) ‖ commit cid (33) ‖ commit seed (32)
+//! NS_PEERS         name → peer (16) × n                 other members' nodes to sync with
 //! ```
 
 use redb::TableDefinition;
 use retifs_core::{channel::NsId, Cid, Seed};
 
-use crate::{SlabStore, StoreError};
+use crate::{wants::PeerId, SlabStore, StoreError};
 
 const NS_INFO: TableDefinition<&str, &[u8]> = TableDefinition::new("ns_info");
 const MEMBER_CHANNELS: TableDefinition<&str, &[u8]> = TableDefinition::new("member_channels");
 const WRITER_HEADS: TableDefinition<&[u8], &[u8]> = TableDefinition::new("writer_heads");
+const NS_PEERS: TableDefinition<&str, &[u8]> = TableDefinition::new("ns_peers");
 
 pub(crate) fn open_tables(w: &redb::WriteTransaction) -> Result<(), StoreError> {
     w.open_table(NS_INFO)?;
     w.open_table(MEMBER_CHANNELS)?;
     w.open_table(WRITER_HEADS)?;
+    w.open_table(NS_PEERS)?;
     Ok(())
 }
 
@@ -50,6 +53,36 @@ impl SlabStore {
             let v = v.value();
             (v[..32].try_into().unwrap(), v[32..64].try_into().unwrap())
         }))
+    }
+
+    /// Names of the namespaces this node writes or has joined.
+    pub fn ns_names(&self) -> Result<Vec<String>, StoreError> {
+        use redb::ReadableTable;
+        let r = self.db.begin_read()?;
+        let t = r.open_table(NS_INFO)?;
+        t.iter()?.map(|e| e.map(|(k, _)| k.value().to_string()).map_err(StoreError::from)).collect()
+    }
+
+    /// Nodes to sync namespace `name` with (other members).
+    pub fn add_ns_peers(&self, name: &str, peers: &[PeerId]) -> Result<(), StoreError> {
+        let mut all = self.ns_peers(name)?;
+        for p in peers {
+            if !all.contains(p) {
+                all.push(*p);
+            }
+        }
+        let w = self.db.begin_write()?;
+        w.open_table(NS_PEERS)?.insert(name, all.concat().as_slice())?;
+        w.commit()?;
+        Ok(())
+    }
+
+    pub fn ns_peers(&self, name: &str) -> Result<Vec<PeerId>, StoreError> {
+        let r = self.db.begin_read()?;
+        Ok(r.open_table(NS_PEERS)?
+            .get(name)?
+            .map(|v| v.value().chunks(16).filter_map(|p| p.try_into().ok()).collect())
+            .unwrap_or_default())
     }
 
     /// Own channel `channel` writes to namespace `ns_id` (not its own).

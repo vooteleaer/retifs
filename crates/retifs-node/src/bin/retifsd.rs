@@ -39,8 +39,8 @@ use std::{
 };
 
 use libretifs::{
-    read_frame, write_frame, AttrValue, ChannelInfo, Envelope, FollowInfo, GetStats, HistoryEntry, RecordView, Request,
-    Response, Status,
+    read_frame, write_frame, AttrValue, ChannelInfo, Envelope, FollowInfo, GetStats, HistoryEntry, NsView, RecordView,
+    Request, Response, Status,
     PROTOCOL_VERSION,
 };
 use personal_rns::prelude::*;
@@ -49,7 +49,7 @@ use retifs_core::{
     lease::{self, node_destination, Lease, LeaseId, LeaseKey, Receipt, Renewal},
     stamp,
     manifest::{self, decode_node, decode_root, NodeEntry},
-    ops::{merge, Op, OpsFile, WriterCommit},
+    ops::{merge, Op, OpsFile, Right, WriterCommit},
     record::{Record, RecordId, Snapshot, Value},
     open, ChunkToken, Cid, ConvergenceSecret, FileRef,
 };
@@ -263,12 +263,33 @@ impl RequestEndpoint<Arc<Shared>> for HeadEndpoint {
     const POLICY: RequestEndpointPolicy = RequestEndpointPolicy::AllowAll;
 
     async fn handle(mut context: RequestContext<'_, Arc<Shared>>) -> Result<(), Decline> {
-        let Ok(id) = <[u8; 16]>::try_from(context.data) else {
-            return Err(Decline::Ignore);
+        let store = &context.state.store;
+        let head = match context.data.len() {
+            16 => store.head_for(context.data.try_into().unwrap()).ok().flatten().unwrap_or_default(),
+            // ns_id ‖ writer: one writer's head of a multi-writer namespace (ADR-0017).
+            48 => writer_head_bytes(store, context.data[..16].try_into().unwrap(), context.data[16..].try_into().unwrap()),
+            _ => return Err(Decline::Ignore),
         };
-        let head = context.state.store.head_for(&id).ok().flatten().unwrap_or_default();
         context.respond(head)
     }
+}
+
+/// The latest head of `writer` in namespace `ns`: our own (as creator or
+/// member), or one we hold for another writer.
+fn writer_head_bytes(store: &SlabStore, ns: &[u8; 16], writer: &[u8; 32]) -> Vec<u8> {
+    for c in store.own_channels().unwrap_or_default() {
+        if c.head.is_empty() {
+            continue;
+        }
+        let key = match store.member_channel(&c.name).ok().flatten() {
+            Some(id) => ChannelKey::member(c.signing_seed, c.read_key, id),
+            None => ChannelKey::from_secrets(c.signing_seed, c.read_key),
+        };
+        if key.ns_id() == *ns && key.writer() == *writer {
+            return c.head;
+        }
+    }
+    store.writer_head(ns, writer).ok().flatten().map(|h| h.head).unwrap_or_default()
 }
 
 impl Shared {
@@ -459,6 +480,8 @@ struct Daemon {
     max_stamp_cost: u8,
     /// Wakes the follower loop (a channel was followed).
     follow_wake: Notify,
+    /// Wakes namespace sync (joined, granted).
+    ns_wake: Notify,
 }
 
 impl Daemon {
@@ -581,6 +604,7 @@ async fn serve(store: Arc<SlabStore>, identity: node::IdentitySecret, endpoint: 
         stamp_costs: Mutex::new(HashMap::new()),
         max_stamp_cost: args.max_stamp_cost,
         follow_wake: Notify::new(),
+        ns_wake: Notify::new(),
     });
     println!("attached to shared instance {of}");
     println!("serving {} chunks as retifs.node <{}>", store.len().unwrap_or(0), daemon.node_hex);
@@ -597,6 +621,7 @@ async fn serve(store: Arc<SlabStore>, identity: node::IdentitySecret, endpoint: 
     tokio::spawn(lease_puller(daemon.clone(), shared.clone()));
     tokio::spawn(lease_upkeep(daemon.clone()));
     tokio::spawn(follower(daemon.clone()));
+    tokio::spawn(ns_sync(daemon.clone()));
     let watcher = daemon.clone();
     tokio::spawn(async move {
         // Every retifs node is a storage node (ADR-0014). Prns doesn't pass
@@ -926,6 +951,45 @@ async fn handle(d: &Daemon, req: Request) -> Result<Response, String> {
             Ok(Response::Records { records: Vec::new() })
         }
 
+        Request::NsAddress { ns } => {
+            writable(&ns)?;
+            Ok(Response::Channel { address: ensure_namespace(d, &ns)?.to_string() })
+        }
+
+        Request::NsJoin { ns, address, from } => {
+            writable(&ns)?;
+            if d.store.ns_info(&ns).map_err(|e| e.to_string())?.is_some() {
+                return Err(format!("{ns} already exists here"));
+            }
+            let addr: ChannelAddr = address.parse().map_err(|e: retifs_core::channel::ChannelError| e.to_string())?;
+            let mut seed = [0u8; 32];
+            getrandom::fill(&mut seed).expect("OS entropy");
+            d.store.create_channel(&ns_channel(&ns), seed, addr.read_key).map_err(|e| e.to_string())?;
+            d.store.set_member_channel(&ns_channel(&ns), &addr.ns_id()).map_err(|e| e.to_string())?;
+            d.store.set_ns_info(&ns, &addr.writer, &addr.read_key).map_err(|e| e.to_string())?;
+            d.store.add_ns_peers(&ns, &parse_peers(&from)?).map_err(|e| e.to_string())?;
+            d.ns_wake.notify_one();
+            Ok(Response::Namespace(ns_view(d, &ns)?))
+        }
+
+        Request::NsGrant { ns, writer, grant, from } => {
+            writable(&ns)?;
+            let w = parse_writer(&writer)?;
+            let rights = if grant { vec![Right::Write, Right::Grant] } else { vec![Right::Write] };
+            write_ops(d, &ns, vec![Op::Grant(w, rights)]).await?;
+            d.store.add_ns_peers(&ns, &parse_peers(&from)?).map_err(|e| e.to_string())?;
+            d.ns_wake.notify_one();
+            Ok(Response::Namespace(ns_view(d, &ns)?))
+        }
+
+        Request::NsRevoke { ns, writer } => {
+            writable(&ns)?;
+            write_ops(d, &ns, vec![Op::Revoke(parse_writer(&writer)?)]).await?;
+            Ok(Response::Namespace(ns_view(d, &ns)?))
+        }
+
+        Request::NsInfo { ns } => Ok(Response::Namespace(ns_view(d, &ns)?)),
+
         Request::Query { ns, terms, at } => {
             let terms: Vec<retifs_store::Term> = terms.iter().map(|t| retifs_store::Term::parse(t)).collect::<Result<_, _>>()?;
             let found = match at {
@@ -1060,6 +1124,166 @@ fn version_files(store: &SlabStore, f: &FileRef) -> Vec<FileRef> {
         files.extend(snap.records.iter().flat_map(|r| r.blocks.iter().copied()));
     }
     files
+}
+
+fn parse_peers(from: &[String]) -> Result<Vec<PeerId>, String> {
+    from.iter()
+        .map(|h| parse_destination(h).map(|d| *d.as_bytes()).ok_or_else(|| format!("bad node hash {h}")))
+        .collect()
+}
+
+fn parse_writer(s: &str) -> Result<[u8; 32], String> {
+    let s = s.trim();
+    let bytes: Option<Vec<u8>> = (0..s.len()).step_by(2).map(|i| s.get(i..i + 2).and_then(|h| u8::from_str_radix(h, 16).ok())).collect();
+    bytes.and_then(|b| b.try_into().ok()).ok_or_else(|| format!("bad writer key {s} (64 hex digits)"))
+}
+
+fn ns_view(d: &Daemon, ns: &str) -> Result<NsView, String> {
+    let merged = materialize(d, ns)?;
+    let (addr, own, _) = chains(d, ns)?;
+    Ok(NsView {
+        name: ns.to_string(),
+        address: addr.to_string(),
+        own_writer: hex(&own),
+        writers: merged
+            .writers
+            .iter()
+            .map(|(w, rights)| (hex(w), rights.iter().map(|r| if *r == Right::Grant { "grant" } else { "write" }.to_string()).collect()))
+            .collect(),
+        records: merged.records.len(),
+        peers: d.store.ns_peers(ns).map_err(|e| e.to_string())?.len(),
+    })
+}
+
+/// Keeps joined and own namespaces in sync with their other members (ADR-0017):
+/// asks each peer for each known writer's head, fetches the commits and
+/// operations files missing here (pinned and served on, so members can sync
+/// from each other), merges, and seeks record content not held yet.
+async fn ns_sync(d: Arc<Daemon>) {
+    let mut tick = tokio::time::interval(Duration::from_secs(30));
+    loop {
+        tokio::select! {
+            _ = d.ns_wake.notified() => {}
+            _ = tick.tick() => {}
+        }
+        for ns in d.store.ns_names().unwrap_or_default() {
+            if let Err(e) = sync_ns(&d, &ns).await {
+                eprintln!("ns {ns}: {e}");
+            }
+        }
+    }
+}
+
+async fn sync_ns(d: &Daemon, ns: &str) -> Result<(), String> {
+    let peers = d.store.ns_peers(ns).map_err(|e| e.to_string())?;
+    if peers.is_empty() {
+        return Ok(());
+    }
+    let (addr, own, _) = chains(d, ns)?;
+    let ns_id = addr.ns_id();
+    let mut changed = false;
+    for peer in peers {
+        let link = match d.link_to(&peer).await {
+            Ok(l) => l,
+            Err(e) => {
+                eprintln!("ns {ns}: <{}> unreachable: {e}", hex(&peer));
+                continue;
+            }
+        };
+        // Writers known so far: the creator, the merged grants, heads already held.
+        let merged = materialize(d, ns)?;
+        let mut writers: std::collections::BTreeSet<[u8; 32]> = merged.writers.keys().copied().collect();
+        writers.insert(addr.writer);
+        writers.extend(d.store.writer_heads(&ns_id).map_err(|e| e.to_string())?.iter().map(|h| h.writer));
+        writers.remove(&own);
+        for w in writers {
+            let raw = match d.ask(link, HEAD_ENDPOINT, [ns_id.as_slice(), &w].concat()).await {
+                Ok(r) => r,
+                Err(e) => {
+                    d.drop_link(&peer);
+                    eprintln!("ns {ns}: <{}>: {e}", hex(&peer));
+                    break;
+                }
+            };
+            // No head here: an empty reply (Prns may deliver it as a short placeholder).
+            if raw.len() != retifs_core::channel::HEAD_LEN {
+                continue;
+            }
+            let head = Head::decode(&raw).map_err(|e| format!("bad head: {e}"))?;
+            if head.ns_id != ns_id || head.writer != w {
+                continue;
+            }
+            let known = d.store.writer_head(&ns_id, &w).map_err(|e| e.to_string())?;
+            if known.as_ref().and_then(|k| Head::decode(&k.head).ok()).is_some_and(|k| k.seq >= head.seq) {
+                continue; // nothing newer (and never go back)
+            }
+            let seed = head.commit_seed(&addr).map_err(|e| e.to_string())?;
+            let got = fetch_chain(d, link, &addr, (head.commit, seed), &w).await?;
+            d.store
+                .set_writer_head(&ns_id, &retifs_store::WriterHead { writer: w, head: raw, commit: (head.commit, seed) })
+                .map_err(|e| e.to_string())?;
+            println!("ns {ns}: writer {}… at version {} from <{}> ({got} commit(s) fetched)", &hex(&w)[..12], head.seq, hex(&peer));
+            changed = true;
+        }
+    }
+    if changed {
+        let merged = materialize(d, ns)?;
+        // Content of records this node doesn't hold yet.
+        let peers = d.store.ns_peers(ns).map_err(|e| e.to_string())?;
+        for b in merged.records.iter().flat_map(|r| r.blocks.iter()) {
+            if !complete(&d.store, b) && !d.store.is_wanted(&b.root).unwrap_or(false) {
+                d.store.want_file(b, &peers).map_err(|e| e.to_string())?;
+                d.wake.notify_one();
+            }
+        }
+        println!("ns {ns}: merged, {} record(s), {} writer(s)", merged.records.len(), merged.writers.len());
+    }
+    Ok(())
+}
+
+/// Fetches a writer's commits (and their operations files) back from `last`
+/// until one is already here. Kept pinned and served to other members.
+async fn fetch_chain(d: &Daemon, link: LinkId, addr: &ChannelAddr, last: (Cid, retifs_core::Seed), writer: &[u8; 32]) -> Result<usize, String> {
+    let mut next = Some(last);
+    let mut fetched = 0;
+    while let Some((cid, seed)) = next {
+        let ct = match d.store.fetch(&cid).map_err(|e| e.to_string())? {
+            Some(ct) => {
+                // Already here: so is everything before it.
+                let c = Commit::decode(&open(&cid, &seed, &ct).map_err(|e| e.to_string())?, addr).map_err(|e| e.to_string())?;
+                if manifest::read_all(&*d.store, &c.root).is_ok() {
+                    break;
+                }
+                ct
+            }
+            None => {
+                let round = seek_round(&d.transport, link, &[(cid, seed)], false, Duration::from_secs(60)).await?;
+                round.got.into_iter().next().map(|(_, ct, _)| ct).ok_or("peer lacks a commit of this chain")?
+            }
+        };
+        let commit = Commit::decode(&open(&cid, &seed, &ct).map_err(|e| e.to_string())?, addr).map_err(|e| e.to_string())?;
+        if commit.writer != *writer {
+            return Err("commit by another writer in this chain".into());
+        }
+        if manifest::read_all(&*d.store, &commit.root).is_err() {
+            fetch_file(&d.transport, &[link], &commit.root, FetchOpts::default(), &mut CacheTier(&d.store))
+                .await
+                .map_err(|e| e.to_string())?;
+        }
+        // Keep this writer's history here and pass it on to other members.
+        d.store.insert(&cid, &ct, tier::PINNED).map_err(|e| e.to_string())?;
+        let mut keep = vec![(cid, ChunkToken::for_seed(&seed))];
+        keep.extend(file_chunks(&d.store, &commit.root)?);
+        for (c, _) in &keep {
+            if let Some(t) = d.store.tier(c).map_err(|e| e.to_string())? {
+                d.store.set_tier(c, t | tier::PINNED).map_err(|e| e.to_string())?;
+            }
+        }
+        d.store.register_serving(&keep).map_err(|e| e.to_string())?;
+        fetched += 1;
+        next = commit.prev;
+    }
+    Ok(fetched)
 }
 
 /// Followed channels' namespaces belong to their writer.
@@ -1376,7 +1600,8 @@ async fn follow_pass(d: &Daemon, mut f: retifs_store::Follow) -> Result<(), Stri
                 continue;
             }
         };
-        if raw.is_empty() {
+        // No head here: an empty reply (Prns may deliver it as a short placeholder).
+        if raw.len() != retifs_core::channel::HEAD_LEN {
             continue;
         }
         let head = Head::decode(&raw).map_err(|e| format!("bad head from <{}>: {e}", hex(&hint)))?;

@@ -22,6 +22,12 @@
 //!     retifs [--store DIR] rec history NS ID
 //!     retifs [--store DIR] query NS [--at VERSION] [TERM]...
 //!
+//!     retifs [--store DIR] ns address NS | ns info NS
+//!     retifs [--store DIR] ns join NAME ADDRESS [--from NODE]...
+//!     retifs [--store DIR] ns grant NS WRITER [--grant] [--from NODE]... | ns revoke NS WRITER
+//!
+//! Several writers per namespace (ADR-0017): a member joins with the address
+//! and shows its writer key; the creator grants it; members sync each other.
 //! Every change to a namespace is a version (ADR-0006): a signed commit in the
 //! namespace's own chain. `rec history` shows a record's versions; `--at`
 //! queries the namespace as it was.
@@ -54,7 +60,9 @@ fn usage() -> ! {
          retifs [--store DIR] channel create NAME | channel publish NAME FILE [--compress] | channel publish-ns NAME NS\n\
          retifs [--store DIR] follow ADDRESS [--from NODE]... | channels\n\
          retifs [--store DIR] rec add NS [KEY=VALUE]... [--file PATH] | rec set NS ID [KEY=VALUE]... [--unset KEY]...\n\
-         retifs [--store DIR] rec get NS ID | rec rm NS ID | rec history NS ID | query NS [--at VERSION] [TERM]..."
+         retifs [--store DIR] rec get NS ID | rec rm NS ID | rec history NS ID | query NS [--at VERSION] [TERM]...\n\
+         retifs [--store DIR] ns address NS | ns info NS | ns join NAME ADDRESS [--from NODE]...\n\
+         retifs [--store DIR] ns grant NS WRITER [--grant] [--from NODE]... | ns revoke NS WRITER"
     );
     std::process::exit(2);
 }
@@ -261,6 +269,44 @@ async fn main() {
             };
             for r in client.records(req).await.unwrap_or_else(|e| fail(e)) {
                 print_record(&r);
+            }
+        }
+        "ns" => {
+            let sub = it.next().unwrap_or_else(|| usage());
+            let ns = it.next().unwrap_or_else(|| usage());
+            let rest: Vec<String> = it.collect();
+            let froms = |rest: &[String]| -> Vec<String> {
+                rest.windows(2).filter(|w| w[0] == "--from").map(|w| w[1].clone()).collect()
+            };
+            let req = match sub.as_str() {
+                "address" => libretifs::Request::NsAddress { ns },
+                "info" => libretifs::Request::NsInfo { ns },
+                "join" => libretifs::Request::NsJoin {
+                    ns,
+                    address: rest.first().cloned().unwrap_or_else(|| usage()),
+                    from: froms(&rest),
+                },
+                "grant" => libretifs::Request::NsGrant {
+                    ns,
+                    writer: rest.first().cloned().unwrap_or_else(|| usage()),
+                    grant: rest.iter().any(|a| a == "--grant"),
+                    from: froms(&rest),
+                },
+                "revoke" => libretifs::Request::NsRevoke { ns, writer: rest.first().cloned().unwrap_or_else(|| usage()) },
+                _ => usage(),
+            };
+            match client.call(req).await.unwrap_or_else(|e| fail(e)) {
+                libretifs::Response::Channel { address } => println!("{address}"),
+                libretifs::Response::Namespace(v) => {
+                    println!("namespace {}: {} record(s), {} peer node(s)", v.name, v.records, v.peers);
+                    println!("  address    {}", v.address);
+                    println!("  my writer  {}", v.own_writer);
+                    for (w, rights) in &v.writers {
+                        println!("  writer     {w}  {}", rights.join(","));
+                    }
+                }
+                libretifs::Response::Error { message } => fail(message),
+                _ => fail("unexpected response"),
             }
         }
         "query" => {
