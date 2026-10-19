@@ -1312,6 +1312,7 @@ async fn sync_ns(d: &Daemon, ns: &str) -> Result<(), String> {
         let holds_grant = |w: &[u8; 32]| *w == addr.writer || merged.writers.get(w).is_some_and(|r| r.contains(&Right::Grant));
         let mut writers: Vec<[u8; 32]> = writers.into_iter().collect();
         writers.sort_by_key(|w| (*w != addr.writer, !holds_grant(w)));
+        let gaps = chains_with_gaps(d, ns);
         for w in writers {
             let raw = match d.ask(link, HEAD_ENDPOINT, [ns_id.as_slice(), &w].concat()).await {
                 Ok(r) => r,
@@ -1332,7 +1333,7 @@ async fn sync_ns(d: &Daemon, ns: &str) -> Result<(), String> {
             }
             let known = d.store.writer_head(&ns_id, &w).map_err(|e| e.to_string())?;
             let known_seq = known.as_ref().and_then(|k| Head::decode(&k.head).ok()).map(|k| k.seq);
-            if known_seq.is_some_and(|k| k >= head.seq) && !whole {
+            if known_seq.is_some_and(|k| k >= head.seq) && !whole && !gaps.contains(&w) {
                 continue; // nothing newer (and never go back)
             }
             let keys = d.store.ns_keys(ns).map_err(|e| e.to_string())?;
@@ -1365,7 +1366,11 @@ async fn sync_ns(d: &Daemon, ns: &str) -> Result<(), String> {
             };
             // A peer may relay a writer's chain without holding its checkpoint:
             // then try the next writer, and this one again from the next peer.
-            let got = match fetch_chain(d, link, &addr, (head.commit, seed), &w, floors.get(&w).copied(), walk).await {
+            let held_to = if gaps.contains(&w) { None } else { known.as_ref().map(|k| k.commit.0) };
+            if gaps.contains(&w) {
+                println!("ns {ns}: writer {}…'s chain here has a gap; fetching it again", &hex(&w)[..12]);
+            }
+            let got = match fetch_chain(d, link, &addr, (head.commit, seed), &w, floors.get(&w).copied(), held_to, walk).await {
                 Ok(got) => got,
                 Err(e) => {
                     eprintln!("ns {ns}: writer {}… from <{}>: {e}", &hex(&w)[..12], hex(&peer));
@@ -1391,7 +1396,14 @@ async fn sync_ns(d: &Daemon, ns: &str) -> Result<(), String> {
             d.store
                 .set_writer_head(&ns_id, &retifs_store::WriterHead { writer: w, head: raw, commit: (head.commit, seed) })
                 .map_err(|e| e.to_string())?;
-            println!("ns {ns}: writer {}… at version {} from <{}> ({} commit(s) fetched)", &hex(&w)[..12], head.seq, hex(&peer), got.commits);
+            println!(
+                "ns {ns}: writer {}… at version {} from <{}> ({} commit(s) fetched; walk ended {})",
+                &hex(&w)[..12],
+                head.seq,
+                hex(&peer),
+                got.commits,
+                got.stopped
+            );
             changed = true;
         }
     }
@@ -1441,6 +1453,14 @@ async fn sync_ns(d: &Daemon, ns: &str) -> Result<(), String> {
         println!("ns {ns}: merged, {} record(s), {} writer(s)", merged.records.len(), merged.writers.len());
     }
     Ok(())
+}
+
+/// Writers whose chain held here has a gap: it doesn't reach back to its
+/// start or to the checkpoint's frontier (an interrupted fetch, or one by an
+/// older version that trusted any held commit). Their next fetch ignores the
+/// last head marker and walks back until the gap is filled.
+fn chains_with_gaps(d: &Daemon, ns: &str) -> std::collections::HashSet<[u8; 32]> {
+    d.ns_cache.lock().unwrap().get(ns).map(|e| e.gaps.clone()).unwrap_or_default()
 }
 
 /// Where the local checkpoint's frontier is, per writer: chain walks stop there.
@@ -1507,7 +1527,9 @@ fn verify_checkpoint(d: &Daemon, ns: &str) -> Result<(bool, String), String> {
 /// How far back a chain walk goes.
 #[derive(Clone, Copy, PartialEq)]
 enum Walk {
-    /// Until a commit already held (everything before it is held too).
+    /// Back to the writer's last head fetched completely (`held_to`), or to
+    /// its start. Commits already held are walked through, not trusted: an
+    /// interrupted fetch leaves newer commits here without the older ones.
     ToHeld,
     /// Like `ToHeld`, but on the first checkpoint operation found, fetch the
     /// checkpoint and go back only to its frontier for this writer.
@@ -1519,11 +1541,15 @@ enum Walk {
 struct ChainFetch {
     commits: usize,
     checkpoint: Option<FileRef>,
+    /// Why the walk ended (for the log).
+    stopped: String,
 }
 
 /// Fetches a writer's commits (and their operations files) back from `last`,
-/// as far as `walk` says and never past `floor` (a checkpoint's frontier).
+/// as far as `walk` says, never past `floor` (a checkpoint's frontier) or
+/// `held_to` (the head last fetched completely: everything before it is here).
 /// Kept pinned and served to other members.
+#[allow(clippy::too_many_arguments)]
 async fn fetch_chain(
     d: &Daemon,
     link: LinkId,
@@ -1531,28 +1557,28 @@ async fn fetch_chain(
     last: (Cid, retifs_core::Seed),
     writer: &[u8; 32],
     mut floor: Option<Cid>,
+    held_to: Option<Cid>,
     walk: Walk,
 ) -> Result<ChainFetch, String> {
     let mut next = Some(last);
-    let mut out = ChainFetch { commits: 0, checkpoint: None };
+    let mut out = ChainFetch { commits: 0, checkpoint: None, stopped: "at the chain's start".into() };
+    let mut seq = None;
     while let Some((cid, seed)) = next {
-        if walk != Walk::Whole && Some(cid) == floor {
+        if walk != Walk::Whole && (Some(cid) == floor || Some(cid) == held_to) {
+            let at = if Some(cid) == floor { "checkpoint frontier" } else { "last complete head" };
+            out.stopped = format!("at the {at}, below version {}", seq.map_or("?".into(), |s: u64| s.to_string()));
             break;
         }
         let ct = match d.store.fetch(&cid).map_err(|e| e.to_string())? {
             Some(ct) => {
-                // Already here: so is everything before it (unless a checkpoint skipped it).
+                // Held already, but older commits may not be (an interrupted
+                // fetch): walk through it. Still looking for a checkpoint: look
+                // at it too (an earlier peer may have lacked the checkpoint file).
                 let c = Commit::decode(&open(&cid, &seed, &ct).map_err(|e| e.to_string())?, addr).map_err(|e| e.to_string())?;
-                if manifest::read_all(&*d.store, &c.root).is_ok() {
-                    if walk == Walk::Whole {
-                        next = c.prev;
-                        continue;
-                    }
-                    // Still looking for a checkpoint: look at held commits too
-                    // (an earlier peer may have lacked the checkpoint file).
-                    if !(walk == Walk::ToCheckpoint && out.checkpoint.is_none()) {
-                        break;
-                    }
+                seq = Some(c.seq);
+                if manifest::read_all(&*d.store, &c.root).is_ok() && !(walk == Walk::ToCheckpoint && out.checkpoint.is_none()) {
+                    next = c.prev;
+                    continue;
                 }
                 ct
             }
@@ -1774,6 +1800,8 @@ struct NsCache {
     needs_history: bool,
     /// Fetch every chain whole on the next sync (to verify the checkpoint).
     fetch_whole: bool,
+    /// Writers whose chain here has a missing commit below its head.
+    gaps: std::collections::HashSet<[u8; 32]>,
 }
 
 /// A checkpoint is written after this many new commits (ADR-0018).
@@ -1781,13 +1809,16 @@ const CHECKPOINT_EVERY: usize = 64;
 
 /// A writer's chain, oldest first, as far back as its commits and operations
 /// files are local. Only commits newer than `cached` are read from the store.
+/// The second value says whether the walk is complete (reached the chain's
+/// start, the checkpoint or the cached part). An incomplete one is only what's
+/// contiguous to the head: a commit below it is missing here.
 fn walk_ops_chain(
     d: &Daemon,
     addr: &ChannelAddr,
     last: Option<(Cid, retifs_core::Seed)>,
     cached: &[Walked],
     floor: Option<Cid>,
-) -> Vec<Walked> {
+) -> (Vec<Walked>, bool) {
     let stop = cached.last().map(|(_, cid, _)| *cid).or(floor);
     let mut newer = Vec::new();
     let mut next = last;
@@ -1818,12 +1849,12 @@ fn walk_ops_chain(
         next = commit.prev;
     }
     newer.reverse();
-    if reached_cache || (next.is_none() && stop.is_none()) {
+    if reached_cache || next.is_none() {
         let mut out = if reached_cache { cached.to_vec() } else { Vec::new() };
         out.extend(newer);
-        out
+        (out, true)
     } else {
-        newer // the walk stopped early (missing history): only what's contiguous to the head
+        (newer, false) // the walk stopped early (missing history): only what's contiguous to the head
     }
 }
 
@@ -1853,9 +1884,16 @@ fn chains(d: &Daemon, ns: &str, full: bool) -> Result<(ChannelAddr, [u8; 32], Ch
     let mut out = Chains::new();
     for (writer, last) in heads {
         let cached = entry.chains.get(&writer).cloned().unwrap_or_default();
-        let walked = walk_ops_chain(d, &addr, last, &cached, entry.floors.get(&writer).copied());
+        let (walked, complete) = walk_ops_chain(d, &addr, last, &cached, entry.floors.get(&writer).copied());
         out.insert(writer, walked.iter().map(|(seq, _, c)| (*seq, c.clone())).collect());
-        entry.chains.insert(writer, walked);
+        // Only a complete walk is kept to build on; after a gap, walk again next time.
+        if complete {
+            entry.gaps.remove(&writer);
+            entry.chains.insert(writer, walked);
+        } else {
+            entry.gaps.insert(writer);
+            entry.chains.insert(writer, Vec::new());
+        }
     }
     Ok((addr, own_writer, out))
 }
@@ -1965,9 +2003,16 @@ fn materialize(d: &Daemon, ns: &str) -> Result<retifs_core::ops::Merged, String>
         // from every chain (whole, if resumed from a checkpoint).
         let mut rebuild = entry.state.is_none();
         let mut new = Vec::new();
+        let mut held_back = false;
         if !rebuild {
             for (w, chain) in &chains {
                 let (done, last_time, _) = entry.applied.get(w).copied().unwrap_or((0, 0, Cid::of(b"")));
+                // Commits after a missing one wait for it: applying them would
+                // move this writer's mark past it, and it would never apply.
+                if chain.iter().any(|(seq, _)| *seq > done) && !chain.iter().any(|(seq, _)| *seq == done + 1) {
+                    held_back = true;
+                    continue;
+                }
                 for (seq, c) in chain.iter().filter(|(seq, _)| *seq > done) {
                     if c.time_ms < last_time || c.time_ms > now + MAX_CLOCK_AHEAD_MS {
                         rebuild = true;
@@ -2003,21 +2048,32 @@ fn materialize(d: &Daemon, ns: &str) -> Result<retifs_core::ops::Merged, String>
         let cids: HashMap<[u8; 32], Cid> =
             entry.chains.iter().filter_map(|(w, c)| c.last().map(|(_, cid, _)| (*w, *cid))).collect();
         if rebuild {
-            let plain = chains.iter().map(|(w, c)| (*w, c.iter().map(|(_, c)| c.clone()).collect())).collect();
+            // A writer whose chain has a gap is left out until it's filled (its
+            // later commits alone would mark it applied past the missing ones).
+            let complete = |w: &[u8; 32]| !entry.gaps.contains(w);
+            let plain = chains
+                .iter()
+                .filter(|(w, _)| complete(w))
+                .map(|(w, c)| (*w, c.iter().map(|(_, c)| c.clone()).collect()))
+                .collect();
             entry.state = Some(State::build(&addr.writer, &plain, now));
             entry.applied = chains
                 .iter()
-                .filter_map(|(w, c)| c.last().map(|(seq, wc)| (*w, (*seq, wc.time_ms, cids[w]))))
+                .filter(|(w, _)| complete(w))
+                .filter_map(|(w, c)| c.last().and_then(|(seq, wc)| cids.get(w).map(|cid| (*w, (*seq, wc.time_ms, *cid)))))
                 .collect();
             entry.since_checkpoint += chains.values().map(Vec::len).sum::<usize>();
         } else {
             entry.since_checkpoint += new.len();
             for (w, seq, c) in new {
-                entry.applied.insert(w, (seq, c.time_ms, cids[&w]));
+                // (No cached chain after an incomplete walk: keep the old commit;
+                // checkpoints wait until the gap is filled anyway.)
+                let cid = cids.get(&w).copied().or_else(|| entry.applied.get(&w).map(|a| a.2)).unwrap_or(Cid::of(b""));
+                entry.applied.insert(w, (seq, c.time_ms, cid));
             }
         }
         let state = entry.state.as_ref().expect("built above");
-        if entry.since_checkpoint >= CHECKPOINT_EVERY {
+        if entry.since_checkpoint >= CHECKPOINT_EVERY && !held_back && entry.gaps.is_empty() {
             entry.since_checkpoint = 0;
             let frontier = entry
                 .applied
