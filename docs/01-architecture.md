@@ -82,6 +82,7 @@ Files, folders, albums, packages, versions and branches are all combinations of 
 - **Redundancy by default** ([ADR-0011](adr/0011-redundancy-by-default.md), proposed): every piece of own data has a replication target, met by own-node pools, recruited peers and volunteer storage nodes, with repair and storage proofs.
 - **Disk budget** ([ADR-0012](adr/0012-disk-budget.md), proposed): a store size limit and a free-space reserve; evict cache first, refuse new leases next, never silently drop pinned data or active leases.
 - **Placement follows need** ([ADR-0014](adr/0014-placement-follows-need.md), proposed): every node is a storage node by default; whoever needs data leases it to the nearest storage nodes (hops and link cost), renewing keeps it alive, and unneeded copies expire.
+- **NomadNet bridge:** `retifsd --nomadnet NS` serves a record namespace as a NomadNet node; any follower of a site's channel can serve it, so sites outlive their author's uptime ([ADR-0016](adr/0016-records-and-snapshots.md)).
 - **Signed channels** ([ADR-0015](adr/0015-signed-channels.md), proposed): a writer's signed chain of commits and a signed head; followers verify, update automatically and mirror. The basis for sites and app updates.
 - **Slow links** ([ADR-0013](adr/0013-slow-links.md), proposed): LoRa carries the control plane; bulk only on explicit request within an airtime budget; prioritised sending; inline tiny files and compression before encryption (format, pending).
 - **Deletion = key destruction.**

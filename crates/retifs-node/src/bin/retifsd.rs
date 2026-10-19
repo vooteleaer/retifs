@@ -15,6 +15,9 @@
 //! node (default 20 bits: about 0.1 s per lease on a desktop, a few seconds on a Pi;
 //! 0: none). `--max-stamp-cost`: the most this node pays when offering leases (default 24).
 //! A solver reuses the hash state after the workblock, so each try costs one small hash.
+//! `--nomadnet NS [--nomadnet-name NAME]`: also run a NomadNet node serving namespace NS
+//! (own or a followed channel's `ch-…`): a record with `path=/x.mu` is the page
+//! `/page/x.mu`; without an `/index.mu`, an index of the pages is generated.
 //! `--loss-target`: keep adding nearby holders for each needed file until the
 //! estimated chance of losing every copy is below P (default 0.001).
 //! `--lease-term`: how long leases this node gives out run before renewal is
@@ -49,6 +52,7 @@ use retifs_core::{
     open, ChunkToken, Cid, ConvergenceSecret, FileRef,
 };
 use personal_rns::node_introspection::DestinationIdentityQuery;
+use personal_rns::routing::request_handlers::{RequestPathHash, RequestPolicy};
 use personal_rns::routing::links::LinkId;
 use retifs_net::{
     fetch::{fetch_file, FetchOpts},
@@ -289,6 +293,8 @@ struct Args {
     treat_as_slow: Vec<PeerId>,
     stamp_cost: u8,
     max_stamp_cost: u8,
+    nomadnet: Option<String>,
+    nomadnet_name: String,
 }
 
 fn duration_secs(s: &str) -> u64 {
@@ -330,6 +336,8 @@ fn args() -> Args {
         treat_as_slow: Vec::new(),
         stamp_cost: 20,
         max_stamp_cost: 24,
+        nomadnet: None,
+        nomadnet_name: "retifs site".into(),
     };
     let mut it = std::env::args().skip(1);
     while let Some(arg) = it.next() {
@@ -346,13 +354,16 @@ fn args() -> Args {
             "--treat-as-slow" => a.treat_as_slow.push(*parse_destination(&it.next().expect("--treat-as-slow NODE")).expect("node hash").as_bytes()),
             "--stamp-cost" => a.stamp_cost = it.next().and_then(|v| v.parse().ok()).expect("--stamp-cost BITS"),
             "--max-stamp-cost" => a.max_stamp_cost = it.next().and_then(|v| v.parse().ok()).expect("--max-stamp-cost BITS"),
+            "--nomadnet" => a.nomadnet = Some(it.next().expect("--nomadnet NAMESPACE")),
+            "--nomadnet-name" => a.nomadnet_name = it.next().expect("--nomadnet-name NAME"),
             "--loss-target" => a.loss_target = it.next().and_then(|v| v.parse().ok()).expect("--loss-target P (e.g. 0.001)"),
             "--lease-term" => a.lease_term = duration_secs(&it.next().expect("--lease-term DURATION")).max(60),
             "-h" | "--help" => {
                 println!(
                     "retifsd [--store DIR] [--max-store SIZE] [--min-free SIZE] [--cache-max SIZE] [--private-requests]
                              [--hold-for-others SIZE] [--lease-term DURATION] [--loss-target P] [--slow-link-budget DURATION]\n        \
-                     [--stamp-cost BITS] [--max-stamp-cost BITS] [--public] [--put FILE]..."
+                     [--stamp-cost BITS] [--max-stamp-cost BITS]\n        \
+                     [--nomadnet NAMESPACE [--nomadnet-name NAME]] [--public] [--put FILE]..."
                 );
                 std::process::exit(0);
             }
@@ -515,15 +526,34 @@ async fn serve(store: Arc<SlabStore>, identity: node::IdentitySecret, endpoint: 
     });
     let (heard_tx, mut heard_rx) = mpsc::unbounded_channel::<(PeerId, u8)>();
     let (seek_tx, seek_rx) = mpsc::unbounded_channel::<PeerId>();
+    // Optionally a NomadNet node (its own identity and destination) serving a namespace.
+    let nomadnet = args.nomadnet.as_ref().map(|_| {
+        let id = load_or_create_identity(&store.root().join("nomadnet_identity")).expect("nomadnet identity");
+        let name: &'static [u8] = Box::leak(args.nomadnet_name.clone().into_bytes().into_boxed_slice());
+        nomadnet::destination(id, name)
+    });
+    let nn_hash = nomadnet.as_ref().map(|d| d.destination_hash().expect("valid destination"));
+    let (nn_tx, nn_rx) = mpsc::unbounded_channel::<(RequestPathHash, RespondToken)>();
+    let mut destinations = vec![dest];
+    destinations.extend(nomadnet);
     let node = PrnsNode::new(PrnsNodeRecipe {
         transport_identity: None,
-        pre_configured_destinations: [dest],
+        pre_configured_destinations: destinations,
         app_state: shared.clone(),
         storage: GrowableHeap,
         request_endpoints: request_endpoints![Get, Have, LeaseEndpoint, ReceiptEndpoint, ProveEndpoint, PutEndpoint, HeadEndpoint],
         on_event: move |event, _state| {
-            if let PrnsEvent::Diagnostic(Diagnostic::AnnounceHeard { destination, hops, .. }) = event {
-                let _ = heard_tx.send((*destination.as_bytes(), hops));
+            match event {
+                PrnsEvent::Diagnostic(Diagnostic::AnnounceHeard { destination, hops, .. }) => {
+                    let _ = heard_tx.send((*destination.as_bytes(), hops));
+                }
+                // Page requests to the NomadNet destination (dynamically registered paths).
+                PrnsEvent::Message(Message::Request { destination, link_id, request_id, path_hash, rtt, .. })
+                    if Some(destination) == nn_hash =>
+                {
+                    let _ = nn_tx.send((path_hash, RespondToken { link_id, request_id, rtt }));
+                }
+                _ => {}
             }
         },
         interfaces: ManuallyAttached,
@@ -560,6 +590,7 @@ async fn serve(store: Arc<SlabStore>, identity: node::IdentitySecret, endpoint: 
         None => println!("holding data for others up to the store limit"),
     }
 
+    let daemon_for_nn = daemon.clone();
     tokio::spawn(local_api(endpoint, daemon.clone()));
     tokio::spawn(lease_puller(daemon.clone(), shared.clone()));
     tokio::spawn(lease_upkeep(daemon.clone()));
@@ -606,6 +637,11 @@ async fn serve(store: Arc<SlabStore>, identity: node::IdentitySecret, endpoint: 
             }
         }
     });
+
+    if let (Some(ns), Some(nn)) = (args.nomadnet.clone(), nn_hash) {
+        println!("NomadNet node \"{}\" <{}> serving namespace {ns}", args.nomadnet_name, destination_hex(&nn));
+        tokio::spawn(nomadnet::serve(daemon_for_nn.clone(), handle.clone(), nn, ns, args.nomadnet_name.clone(), nn_rx));
+    }
 
     let announcer = handle.clone();
     tokio::spawn(async move {
@@ -1997,3 +2033,142 @@ fn local_status(store: &SlabStore, file: &FileRef) -> Status {
     }
     status
 }
+
+/// A NomadNet node serving a retifs namespace (ADR-0016): any node holding a
+/// site (its author, or a follower of its channel) can serve it to unmodified
+/// NomadNet clients, so the site stays reachable while its author is offline.
+mod nomadnet {
+    use super::*;
+
+    /// `nomadnetwork.node`, announced with the node's name as app data, as NomadNet does.
+    pub fn destination(identity: node::IdentitySecret, name: &'static [u8]) -> PreConfiguredDestination<'static> {
+        PreConfiguredDestination::Single {
+            request_endpoints: ServeMyRequestEndpoints::No,
+            resource_strategy: ResourceStrategy::AcceptNone,
+            maximum_request_bytes: Default::default(),
+            app_name: "nomadnetwork",
+            aspects: &["node"],
+            identity,
+            announce_app_data: name,
+            proof: ProofStrategy::ProveAll,
+            link_requests: LinkRequestPolicy::AcceptAll,
+            ratchet: RatchetPolicy::NoRatchets,
+        }
+    }
+
+    /// The NomadNet request path for a record's `path` attribute: `/x.mu` and `/page/x.mu` both serve as `/page/x.mu`.
+    pub fn page_path(path: &str) -> Option<String> {
+        let rel = path.strip_prefix("/page/").or_else(|| path.strip_prefix('/'))?;
+        (rel.ends_with(".mu") && !rel.is_empty()).then(|| format!("/page/{rel}"))
+    }
+
+    fn str_attr<'a>(r: &'a Record, key: &str) -> Option<&'a str> {
+        match r.attrs.get(key) {
+            Some(Value::Str(s)) => Some(s),
+            _ => None,
+        }
+    }
+
+    /// Pages of the namespace: request path → record.
+    fn pages(store: &SlabStore, ns: &str) -> HashMap<String, Record> {
+        store
+            .records(ns)
+            .unwrap_or_default()
+            .into_iter()
+            .filter_map(|r| str_attr(&r, "path").and_then(page_path).map(|p| (p, r)))
+            .collect()
+    }
+
+    /// A generated index when the site has none: one micron link per page.
+    fn index(name: &str, pages: &HashMap<String, Record>) -> Vec<u8> {
+        let mut out = format!(">{name}\n\nServed from retifs: every reader of this site can serve it.\n\n");
+        if pages.is_empty() {
+            out.push_str("This node is still fetching the site, or it has no pages yet. Try again shortly.\n");
+        }
+        let mut paths: Vec<&String> = pages.keys().collect();
+        paths.sort();
+        for p in paths {
+            let title = str_attr(&pages[p], "title").or_else(|| str_attr(&pages[p], "name")).unwrap_or(p);
+            out.push_str(&format!("`[{title}`:{p}]\n"));
+        }
+        out.into_bytes()
+    }
+
+    pub async fn serve(
+        d: Arc<Daemon>,
+        handle: PrnsNodeHandle,
+        dest: DestinationHash,
+        ns: String,
+        site_name: String,
+        mut requests: mpsc::UnboundedReceiver<(RequestPathHash, RespondToken)>,
+    ) {
+        let mut registered: std::collections::HashSet<String> = Default::default();
+        let mut by_hash: HashMap<[u8; 16], String> = HashMap::new();
+        let mut sync = tokio::time::interval(Duration::from_secs(15));
+        let mut announce = tokio::time::interval(Duration::from_secs(600));
+        loop {
+            tokio::select! {
+                _ = sync.tick() => {
+                    // Register every page's path (and the index); drop paths that went away.
+                    let mut want: std::collections::HashSet<String> = pages(&d.store, &ns).into_keys().collect();
+                    want.insert("/page/index.mu".into());
+                    for p in want.difference(&registered).cloned().collect::<Vec<_>>() {
+                        match handle.register_request_path(dest, &p, RequestPolicy::AllowAll).await {
+                            Ok(()) => {
+                                by_hash.insert(*RequestPathHash::of(&p).as_bytes(), p.clone());
+                                registered.insert(p);
+                            }
+                            Err(e) => eprintln!("nomadnet: register {p}: {e:?}"),
+                        }
+                    }
+                    for p in registered.difference(&want).cloned().collect::<Vec<_>>() {
+                        let _ = handle.unregister_request_path(dest, &p).await;
+                        by_hash.remove(RequestPathHash::of(&p).as_bytes());
+                        registered.remove(&p);
+                    }
+                }
+                _ = announce.tick() => {
+                    let _ = handle.issue(PrnsCommand::AnnounceNow(AnnounceNow {
+                        destination: dest,
+                        target: AnnounceTarget::AllInterfaces,
+                        app_data: AnnounceAppData::Registered,
+                    }));
+                }
+                Some((hash, token)) = requests.recv() => {
+                    let Some(path) = by_hash.get(hash.as_bytes()).cloned() else { continue };
+                    let store = d.store.clone();
+                    let ns = ns.clone();
+                    let name = site_name.clone();
+                    let body = tokio::task::spawn_blocking(move || page_body(&store, &ns, &path, &name)).await.unwrap_or_default();
+                    println!("nomadnet: served {} bytes", body.len());
+                    handle.respond_owned_bytes(token, body);
+                }
+            }
+        }
+    }
+
+    fn page_body(store: &SlabStore, ns: &str, path: &str, name: &str) -> Vec<u8> {
+        let pages = pages(store, ns);
+        match pages.get(path) {
+            Some(r) => match r.blocks.first() {
+                Some(b) => manifest::read_all(store, b).unwrap_or_else(|_| b"`!This page isn't available on this node yet.`!".to_vec()),
+                None => b"(empty page)".to_vec(),
+            },
+            None if path == "/page/index.mu" => index(name, &pages),
+            None => b"`!No such page.`!".to_vec(),
+        }
+    }
+
+    #[cfg(test)]
+    mod tests {
+        #[test]
+        fn record_paths_map_to_nomadnet_pages() {
+            assert_eq!(super::page_path("/index.mu").as_deref(), Some("/page/index.mu"));
+            assert_eq!(super::page_path("/page/about.mu").as_deref(), Some("/page/about.mu"));
+            assert_eq!(super::page_path("/blog/2026/one.mu").as_deref(), Some("/page/blog/2026/one.mu"));
+            assert_eq!(super::page_path("/boat.jpg"), None);
+            assert_eq!(super::page_path("relative.mu"), None);
+        }
+    }
+}
+
