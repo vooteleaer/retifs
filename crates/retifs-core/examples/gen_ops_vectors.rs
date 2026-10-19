@@ -5,6 +5,7 @@
 use std::collections::BTreeMap;
 
 use retifs_core::{
+    keywrap,
     ops::{merge, Op, OpsFile, Right, WriterCommit},
     record::{Snapshot, Value},
     Cid, FileRef, Seed,
@@ -39,11 +40,22 @@ fn op(o: &Op) -> J {
             rs.iter().map(|r| if *r == Right::Grant { "grant" } else { "write" }).collect::<Vec<_>>()
         ]),
         Op::Revoke(w) => json!(["revoke", hex::encode(w)]),
+        Op::Identity(p) => json!(["identity", hex::encode(p)]),
+        Op::Rekey(e, entries) => json!([
+            "rekey",
+            e,
+            entries.iter().map(|(w, x)| json!([hex::encode(w), hex::encode(x)])).collect::<Vec<_>>()
+        ]),
     }
 }
 
 fn main() {
-    let (alice, bob, eve) = ([0xa1u8; 32], [0xb0u8; 32], [0xe5u8; 32]);
+    // Real identities (X25519 ‖ Ed25519), so identity operations and wrapped keys check out.
+    let (alice_id, bob_id, eve_id) = ([0xa1u8; 64], [0xb0u8; 64], [0xe5u8; 64]);
+    let w = |id: &[u8; 64]| -> [u8; 32] { keywrap::public(id)[32..].try_into().unwrap() };
+    let (alice, bob, eve) = (w(&alice_id), w(&bob_id), w(&eve_id));
+    let new_key = [0x5au8; 32];
+    let wrapped_for_alice = keywrap::wrap(&keywrap::public(&alice_id), &new_key, [0x31; 32], [0x32; 16]);
     let (page, photo) = ([0x01u8; 16], [0x02u8; 16]);
     let block = FileRef { root: Cid::of(b"index.mu"), seed: Seed([0x42; 32]), size: 812 };
     let s = |x: &str| Value::Str(x.into());
@@ -54,13 +66,17 @@ fn main() {
             WriterCommit {
                 time_ms: 1000,
                 ops: vec![
+                    Op::Identity(keywrap::public(&alice_id)),
                     Op::Grant(bob, vec![Right::Write]),
                     Op::Set(page, "path".into(), s("/index.mu")),
                     Op::Blocks(page, vec![block]),
                     Op::Set(page, "title".into(), s("Home")),
                 ],
             },
-            WriterCommit { time_ms: 3000, ops: vec![Op::Set(page, "title".into(), s("Front page")), Op::Revoke(bob)] },
+            WriterCommit {
+                time_ms: 3000,
+                ops: vec![Op::Set(page, "title".into(), s("Front page")), Op::Revoke(bob), Op::Rekey(1, vec![(alice, wrapped_for_alice.clone())])],
+            },
         ],
     );
     chains.insert(
@@ -69,6 +85,7 @@ fn main() {
             WriterCommit {
                 time_ms: 2000,
                 ops: vec![
+                    Op::Identity(keywrap::public(&bob_id)),
                     Op::Set(page, "title".into(), s("A title by Bob")),
                     Op::Set(page, "tags".into(), Value::List(vec![s("home")])),
                     Op::Set(photo, "type".into(), s("image")),
@@ -97,6 +114,10 @@ fn main() {
         "merged_snapshot": hex::encode(snapshot.encode()),
         "ignored_ops": merged.ignored_ops,
         "writers_after": merged.writers.keys().map(hex::encode).collect::<Vec<_>>(),
+        "identities_after": merged.identities.keys().map(hex::encode).collect::<Vec<_>>(),
+        "rekeys_after": merged.rekeys.len(),
+        "alice_identity_secret": hex::encode(alice_id),
+        "rekey_new_key": hex::encode(new_key),
     });
     println!("{}", serde_json::to_string_pretty(&doc).unwrap());
 }

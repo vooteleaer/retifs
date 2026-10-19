@@ -8,6 +8,7 @@ pub mod channel;
 pub mod chunk;
 pub mod chunker;
 pub mod cid;
+pub mod keywrap;
 pub mod lease;
 pub mod ops;
 pub mod record;

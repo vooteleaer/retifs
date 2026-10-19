@@ -5,6 +5,8 @@
 //! ops file = { "ops": [ op, … ], "retifs": "ns-ops/1" }        canonical msgpack (ADR-0016)
 //! op       = [ "set", id, key, value ] | [ "unset", id, key ] | [ "blocks", id, [ ref, … ] ]
 //!          | [ "delete", id ] | [ "grant", writer (bin 32), [ right, … ] ] | [ "revoke", writer ]
+//!          | [ "identity", public (bin 64) ]                     the signer's RNS identity (X25519 ‖ Ed25519)
+//!          | [ "rekey", epoch, [ [ writer (bin 32), wrapped (bin) ], … sorted by writer ] ]
 //! right    = "grant" | "write"                                   sorted, unique
 //! ```
 //! Every reader replays all writers' operations in stamp order —
@@ -53,6 +55,12 @@ pub enum Op {
     /// Sets the writer's rights (replacing earlier ones).
     Grant(WriterKey, Vec<Right>),
     Revoke(WriterKey),
+    /// The signer's public identity (X25519 ‖ Ed25519), so others can wrap keys to it.
+    /// Counts only if its Ed25519 half is the signer's own key.
+    Identity([u8; 64]),
+    /// A new read key for epoch `epoch`, wrapped to each remaining writer
+    /// (keywrap: RNS `Identity.encrypt`). Counts only from a writer holding `grant`.
+    Rekey(u64, Vec<(WriterKey, Vec<u8>)>),
 }
 
 /// One commit's operations.
@@ -144,6 +152,24 @@ fn write_op(out: &mut Vec<u8>, op: &Op) {
             write_str(out, "revoke");
             write_bin(out, w);
         }
+        Op::Identity(p) => {
+            write_array_len(out, 2);
+            write_str(out, "identity");
+            write_bin(out, p);
+        }
+        Op::Rekey(epoch, entries) => {
+            let mut entries = entries.clone();
+            entries.sort_by_key(|(w, _)| *w);
+            write_array_len(out, 3);
+            write_str(out, "rekey");
+            crate::record::write_int(out, *epoch as i64);
+            write_array_len(out, entries.len());
+            for (w, wrapped) in entries {
+                write_array_len(out, 2);
+                write_bin(out, &w);
+                write_bin(out, &wrapped);
+            }
+        }
     }
 }
 
@@ -190,6 +216,23 @@ fn read_op(r: &mut Reader) -> Result<Op, RecordError> {
             Op::Grant(w, rights)
         }
         ("revoke", 2) => Op::Revoke(writer(r)?),
+        ("identity", 2) => Op::Identity(r.bin()?.try_into().map_err(|_| RecordError::Malformed("identity"))?),
+        ("rekey", 3) => {
+            let epoch = match r.value(0)? {
+                Value::Int(e) if e >= 0 => e as u64,
+                _ => return Err(RecordError::Malformed("rekey epoch")),
+            };
+            let m = r.array_len()?;
+            let mut entries = Vec::with_capacity(m.min(1 << 10));
+            for _ in 0..m {
+                if r.array_len()? != 2 {
+                    return Err(RecordError::Malformed("rekey entry"));
+                }
+                let w = writer(r)?;
+                entries.push((w, r.bin()?));
+            }
+            Op::Rekey(epoch, entries)
+        }
         _ => return Err(RecordError::Malformed("unknown operation")),
     };
     Ok(op)
@@ -202,9 +245,22 @@ pub struct WriterCommit {
     pub ops: Vec<Op>,
 }
 
+/// A valid rekey: who issued it, when, and the wrapped keys.
+#[derive(Debug, Clone, PartialEq)]
+pub struct RekeyEvent {
+    pub epoch: u64,
+    pub time_ms: u64,
+    pub by: WriterKey,
+    pub entries: Vec<(WriterKey, Vec<u8>)>,
+}
+
 /// The merged state of a namespace.
 #[derive(Debug, Clone, PartialEq, Default)]
 pub struct Merged {
+    /// Writers' public identities, as they announced them.
+    pub identities: BTreeMap<WriterKey, [u8; 64]>,
+    /// Valid rekeys, in stamp order.
+    pub rekeys: Vec<RekeyEvent>,
     /// Visible records, by ID.
     pub records: Vec<Record>,
     /// Writers and their rights at the end.
@@ -239,8 +295,19 @@ pub fn merge(creator: &WriterKey, chains: &BTreeMap<WriterKey, Vec<WriterCommit>
     rights.insert(*creator, vec![Right::Grant, Right::Write]);
     let mut records: BTreeMap<RecordId, Record> = BTreeMap::new();
     let has = |rights: &BTreeMap<WriterKey, Vec<Right>>, w: &WriterKey, r: Right| rights.get(w).is_some_and(|v| v.contains(&r));
-    for (_, writer, _, op) in events {
+    for (time_ms, writer, _, op) in events {
         match op {
+            Op::Identity(p) => {
+                if p[32..] == writer {
+                    m.identities.insert(writer, *p);
+                } else {
+                    m.ignored_ops += 1;
+                }
+            }
+            Op::Rekey(epoch, entries) if has(&rights, &writer, Right::Grant) => {
+                m.rekeys.push(RekeyEvent { epoch: *epoch, time_ms, by: writer, entries: entries.clone() });
+            }
+            Op::Rekey(..) => m.ignored_ops += 1,
             Op::Grant(w, granted) if has(&rights, &writer, Right::Grant) => {
                 if w != creator {
                     let mut g = granted.clone();
@@ -348,6 +415,24 @@ mod tests {
         assert_eq!(keys, vec!["ok"]);
         assert_eq!(m.ignored_ops, 4);
         assert_eq!(m.writers.keys().copied().collect::<Vec<_>>(), vec![ALICE], "bob revoked, eve never admitted");
+    }
+
+    #[test]
+    fn identities_and_rekeys_count_only_where_allowed() {
+        let mut alice_id = [0u8; 64];
+        alice_id[32..].copy_from_slice(&ALICE);
+        let alice = vec![
+            c(100, vec![Op::Identity(alice_id), Op::Grant(BOB, vec![Right::Write])]),
+            c(300, vec![Op::Revoke(BOB), Op::Rekey(1, vec![(ALICE, vec![1, 2, 3])])]),
+        ];
+        let bob = vec![c(200, vec![Op::Identity(alice_id), Op::Rekey(1, vec![(BOB, vec![9])])])];
+        let m = merge(&ALICE, &chains(vec![(ALICE, alice), (BOB, bob)]), 1000);
+        assert_eq!(m.identities.keys().copied().collect::<Vec<_>>(), vec![ALICE], "bob can't claim alice's identity");
+        assert_eq!(m.rekeys.len(), 1, "bob holds no grant right: his rekey doesn't count");
+        assert_eq!((m.rekeys[0].epoch, m.rekeys[0].by, m.rekeys[0].time_ms), (1, ALICE, 300));
+        let f = OpsFile { ops: vec![Op::Rekey(2, vec![(BOB, vec![5]), (ALICE, vec![6])])] };
+        let back = OpsFile::decode(&f.encode()).unwrap();
+        assert_eq!(back.ops[0], Op::Rekey(2, vec![(ALICE, vec![6]), (BOB, vec![5])]), "entries sorted by writer");
     }
 
     #[test]
