@@ -9,6 +9,7 @@ pub mod chunk;
 pub mod chunker;
 pub mod cid;
 pub mod lease;
+pub mod ops;
 pub mod record;
 pub mod manifest;
 pub mod secret;

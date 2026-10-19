@@ -83,10 +83,7 @@ impl Record {
         write_str(out, "blocks");
         write_array_len(out, self.blocks.len());
         for b in &self.blocks {
-            write_array_len(out, 3);
-            write_bin(out, b.root.as_bytes());
-            write_bin(out, &b.seed.0);
-            write_int(out, b.size as i64);
+            write_block(out, b);
         }
         write_str(out, "id");
         write_bin(out, &self.id);
@@ -163,13 +160,13 @@ pub fn encode_value(v: &Value) -> Vec<u8> {
     out
 }
 
-fn canonical(input: &[u8], reencoded: Vec<u8>) -> Result<(), RecordError> {
+pub(crate) fn canonical(input: &[u8], reencoded: Vec<u8>) -> Result<(), RecordError> {
     if input == reencoded.as_slice() { Ok(()) } else { Err(RecordError::NotCanonical) }
 }
 
 // ---------------------------------------------------------------- writing
 
-fn write_value(out: &mut Vec<u8>, v: &Value) {
+pub(crate) fn write_value(out: &mut Vec<u8>, v: &Value) {
     match v {
         Value::Null => out.push(0xc0),
         Value::Bool(b) => out.push(if *b { 0xc3 } else { 0xc2 }),
@@ -190,7 +187,7 @@ fn write_value(out: &mut Vec<u8>, v: &Value) {
     }
 }
 
-fn write_int(out: &mut Vec<u8>, i: i64) {
+pub(crate) fn write_int(out: &mut Vec<u8>, i: i64) {
     if i >= 0 {
         let u = i as u64;
         match u {
@@ -229,7 +226,7 @@ fn write_int(out: &mut Vec<u8>, i: i64) {
     }
 }
 
-fn write_str(out: &mut Vec<u8>, s: &str) {
+pub(crate) fn write_str(out: &mut Vec<u8>, s: &str) {
     let n = s.len();
     match n {
         0..=31 => out.push(0xa0 | n as u8),
@@ -246,7 +243,7 @@ fn write_str(out: &mut Vec<u8>, s: &str) {
     out.extend_from_slice(s.as_bytes());
 }
 
-fn write_bin(out: &mut Vec<u8>, b: &[u8]) {
+pub(crate) fn write_bin(out: &mut Vec<u8>, b: &[u8]) {
     let n = b.len();
     match n {
         0..=0xff => out.extend_from_slice(&[0xc4, n as u8]),
@@ -262,7 +259,7 @@ fn write_bin(out: &mut Vec<u8>, b: &[u8]) {
     out.extend_from_slice(b);
 }
 
-fn write_array_len(out: &mut Vec<u8>, n: usize) {
+pub(crate) fn write_array_len(out: &mut Vec<u8>, n: usize) {
     match n {
         0..=15 => out.push(0x90 | n as u8),
         16..=0xffff => {
@@ -276,7 +273,7 @@ fn write_array_len(out: &mut Vec<u8>, n: usize) {
     }
 }
 
-fn write_map_len(out: &mut Vec<u8>, n: usize) {
+pub(crate) fn write_map_len(out: &mut Vec<u8>, n: usize) {
     match n {
         0..=15 => out.push(0x80 | n as u8),
         16..=0xffff => {
@@ -291,6 +288,28 @@ fn write_map_len(out: &mut Vec<u8>, n: usize) {
 }
 
 // ---------------------------------------------------------------- reading
+
+/// A content block reference: `[cid (bin 33), seed (bin 32), size]`.
+pub(crate) fn write_block(out: &mut Vec<u8>, b: &FileRef) {
+    write_array_len(out, 3);
+    write_bin(out, b.root.as_bytes());
+    write_bin(out, &b.seed.0);
+    write_int(out, b.size as i64);
+}
+
+pub(crate) fn read_block(r: &mut Reader) -> Result<FileRef, RecordError> {
+    if r.array_len()? != 3 {
+        return Err(RecordError::Malformed("block ref"));
+    }
+    let cid = Cid::from_bytes(r.bin()?.try_into().map_err(|_| RecordError::Malformed("block cid"))?)
+        .ok_or(RecordError::Malformed("CID version"))?;
+    let seed = Seed(r.bin()?.try_into().map_err(|_| RecordError::Malformed("block seed"))?);
+    let size = match r.value(0)? {
+        Value::Int(n) if n >= 0 => n as u64,
+        _ => return Err(RecordError::Malformed("block size")),
+    };
+    Ok(FileRef { root: cid, seed, size })
+}
 
 fn read_record(r: &mut Reader) -> Result<Record, RecordError> {
     if r.map_len()? != 3 || r.str()? != "attrs" {
@@ -314,17 +333,7 @@ fn read_record(r: &mut Reader) -> Result<Record, RecordError> {
     let n = r.array_len()?;
     let mut blocks = Vec::with_capacity(n.min(1 << 12));
     for _ in 0..n {
-        if r.array_len()? != 3 {
-            return Err(RecordError::Malformed("block ref"));
-        }
-        let cid = Cid::from_bytes(r.bin()?.try_into().map_err(|_| RecordError::Malformed("block cid"))?)
-            .ok_or(RecordError::Malformed("CID version"))?;
-        let seed = Seed(r.bin()?.try_into().map_err(|_| RecordError::Malformed("block seed"))?);
-        let size = match r.value(0)? {
-            Value::Int(n) if n >= 0 => n as u64,
-            _ => return Err(RecordError::Malformed("block size")),
-        };
-        blocks.push(FileRef { root: cid, seed, size });
+        blocks.push(read_block(r)?);
     }
     if r.str()? != "id" {
         return Err(RecordError::Malformed("record fields"));
@@ -333,10 +342,10 @@ fn read_record(r: &mut Reader) -> Result<Record, RecordError> {
     Ok(Record { id, attrs, blocks })
 }
 
-struct Reader<'a>(&'a [u8]);
+pub(crate) struct Reader<'a>(pub(crate) &'a [u8]);
 
 impl Reader<'_> {
-    fn take(&mut self, n: usize) -> Result<&[u8], RecordError> {
+    pub(crate) fn take(&mut self, n: usize) -> Result<&[u8], RecordError> {
         if self.0.len() < n {
             return Err(RecordError::Malformed("truncated"));
         }
@@ -344,13 +353,13 @@ impl Reader<'_> {
         self.0 = b;
         Ok(a)
     }
-    fn byte(&mut self) -> Result<u8, RecordError> {
+    pub(crate) fn byte(&mut self) -> Result<u8, RecordError> {
         Ok(self.take(1)?[0])
     }
     fn be(&mut self, n: usize) -> Result<u64, RecordError> {
         Ok(self.take(n)?.iter().fold(0u64, |acc, &b| (acc << 8) | b as u64))
     }
-    fn map_len(&mut self) -> Result<usize, RecordError> {
+    pub(crate) fn map_len(&mut self) -> Result<usize, RecordError> {
         let t = self.byte()?;
         match t {
             0x80..=0x8f => Ok((t & 0x0f) as usize),
@@ -359,7 +368,7 @@ impl Reader<'_> {
             _ => Err(RecordError::Malformed("expected a map")),
         }
     }
-    fn array_len(&mut self) -> Result<usize, RecordError> {
+    pub(crate) fn array_len(&mut self) -> Result<usize, RecordError> {
         let t = self.byte()?;
         self.array_len_tagged(t)
     }
@@ -371,7 +380,7 @@ impl Reader<'_> {
             _ => Err(RecordError::Malformed("expected an array")),
         }
     }
-    fn str(&mut self) -> Result<String, RecordError> {
+    pub(crate) fn str(&mut self) -> Result<String, RecordError> {
         let t = self.byte()?;
         self.str_tagged(t)
     }
@@ -385,7 +394,7 @@ impl Reader<'_> {
         };
         String::from_utf8(self.take(n)?.to_vec()).map_err(|_| RecordError::Malformed("invalid UTF-8"))
     }
-    fn bin(&mut self) -> Result<Vec<u8>, RecordError> {
+    pub(crate) fn bin(&mut self) -> Result<Vec<u8>, RecordError> {
         let t = self.byte()?;
         self.bin_tagged(t)
     }
@@ -398,7 +407,7 @@ impl Reader<'_> {
         } as usize;
         Ok(self.take(n)?.to_vec())
     }
-    fn value(&mut self, depth: usize) -> Result<Value, RecordError> {
+    pub(crate) fn value(&mut self, depth: usize) -> Result<Value, RecordError> {
         if depth > 32 {
             return Err(RecordError::Malformed("nesting too deep"));
         }

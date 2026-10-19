@@ -1321,8 +1321,8 @@ async fn follow_pass(d: &Daemon, mut f: retifs_store::Follow) -> Result<(), Stri
         };
         let commit = Commit::decode(&open(&head.commit, &seed, &ct).map_err(|e| e.to_string())?, &f.addr)
             .map_err(|e| e.to_string())?;
-        if commit.seq != head.seq {
-            return Err(format!("head {} points at commit {}", head.seq, commit.seq));
+        if commit.seq != head.seq || commit.writer != head.writer {
+            return Err(format!("head {} points at another commit ({} by another writer?)", head.seq, commit.seq));
         }
         // Keep the commit and pass it on to other followers (they prove its seed).
         d.store.insert(&head.commit, &ct, tier::PINNED).map_err(|e| e.to_string())?;

@@ -133,11 +133,27 @@ impl std::str::FromStr for ChannelAddr {
 pub struct ChannelKey {
     signing: SigningKey,
     pub read_key: [u8; 32],
+    /// The namespace written to, when it isn't this writer's own (a member of
+    /// another's namespace, ADR-0017).
+    ns: Option<NsId>,
 }
 
 impl ChannelKey {
     pub fn from_secrets(signing_seed: [u8; 32], read_key: [u8; 32]) -> Self {
-        ChannelKey { signing: SigningKey::from_bytes(&signing_seed), read_key }
+        ChannelKey { signing: SigningKey::from_bytes(&signing_seed), read_key, ns: None }
+    }
+
+    /// A member's key: its own signing key, writing to namespace `ns_id`.
+    pub fn member(signing_seed: [u8; 32], read_key: [u8; 32], ns_id: NsId) -> Self {
+        ChannelKey { signing: SigningKey::from_bytes(&signing_seed), read_key, ns: Some(ns_id) }
+    }
+
+    pub fn ns_id(&self) -> NsId {
+        self.ns.unwrap_or_else(|| ns_id(&self.signing.verifying_key().to_bytes()))
+    }
+
+    pub fn writer(&self) -> [u8; 32] {
+        self.signing.verifying_key().to_bytes()
     }
 
     pub fn signing_seed(&self) -> [u8; 32] {
@@ -165,7 +181,7 @@ impl Commit {
     /// Signs commit `seq` and seals it as a chunk (store it, then sign a head for it).
     pub fn create(key: &ChannelKey, seq: u64, time_ms: u64, prev: Option<(Cid, Seed)>, root: FileRef) -> (Commit, Sealed) {
         let addr = key.addr();
-        let mut c = Commit { ns_id: addr.ns_id(), writer: addr.writer, seq, time_ms, prev, root, signature: [0; 64] };
+        let mut c = Commit { ns_id: key.ns_id(), writer: key.writer(), seq, time_ms, prev, root, signature: [0; 64] };
         c.signature = key.signing.sign(&[COMMIT_LABEL, &c.body()].concat()).to_bytes();
         let sealed = seal(&addr.commit_secret(), &c.encode()).expect("a commit fits a chunk");
         (c, sealed)
@@ -195,7 +211,10 @@ impl Commit {
         [self.body().as_slice(), &self.signature].concat()
     }
 
-    /// Parses a commit's plaintext and checks it belongs to `addr`'s channel.
+    /// Parses a commit's plaintext and checks it belongs to `addr`'s namespace
+    /// and is signed by the writer it names. Whether that writer may write is
+    /// the merge's question (ADR-0017); a single-writer follower also checks
+    /// `writer == addr.writer`.
     pub fn decode(bytes: &[u8], addr: &ChannelAddr) -> Result<Commit, ChannelError> {
         let mut r = Reader(bytes);
         if r.take(1)? != [VERSION] {
@@ -216,7 +235,7 @@ impl Commit {
             return Err(ChannelError::Malformed("trailing bytes"));
         }
         let c = Commit { ns_id, writer, seq, time_ms, prev, root, signature };
-        if c.writer != addr.writer || c.ns_id != addr.ns_id() {
+        if c.ns_id != addr.ns_id() {
             return Err(ChannelError::WrongChannel);
         }
         verify(&c.writer, &[COMMIT_LABEL, &c.body()].concat(), &c.signature)?;
@@ -241,8 +260,8 @@ impl Head {
     pub fn sign(key: &ChannelKey, seq: u64, time_s: u64, commit: Cid, seed: &Seed, iv: [u8; 16]) -> Head {
         let addr = key.addr();
         let mut h = Head {
-            ns_id: addr.ns_id(),
-            writer: addr.writer,
+            ns_id: key.ns_id(),
+            writer: key.writer(),
             seq,
             time_s,
             commit,
@@ -266,8 +285,9 @@ impl Head {
         b.try_into().unwrap()
     }
 
-    /// Parses and verifies a head: its signature, and that `ns_id` belongs to
-    /// its writer. Anyone can do this, without the read key.
+    /// Parses and verifies a head's signature by the writer it names. Anyone can
+    /// do this, without the read key. Whether the writer may write to `ns_id`
+    /// is decided by the namespace's grants (ADR-0017).
     pub fn decode(bytes: &[u8]) -> Result<Head, ChannelError> {
         if bytes.len() != HEAD_LEN {
             return Err(ChannelError::Malformed("head length"));
@@ -285,16 +305,13 @@ impl Head {
             sealed_seed: r.array()?,
             signature: r.array()?,
         };
-        if h.ns_id != ns_id(&h.writer) {
-            return Err(ChannelError::WrongChannel);
-        }
         verify(&h.writer, &[HEAD_LABEL, &bytes[..HEAD_LEN - 64]].concat(), &h.signature)?;
         Ok(h)
     }
 
     /// The commit's seed, for followers holding the read key.
     pub fn commit_seed(&self, addr: &ChannelAddr) -> Result<Seed, ChannelError> {
-        if self.writer != addr.writer {
+        if self.ns_id != addr.ns_id() {
             return Err(ChannelError::WrongChannel);
         }
         let pt = token_decrypt(&addr.head_key(), &self.sealed_seed).ok_or(ChannelError::WrongKey)?;
@@ -373,6 +390,20 @@ mod tests {
         assert_eq!(got, c2);
         let (pcid, pseed) = got.prev.unwrap();
         assert_eq!(Commit::decode(&open(&pcid, &pseed, &s1.ciphertext).unwrap(), &addr).unwrap(), c1);
+    }
+
+    #[test]
+    fn members_write_under_the_namespace_and_sign_as_themselves() {
+        let owner = key(1);
+        let addr = owner.addr();
+        let member = ChannelKey::member([9; 32], addr.read_key, addr.ns_id());
+        let root = FileRef { root: Cid::of(b"ops"), seed: Seed([4; 32]), size: 10 };
+        let (c, s) = Commit::create(&member, 1, 1000, None, root);
+        assert_eq!((c.ns_id, c.writer), (addr.ns_id(), member.writer()));
+        let head = Head::decode(&Head::sign(&member, 1, 1, s.cid, &s.seed, [9; 16]).encode()).unwrap();
+        assert_eq!(head.writer, member.writer());
+        let seed = head.commit_seed(&addr).unwrap();
+        assert_eq!(Commit::decode(&open(&s.cid, &seed, &s.ciphertext).unwrap(), &addr).unwrap(), c);
     }
 
     #[test]
