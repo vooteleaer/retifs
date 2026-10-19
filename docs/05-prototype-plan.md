@@ -58,7 +58,8 @@ Prototypes are throwaway. They're for learning, not for locking in the format. T
 - [x] Every modification is a version (single writer): a signed commit per change in the namespace's own channel; `rec history`, `query --at` ([ADR-0006](adr/0006-versioning-and-sharing.md)).
 - [x] Multi-writer namespaces: operations per commit, merge per field in stamp order, grants and revokes, join and sync between members ([ADR-0017](adr/0017-multi-writer-namespaces.md)).
 - [x] Read-key rotation on revoke: identities, rekey wrapped with RNS Identity.encrypt, crossing rotations via per-key heads ([ADR-0017](adr/0017-multi-writer-namespaces.md)).
-- [ ] Multi-writer, continued: filtered grants, logical clocks, checkpoints; Prolly-tree index; `watch` / `transaction` / `at` in the API.
+- [x] Namespace state as a Prolly tree; checkpoints: local resume, named in chains, new members start from a grant holder's checkpoint, history fetched on demand, `ns verify` ([ADR-0018](adr/0018-state-trees.md)).
+- [ ] Multi-writer, continued: filtered grants, logical clocks, pruning tombstones; `watch` / `transaction` / `at` in the API.
 - [ ] `keep:<device>` tag and query-based keep rules (proactive pull).
 - [ ] Blind index, remote `/query`, live query.
 - [ ] Per-writer commit chains (one commit per modification), merge, history queries, per-record `versions`.

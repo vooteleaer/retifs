@@ -497,6 +497,8 @@ struct Daemon {
     /// Wakes namespace sync (joined, granted).
     ns_wake: Notify,
     ns_cache: Mutex<HashMap<String, NsCache>>,
+    /// Joined namespaces still looking for a checkpoint to start from.
+    ns_seeking: Mutex<std::collections::HashSet<String>>,
 }
 
 impl Daemon {
@@ -621,6 +623,7 @@ async fn serve(store: Arc<SlabStore>, identity: node::IdentitySecret, endpoint: 
         follow_wake: Notify::new(),
         ns_wake: Notify::new(),
         ns_cache: Mutex::new(HashMap::new()),
+        ns_seeking: Mutex::new(std::collections::HashSet::new()),
     });
     println!("attached to shared instance {of}");
     println!("serving {} chunks as retifs.node <{}>", store.len().unwrap_or(0), daemon.node_hex);
@@ -990,6 +993,7 @@ async fn handle(d: &Daemon, req: Request) -> Result<Response, String> {
             d.store.set_ns_identity(&ns, &identity).map_err(|e| e.to_string())?;
             d.store.add_ns_peers(&ns, &parse_peers(&from)?).map_err(|e| e.to_string())?;
             write_ops(d, &ns, vec![Op::Identity(keywrap::public(&identity))]).await?;
+            d.ns_seeking.lock().unwrap().insert(ns.clone());
             d.ns_wake.notify_one();
             Ok(Response::Namespace(ns_view(d, &ns)?))
         }
@@ -1039,6 +1043,13 @@ async fn handle(d: &Daemon, req: Request) -> Result<Response, String> {
         }
 
         Request::NsInfo { ns } => Ok(Response::Namespace(ns_view(d, &ns)?)),
+
+        Request::NsVerify { ns } => {
+            d.ns_cache.lock().unwrap().entry(ns.clone()).or_default().fetch_whole = true;
+            sync_ns(d, &ns).await?;
+            let (ok, detail) = verify_checkpoint(d, &ns)?;
+            Ok(Response::Verified { ok, detail })
+        }
 
         Request::NsCheckpoint { ns } => {
             writable(&ns)?;
@@ -1247,20 +1258,20 @@ async fn sync_ns(d: &Daemon, ns: &str) -> Result<(), String> {
     let (addr, own, _) = chains(d, ns, false)?;
     let ns_id = addr.ns_id();
     let mut changed = false;
-    // A member with nothing yet starts from the creator's latest checkpoint
-    // (ADR-0018); chains are then fetched back only to its frontier, and
-    // the history before it only if a rebuild needs it.
-    let fresh = d.store.ns_checkpoint(ns).map_err(|e| e.to_string())?.is_none()
-        && d.store.writer_heads(&ns_id).map_err(|e| e.to_string())?.is_empty();
-    let whole = d.ns_cache.lock().unwrap().get(ns).is_some_and(|e| e.needs_history);
-    let floors: HashMap<[u8; 32], Cid> = match d.store.ns_checkpoint(ns).map_err(|e| e.to_string())? {
-        Some(f) if !whole => manifest::read_all(&*d.store, &f)
-            .ok()
-            .and_then(|b| Checkpoint::decode(&b).ok())
-            .map(|cp| cp.frontier.iter().map(|f| (f.writer, f.commit)).collect())
-            .unwrap_or_default(),
-        _ => HashMap::new(),
-    };
+    // A member that joined starts from the latest checkpoint of a writer
+    // holding `grant` (ADR-0018): the creator's chain is searched first, other
+    // grant holders once the merged grants show them. Chains are then fetched
+    // back only to the checkpoint's frontier, the history before it only if
+    // a rebuild (or verification) needs it.
+    let mut seeking = d.ns_seeking.lock().unwrap().contains(ns) && d.store.ns_checkpoint(ns).map_err(|e| e.to_string())?.is_none();
+    let mut searched: std::collections::BTreeSet<[u8; 32]> = std::collections::BTreeSet::new();
+    let (whole, verify) = d
+        .ns_cache
+        .lock()
+        .unwrap()
+        .get(ns)
+        .map_or((false, false), |e| (e.needs_history || e.fetch_whole, e.needs_history && !e.fetch_whole));
+    let mut floors = if whole { HashMap::new() } else { checkpoint_floors(d, ns) };
     for peer in peers {
         let link = match d.link_to(&peer).await {
             Ok(l) => l,
@@ -1275,6 +1286,10 @@ async fn sync_ns(d: &Daemon, ns: &str) -> Result<(), String> {
         writers.insert(addr.writer);
         writers.extend(d.store.writer_heads(&ns_id).map_err(|e| e.to_string())?.iter().map(|h| h.writer));
         writers.remove(&own);
+        // The creator first, then other grant holders, then the rest.
+        let holds_grant = |w: &[u8; 32]| *w == addr.writer || merged.writers.get(w).is_some_and(|r| r.contains(&Right::Grant));
+        let mut writers: Vec<[u8; 32]> = writers.into_iter().collect();
+        writers.sort_by_key(|w| (*w != addr.writer, !holds_grant(w)));
         for w in writers {
             let raw = match d.ask(link, HEAD_ENDPOINT, [ns_id.as_slice(), &w].concat()).await {
                 Ok(r) => r,
@@ -1321,15 +1336,34 @@ async fn sync_ns(d: &Daemon, ns: &str) -> Result<(), String> {
             d.store.set_key_head(&ns_id, &w, &key_id(&used_key), &raw).map_err(|e| e.to_string())?;
             let walk = if whole {
                 Walk::Whole
-            } else if fresh && w == addr.writer {
+            } else if seeking && holds_grant(&w) {
                 Walk::ToCheckpoint
             } else {
                 Walk::ToHeld
             };
-            let got = fetch_chain(d, link, &addr, (head.commit, seed), &w, floors.get(&w).copied(), walk).await?;
+            // A peer may relay a writer's chain without holding its checkpoint:
+            // then try the next writer, and this one again from the next peer.
+            let got = match fetch_chain(d, link, &addr, (head.commit, seed), &w, floors.get(&w).copied(), walk).await {
+                Ok(got) => got,
+                Err(e) => {
+                    eprintln!("ns {ns}: writer {}… from <{}>: {e}", &hex(&w)[..12], hex(&peer));
+                    continue;
+                }
+            };
+            if walk == Walk::ToCheckpoint {
+                searched.insert(w);
+            }
             if let Some(cp) = got.checkpoint {
-                install_checkpoint(d, ns, link, &cp).await?;
-                println!("ns {ns}: starting from the creator's checkpoint {cp}");
+                if let Err(e) = install_checkpoint(d, ns, link, &cp).await {
+                    eprintln!("ns {ns}: checkpoint {cp} from <{}>: {e}", hex(&peer));
+                    searched.remove(&w);
+                    continue;
+                }
+                let by = if w == addr.writer { "the creator".to_string() } else { format!("grant holder {}…", &hex(&w)[..12]) };
+                println!("ns {ns}: starting from the checkpoint of {by}: {cp}");
+                seeking = false;
+                d.ns_seeking.lock().unwrap().remove(ns);
+                floors = checkpoint_floors(d, ns);
                 d.ns_wake.notify_one(); // the checkpoint names the other writers: fetch them next
             }
             d.store
@@ -1339,10 +1373,31 @@ async fn sync_ns(d: &Daemon, ns: &str) -> Result<(), String> {
             changed = true;
         }
     }
+    if seeking {
+        // Every grant holder known after this round has been searched: no
+        // checkpoint to start from, the whole history it is.
+        let merged = materialize(d, ns)?;
+        let holders: Vec<[u8; 32]> = merged.writers.iter().filter(|(_, r)| r.contains(&Right::Grant)).map(|(w, _)| *w).collect();
+        if holders.iter().all(|w| searched.contains(w) || *w == own) && searched.contains(&addr.writer) {
+            d.ns_seeking.lock().unwrap().remove(ns);
+            println!("ns {ns}: no grant holder has named a checkpoint; using the whole history");
+        } else if !searched.is_empty() {
+            d.ns_wake.notify_one(); // grant holders learned this round: search their chains next
+        }
+    }
     if whole {
-        // The history is here now (as far as peers had it): rebuild from it.
+        // The history is here now (as far as peers had it): check the
+        // checkpoint against it, then rebuild from it.
+        // (`ns verify` checks on its own and reports the result.)
+        if verify && d.store.ns_checkpoint(ns).map_err(|e| e.to_string())?.is_some() {
+            match verify_checkpoint(d, ns) {
+                Ok((_, detail)) => println!("ns {ns}: {detail}"),
+                Err(e) => println!("ns {ns}: checkpoint not verified: {e}"),
+            }
+        }
         if let Some(e) = d.ns_cache.lock().unwrap().get_mut(ns) {
             e.needs_history = false;
+            e.fetch_whole = false;
             e.state = None;
         }
         changed = true;
@@ -1364,6 +1419,67 @@ async fn sync_ns(d: &Daemon, ns: &str) -> Result<(), String> {
         println!("ns {ns}: merged, {} record(s), {} writer(s)", merged.records.len(), merged.writers.len());
     }
     Ok(())
+}
+
+/// Where the local checkpoint's frontier is, per writer: chain walks stop there.
+fn checkpoint_floors(d: &Daemon, ns: &str) -> HashMap<[u8; 32], Cid> {
+    d.store
+        .ns_checkpoint(ns)
+        .ok()
+        .flatten()
+        .and_then(|f| manifest::read_all(&*d.store, &f).ok())
+        .and_then(|b| Checkpoint::decode(&b).ok())
+        .map(|cp| cp.frontier.iter().map(|f| (f.writer, f.commit)).collect())
+        .unwrap_or_default()
+}
+
+/// Checks the namespace's checkpoint against its history (ADR-0018):
+/// replays every chain up to the checkpoint's frontier and compares the
+/// result with the checkpoint, exactly. A checkpoint that doesn't match is
+/// dropped and the namespace rebuilt from the history. Needs the history
+/// up to the frontier here (`retifs ns verify` fetches it).
+fn verify_checkpoint(d: &Daemon, ns: &str) -> Result<(bool, String), String> {
+    let Some(file) = d.store.ns_checkpoint(ns).map_err(|e| e.to_string())? else {
+        return Ok((true, "no checkpoint here: the state is replayed from the whole history".into()));
+    };
+    let (creator, _) = d.store.ns_info(ns).map_err(|e| e.to_string())?.ok_or_else(|| format!("no namespace {ns}"))?;
+    let cp = manifest::read_all(&*d.store, &file)
+        .map_err(|e| e.to_string())
+        .and_then(|b| Checkpoint::decode(&b).map_err(|e| e.to_string()))?;
+    chains(d, ns, true)?;
+    let walked = d.ns_cache.lock().unwrap().get(ns).map(|e| e.chains.clone()).unwrap_or_default();
+    let mut upto: std::collections::BTreeMap<[u8; 32], Vec<WriterCommit>> = std::collections::BTreeMap::new();
+    let mut problem = None;
+    for f in &cp.frontier {
+        let short = &hex(&f.writer)[..12];
+        let chain = walked.get(&f.writer).map(Vec::as_slice).unwrap_or_default();
+        if chain.first().map(|(seq, _, _)| *seq) != Some(1) {
+            return Err(format!("writer {short}…'s history isn't all here yet"));
+        }
+        let Some(at) = chain.iter().position(|(seq, _, _)| *seq == f.seq) else {
+            return Err(format!("writer {short}…'s chain here doesn't reach version {}", f.seq));
+        };
+        if chain[at].1 != f.commit {
+            problem = Some("a frontier commit differs from the chain's");
+        }
+        upto.insert(f.writer, chain[..=at].iter().map(|(_, _, c)| c.clone()).collect());
+    }
+    let commits: usize = upto.values().map(Vec::len).sum();
+    if problem.is_none() {
+        problem = cp.check(&*d.store, &creator, &upto, now_ms()).map_err(|e| e.to_string())?;
+    }
+    match problem {
+        None => Ok((true, format!("checkpoint {file} matches the history: {commits} commit(s) replayed"))),
+        Some(p) => {
+            // Don't use it: rebuild from the history, and make a checkpoint of our own.
+            d.store.remove_ns_checkpoint(ns).map_err(|e| e.to_string())?;
+            let mut cache = d.ns_cache.lock().unwrap();
+            let e = cache.entry(ns.to_string()).or_default();
+            e.state = None;
+            e.floors.clear();
+            Ok((false, format!("checkpoint {file} does NOT match the history ({p}); dropped, rebuilding from the history")))
+        }
+    }
 }
 
 /// How far back a chain walk goes.
@@ -1410,7 +1526,11 @@ async fn fetch_chain(
                         next = c.prev;
                         continue;
                     }
-                    break;
+                    // Still looking for a checkpoint: look at held commits too
+                    // (an earlier peer may have lacked the checkpoint file).
+                    if !(walk == Walk::ToCheckpoint && out.checkpoint.is_none()) {
+                        break;
+                    }
                 }
                 ct
             }
@@ -1620,6 +1740,8 @@ struct NsCache {
     /// A rebuild needs history a checkpoint let this node skip: the state
     /// stays as it was until sync has fetched it.
     needs_history: bool,
+    /// Fetch every chain whole on the next sync (to verify the checkpoint).
+    fetch_whole: bool,
 }
 
 /// A checkpoint is written after this many new commits (ADR-0018).

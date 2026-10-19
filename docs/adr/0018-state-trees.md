@@ -72,12 +72,22 @@ checkpoint = { "control":  [ [ stamp, op ], … ],              every control op
 
 ### Checkpoints for new members
 - **In the chain:** a writer holding `grant` names its latest checkpoint with the operation `[ "checkpoint", [cid, seed, size] ]` (ADR-0017 operations file). The operation changes no state; the merge skips it. The checkpoint file is then needed and placed like the history, and its state tree goes with it: a checkpoint file's chunks are its manifest's plus every tree node.
-- **Whose checkpoints count:** a member starts only from a checkpoint by a writer holding `grant` in the view it already trusts. For a node joining with nothing, that view is the address alone, so it is the creator.
+- **Whose checkpoints count:** a member starts only from a checkpoint by a writer holding `grant` in the view it already trusts.
+  - For a node joining with nothing, that view is the address alone, so it is the creator.
+  - If the creator's chain names no checkpoint, the joiner has fetched it whole, so the creator's grants are authentic. A writer the creator granted `grant` to may then supply the checkpoint.
   - A grant holder can already revoke and rekey anyone, so trusting its checkpoint adds no power.
   - Anyone holding the chains can check a checkpoint by replaying them. The skipped history stays placed, so it can always be fetched.
-- **Joining:** a node with no state walks the creator's chain back from its head to the newest checkpoint operation. It fetches that checkpoint and its tree, checks that it loads, and keeps it as its own. Every writer's chain is then fetched back only to the checkpoint's frontier.
+- **Joining:**
+  1. A node that has just joined walks the creator's chain back from its head to the newest checkpoint operation.
+  2. If there is none, it does the same for each grant holder the merged grants show, round by round. It stops at the first checkpoint it can fetch whole, or once every grant holder it knows has been searched.
+  3. It fetches that checkpoint and its tree, checks that it loads, and keeps it as its own.
+  4. Every writer's chain is then fetched back only to the checkpoint's frontier.
+  - A peer that relays a chain without holding its checkpoint file is skipped, and the next peer is tried.
+- **Verifying:** `retifs ns verify NS` fetches the whole history and replays each chain up to the checkpoint's frontier. It checks that every frontier commit is the one the chain has there. It then compares the replayed control operations, highest stamp and every stamped record with the checkpoint, exactly (`Checkpoint::check`).
+  - The same check runs whenever a node fetches the history for a rebuild.
+  - A checkpoint that doesn't match is dropped, and the namespace is rebuilt from the history; the node then writes checkpoints of its own.
 - **History on demand:** if a control operation arrives that is older than data already applied, the node needs the history before its checkpoint. Until sync has fetched every chain whole, it stays at its previous state; it then rebuilds.
-- **Not covered:** a writer's grant revoked in history this node skipped. Such a writer could hand a joiner a false checkpoint, and the joiner would only detect it by replaying. That is why joiners start only from the creator's checkpoint for now.
+- **Not covered until verified:** a grant holder whose grant was revoked in a chain this node hasn't fetched could hand a joiner a false checkpoint. The joiner uses it until it verifies, by `ns verify` or when a rebuild fetches the history. Verifying by default costs exactly the transfer that checkpoints save, so it stays a choice: worth it on good links, not over LoRa.
 
 ## Impact on the threat model
 See the [threat model](../04-threat-model.md).
@@ -114,4 +124,11 @@ See the [threat model](../04-threat-model.md).
     1. A wrote 100 records, edited one, deleted one, named a checkpoint, then wrote 5 more records and deleted another.
     2. B joined and was granted. It started from A's checkpoint and fetched 7 commits instead of 109. Its 103 records were identical to A's, edits and deletions included, and B's own write reached A.
     3. Then A granted a third key, and B wrote before syncing, so the grant reached B stamped before B's data. B logged that it needed the history, fetched the 102 earlier commits, rebuilt, and again matched A: 105 records, with the new writer known.
-- **Not yet:** starting from a grant holder's checkpoint other than the creator's, verifying a checkpoint by replaying in the background, pruning tombstones, fetching only part of a namespace.
+- **Grant holders' checkpoints and verification (2026-10-19):**
+  - `Checkpoint::check`. Test: an honest checkpoint passes. Forgeries fail: one without a write, one without a delete, one without a revoke, and one with an extra record. So does a history shorter than the frontier.
+  - Daemon: the search over grant holders, skipping peers that lack the checkpoint, `retifs ns verify`, and verification after every history fetch.
+  - Live, three daemons:
+    1. A (the creator, 40 records, no checkpoint) granted C `grant`. C synced the whole history and named a checkpoint.
+    2. A wrote 3 more records, then B joined with peers A and C. B found no checkpoint in A's chain, which it fetched whole (44 commits), and started from C's checkpoint. Its 43 records were identical to A's.
+    3. `ns verify` on B fetched the rest, replayed 41 commits and confirmed C's checkpoint, exit code 0; the records stayed identical.
+- **Not yet:** pruning tombstones, fetching only part of a namespace, verifying in the background when links are good.

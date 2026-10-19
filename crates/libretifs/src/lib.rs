@@ -132,6 +132,9 @@ pub enum Request {
     /// Writes a checkpoint of the namespace now and, if this node holds
     /// `grant`, names it in its chain for new members (ADR-0018).
     NsCheckpoint { ns: String },
+    /// Fetches the namespace's whole history and checks the checkpoint this
+    /// node started from against it (ADR-0018).
+    NsVerify { ns: String },
 }
 
 /// An attribute value (ADR-0016).
@@ -240,6 +243,10 @@ pub enum Response {
         entries: Vec<HistoryEntry>,
     },
     Namespace(NsView),
+    Verified {
+        ok: bool,
+        detail: String,
+    },
     Error {
         message: String,
     },

@@ -12,11 +12,13 @@
 //! writer's commits up to its frontier. Commits after it apply as usual; a
 //! control operation older than `high` needs the history (rebuild).
 
+use std::collections::BTreeMap;
+
 use crate::{
     chunk::Seed,
     cid::Cid,
     manifest::Store,
-    ops::{read_op, read_opt_stamp, read_stamp, write_op, write_stamp, Op, Stamp, StampedRecord, State, WriterKey},
+    ops::{read_op, read_opt_stamp, read_stamp, write_op, write_stamp, Op, Stamp, StampedRecord, State, WriterCommit, WriterKey},
     prolly::{self, Root, TreeError},
     record::{canonical, write_array_len, write_bin, write_int, write_map_len, write_str, Reader, RecordError, Value},
     secret::ConvergenceSecret,
@@ -75,6 +77,36 @@ impl Checkpoint {
             stamped.push((id, StampedRecord::decode(&bytes).map_err(|_| TreeError::Corrupt("stamped record"))?));
         }
         Ok(State::restore(creator, self.control.clone(), self.high, stamped))
+    }
+
+    /// Checks the checkpoint against the history it claims to summarize:
+    /// `chains` holds each frontier writer's commits from the first up to its
+    /// frontier. Returns how the replayed state differs, if it does.
+    pub fn check<S: Store>(
+        &self,
+        store: &S,
+        creator: &WriterKey,
+        chains: &BTreeMap<WriterKey, Vec<WriterCommit>>,
+        now_ms: u64,
+    ) -> Result<Option<&'static str>, TreeError<S::Error>> {
+        let claimed = self.load(store, creator)?;
+        for f in &self.frontier {
+            let chain = chains.get(&f.writer).map(Vec::as_slice).unwrap_or_default();
+            if chain.first().map(|c| c.seq) != Some(1) || chain.last().map(|c| (c.seq, c.time_ms)) != Some((f.seq, f.time_ms)) {
+                return Ok(Some("the history given doesn't match its frontier"));
+            }
+        }
+        if chains.keys().any(|w| !self.frontier.iter().any(|f| f.writer == *w)) {
+            return Ok(Some("the history given has writers it doesn't name"));
+        }
+        let replayed = State::build(creator, chains, now_ms);
+        Ok(if replayed.control() != claimed.control() {
+            Some("its grants, revokes or keys differ from the history")
+        } else if replayed.high() != claimed.high() || replayed.stamped() != claimed.stamped() {
+            Some("its records differ from the history")
+        } else {
+            None
+        })
     }
 
     pub fn encode(&self) -> Vec<u8> {
@@ -191,8 +223,8 @@ fn uint(r: &mut Reader) -> Result<u64, RecordError> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::ops::{merge, Right, WriterCommit};
-    use std::collections::{BTreeMap, HashMap};
+    use crate::ops::{merge, Right};
+    use std::collections::HashMap;
 
     #[derive(Default)]
     struct Mem(HashMap<Cid, Vec<u8>>);
@@ -302,6 +334,58 @@ mod tests {
         // Most control operations arrive after the data they could affect is
         // older than them: they apply in place.
         assert!(in_place > rebuilds * 4, "in place {in_place}, rebuilds {rebuilds}");
+    }
+
+    /// An honest checkpoint checks out; one that leaves out a write, a
+    /// delete or a revoke, or adds a record, doesn't.
+    #[test]
+    fn check_finds_forged_checkpoints() {
+        fn id(i: u8) -> [u8; 16] {
+            [i; 16]
+        }
+        let c = |seq, time_ms, ops| WriterCommit { seq, time_ms, ops };
+        let mut chains = Chains::new();
+        chains.insert(
+            ALICE,
+            vec![
+                c(1, 10, vec![Op::Grant(BOB, vec![Right::Write, Right::Grant]), Op::Set(id(1), "a".into(), Value::Int(1))]),
+                c(2, 30, vec![Op::Revoke(BOB), Op::Delete(id(2))]),
+            ],
+        );
+        chains.insert(BOB, vec![c(1, 20, vec![Op::Set(id(2), "b".into(), Value::Int(2)), Op::Set(id(3), "c".into(), Value::Int(3))])]);
+        let frontier = |ch: &Chains| -> Vec<Frontier> {
+            ch.iter()
+                .map(|(w, c)| Frontier { writer: *w, seq: c.len() as u64, time_ms: c.last().unwrap().time_ms, commit: Cid::of(w) })
+                .collect()
+        };
+        let secret = state_secret(&[3; 32]);
+        let mut store = Mem::default();
+        let honest = Checkpoint::save(&mut store, &secret, &State::build(&ALICE, &chains, 1_000), frontier(&chains)).unwrap();
+        assert_eq!(honest.check(&store, &ALICE, &chains, 1_000).unwrap(), None);
+
+        // Each forgery: a state from an altered history, claiming the real frontier.
+        let forge = |store: &mut Mem, alter: &dyn Fn(&mut Chains)| {
+            let mut fake = chains.clone();
+            alter(&mut fake);
+            Checkpoint::save(store, &secret, &State::build(&ALICE, &fake, 1_000), frontier(&chains)).unwrap()
+        };
+        type Alter = dyn Fn(&mut Chains);
+        let cases: [(&str, &Alter); 4] = [
+            ("without Bob's write", &|ch| ch.get_mut(&BOB).unwrap()[0].ops.pop().map(|_| ()).unwrap()),
+            ("without the delete", &|ch| ch.get_mut(&ALICE).unwrap()[1].ops.truncate(1)),
+            ("without the revoke", &|ch| {
+                ch.get_mut(&ALICE).unwrap()[1].ops.remove(0);
+            }),
+            ("with an extra record", &|ch| ch.get_mut(&ALICE).unwrap()[0].ops.push(Op::Set(id(9), "x".into(), Value::Bool(true)))),
+        ];
+        for (name, alter) in cases {
+            let forged = forge(&mut store, alter);
+            assert!(forged.check(&store, &ALICE, &chains, 1_000).unwrap().is_some(), "{name}");
+        }
+        // The history given must be the whole history up to the frontier.
+        let mut short = chains.clone();
+        short.get_mut(&ALICE).unwrap().pop();
+        assert!(honest.check(&store, &ALICE, &short, 1_000).unwrap().is_some());
     }
 
     #[test]

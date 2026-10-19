@@ -91,6 +91,13 @@ impl SlabStore {
         }))
     }
 
+    pub fn remove_ns_checkpoint(&self, name: &str) -> Result<(), StoreError> {
+        let w = self.db.begin_write()?;
+        w.open_table(NS_CHECKPOINT)?.remove(name)?;
+        w.commit()?;
+        Ok(())
+    }
+
     pub fn set_ns_checkpoint(&self, name: &str, file: &retifs_core::FileRef) -> Result<(), StoreError> {
         let v = [file.root.as_bytes().as_slice(), &file.seed.0, &file.size.to_be_bytes()].concat();
         let w = self.db.begin_write()?;
