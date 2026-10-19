@@ -11,6 +11,7 @@ pub mod cid;
 pub mod keywrap;
 pub mod lease;
 pub mod ops;
+pub mod prolly;
 pub mod record;
 pub mod manifest;
 pub mod secret;

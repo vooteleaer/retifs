@@ -557,6 +557,186 @@ impl State {
     }
 }
 
+/// One record's CRDT state (ADR-0018): what a Prolly tree stores per record,
+/// so a checkpoint can resume merging exactly where it left off.
+/// ```text
+/// srec  = { "blocks": nil | [stamp, [ref, …]], "deleted": nil | stamp,
+///           "fields": { key: [stamp] (unset) | [stamp, value] (set), … }, "live": nil | stamp }
+/// stamp = [time, writer (bin 32), seq, index]
+/// ```
+#[derive(Debug, Clone, PartialEq, Default)]
+pub struct StampedRecord {
+    pub blocks: Option<(Stamp, Vec<FileRef>)>,
+    pub deleted: Option<Stamp>,
+    pub fields: BTreeMap<String, (Stamp, Option<Value>)>,
+    pub live: Option<Stamp>,
+}
+
+fn write_stamp(out: &mut Vec<u8>, s: &Stamp) {
+    write_array_len(out, 4);
+    crate::record::write_int(out, s.0 as i64);
+    write_bin(out, &s.1);
+    crate::record::write_int(out, s.2 as i64);
+    crate::record::write_int(out, s.3 as i64);
+}
+
+fn read_stamp(r: &mut Reader) -> Result<Stamp, RecordError> {
+    if r.array_len()? != 4 {
+        return Err(RecordError::Malformed("stamp"));
+    }
+    let int = |r: &mut Reader| -> Result<u64, RecordError> {
+        match r.value(0)? {
+            Value::Int(i) if i >= 0 => Ok(i as u64),
+            _ => Err(RecordError::Malformed("stamp number")),
+        }
+    };
+    let time = int(r)?;
+    let writer: WriterKey = r.bin()?.try_into().map_err(|_| RecordError::Malformed("stamp writer"))?;
+    let seq = int(r)?;
+    let index = int(r)?;
+    Ok((time, writer, seq, index as u32))
+}
+
+fn read_opt_stamp(r: &mut Reader) -> Result<Option<Stamp>, RecordError> {
+    if r.0.first() == Some(&0xc0) {
+        r.byte()?;
+        return Ok(None);
+    }
+    read_stamp(r).map(Some)
+}
+
+impl StampedRecord {
+    pub fn encode(&self) -> Vec<u8> {
+        let mut out = Vec::new();
+        write_map_len(&mut out, 4);
+        write_str(&mut out, "blocks");
+        match &self.blocks {
+            None => out.push(0xc0),
+            Some((s, refs)) => {
+                write_array_len(&mut out, 2);
+                write_stamp(&mut out, s);
+                write_array_len(&mut out, refs.len());
+                for b in refs {
+                    write_block(&mut out, b);
+                }
+            }
+        }
+        write_str(&mut out, "deleted");
+        match &self.deleted {
+            None => out.push(0xc0),
+            Some(s) => write_stamp(&mut out, s),
+        }
+        write_str(&mut out, "fields");
+        write_map_len(&mut out, self.fields.len());
+        for (k, (s, v)) in &self.fields {
+            write_str(&mut out, k);
+            write_array_len(&mut out, if v.is_some() { 2 } else { 1 });
+            write_stamp(&mut out, s);
+            if let Some(v) = v {
+                write_value(&mut out, v);
+            }
+        }
+        write_str(&mut out, "live");
+        match &self.live {
+            None => out.push(0xc0),
+            Some(s) => write_stamp(&mut out, s),
+        }
+        out
+    }
+
+    pub fn decode(bytes: &[u8]) -> Result<StampedRecord, RecordError> {
+        let mut r = Reader(bytes);
+        if r.map_len()? != 4 || r.str()? != "blocks" {
+            return Err(RecordError::Malformed("stamped record fields"));
+        }
+        let blocks = if r.0.first() == Some(&0xc0) {
+            r.byte()?;
+            None
+        } else {
+            if r.array_len()? != 2 {
+                return Err(RecordError::Malformed("blocks"));
+            }
+            let s = read_stamp(&mut r)?;
+            let n = r.array_len()?;
+            let mut refs = Vec::with_capacity(n.min(1 << 12));
+            for _ in 0..n {
+                refs.push(read_block(&mut r)?);
+            }
+            Some((s, refs))
+        };
+        if r.str()? != "deleted" {
+            return Err(RecordError::Malformed("stamped record fields"));
+        }
+        let deleted = read_opt_stamp(&mut r)?;
+        if r.str()? != "fields" {
+            return Err(RecordError::Malformed("stamped record fields"));
+        }
+        let n = r.map_len()?;
+        let mut fields = BTreeMap::new();
+        for _ in 0..n {
+            let k = r.str()?;
+            let m = r.array_len()?;
+            let s = read_stamp(&mut r)?;
+            let v = match m {
+                1 => None,
+                2 => Some(r.value(0)?),
+                _ => return Err(RecordError::Malformed("field")),
+            };
+            fields.insert(k, (s, v));
+        }
+        if r.str()? != "live" {
+            return Err(RecordError::Malformed("stamped record fields"));
+        }
+        let live = read_opt_stamp(&mut r)?;
+        let rec = StampedRecord { blocks, deleted, fields, live };
+        if !r.0.is_empty() {
+            return Err(RecordError::Malformed("trailing bytes"));
+        }
+        canonical(bytes, rec.encode())?;
+        Ok(rec)
+    }
+}
+
+impl State {
+    /// Every record's CRDT state (tombstones included), by ID.
+    pub fn stamped(&self) -> Vec<(RecordId, StampedRecord)> {
+        let mut out: BTreeMap<RecordId, StampedRecord> = BTreeMap::new();
+        for (id, s) in &self.live {
+            out.entry(*id).or_default().live = Some(*s);
+        }
+        for (id, s) in &self.deleted {
+            out.entry(*id).or_default().deleted = Some(*s);
+        }
+        for ((id, k), f) in &self.fields {
+            out.entry(*id).or_default().fields.insert(k.clone(), f.clone());
+        }
+        for (id, b) in &self.blocks {
+            out.entry(*id).or_default().blocks = Some(b.clone());
+        }
+        out.into_iter().collect()
+    }
+
+    /// Restores records' CRDT state (from a checkpoint) into a state that
+    /// already has its control timeline.
+    pub fn with_stamped(mut self, entries: impl IntoIterator<Item = (RecordId, StampedRecord)>) -> State {
+        for (id, r) in entries {
+            if let Some(s) = r.live {
+                self.live.insert(id, s);
+            }
+            if let Some(s) = r.deleted {
+                self.deleted.insert(id, s);
+            }
+            for (k, f) in r.fields {
+                self.fields.insert((id, k), f);
+            }
+            if let Some(b) = r.blocks {
+                self.blocks.insert(id, b);
+            }
+        }
+        self
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -717,6 +897,92 @@ mod tests {
                 st.apply(*s, op);
             }
             assert_eq!(st.records(), expect.records, "shuffled order");
+        }
+    }
+
+    /// A checkpoint (the state stored as a Prolly tree) plus the operations
+    /// after it gives exactly what replaying everything gives.
+    #[test]
+    fn checkpoint_then_more_operations_equals_full_replay() {
+        use crate::{manifest::Store, prolly, secret::ConvergenceSecret, Cid};
+        #[derive(Default)]
+        struct Mem(std::collections::HashMap<Cid, Vec<u8>>);
+        impl Store for Mem {
+            type Error = std::convert::Infallible;
+            fn put(&mut self, cid: Cid, ct: Vec<u8>) -> Result<(), Self::Error> {
+                self.0.insert(cid, ct);
+                Ok(())
+            }
+            fn get(&self, cid: &Cid) -> Result<Option<Vec<u8>>, Self::Error> {
+                Ok(self.0.get(cid).cloned())
+            }
+        }
+        let mut seed = 0x2545_f491_4f6c_dd1du64;
+        let mut rnd = move |n: u64| {
+            seed ^= seed << 13;
+            seed ^= seed >> 7;
+            seed ^= seed << 17;
+            seed % n
+        };
+        let writers = [ALICE, BOB];
+        let ids: Vec<RecordId> = (0..6u8).map(|i| [i; 16]).collect();
+        let mut store = Mem::default();
+        let secret = ConvergenceSecret::for_record(&[1; 32], b"checkpoint test");
+        for _ in 0..300 {
+            let mut chains: BTreeMap<WriterKey, Vec<WriterCommit>> = BTreeMap::new();
+            chains.insert(ALICE, vec![WriterCommit { seq: 1, time_ms: 1, ops: vec![Op::Grant(BOB, vec![Right::Write])] }]);
+            let mut t = 1;
+            for round in 0..12 {
+                t += rnd(3);
+                let w = writers[rnd(2) as usize];
+                let ops = (0..1 + rnd(3))
+                    .map(|_| {
+                        let id = ids[rnd(6) as usize];
+                        let k = ["a", "b"][rnd(2) as usize].to_string();
+                        match rnd(6) {
+                            0 | 1 => Op::Set(id, k, if rnd(3) == 0 { Value::Null } else { Value::Int(rnd(9) as i64) }),
+                            2 => Op::Unset(id, k),
+                            3 => Op::Blocks(id, vec![]),
+                            _ => Op::Delete(id),
+                        }
+                    })
+                    .collect();
+                let list = chains.entry(w).or_default();
+                let seq = list.len() as u64 + 1;
+                list.push(WriterCommit { seq, time_ms: t, ops });
+                if round == 6 {
+                    // Checkpoint here: the state as a tree, restored, then the rest applied.
+                    let st = State::build(&ALICE, &chains, 10_000);
+                    let entries: Vec<(RecordId, Vec<u8>)> = st.stamped().into_iter().map(|(id, r)| (id, r.encode())).collect();
+                    let root = prolly::build(&mut store, &secret, entries).unwrap();
+                    let restored_entries = match root {
+                        Some(root) => prolly::read_all(&store, &root).unwrap(),
+                        None => Vec::new(),
+                    };
+                    let control = vec![((1, ALICE, 1, 0), Op::Grant(BOB, vec![Right::Write]))];
+                    let mut restored = State::with_control(&ALICE, control)
+                        .with_stamped(restored_entries.into_iter().map(|(id, b)| (id, StampedRecord::decode(&b).unwrap())));
+                    assert_eq!(restored.records(), st.records(), "restored checkpoint");
+                    // Keep going from the checkpoint with later commits.
+                    let snapshot_len: BTreeMap<WriterKey, usize> = chains.iter().map(|(w, c)| (*w, c.len())).collect();
+                    for _ in 0..5 {
+                        t += rnd(3);
+                        let w = writers[rnd(2) as usize];
+                        let id = ids[rnd(6) as usize];
+                        let op = if rnd(2) == 0 { Op::Set(id, "a".into(), Value::Int(rnd(9) as i64)) } else { Op::Delete(id) };
+                        let list = chains.entry(w).or_default();
+                        let seq = list.len() as u64 + 1;
+                        list.push(WriterCommit { seq, time_ms: t, ops: vec![op] });
+                    }
+                    for (w, chain) in &chains {
+                        for c in &chain[snapshot_len.get(w).copied().unwrap_or(0)..] {
+                            restored.apply_commit(w, c);
+                        }
+                    }
+                    assert_eq!(restored.records(), merge(&ALICE, &chains, 10_000).records, "checkpoint + later commits");
+                    break;
+                }
+            }
         }
     }
 
