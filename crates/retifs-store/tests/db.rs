@@ -91,3 +91,21 @@ fn in_memory_matching_agrees_with_the_index() {
     }
 }
 
+#[test]
+fn namespace_info_member_channels_and_writer_heads() {
+    use retifs_core::{Cid, Seed};
+    use retifs_store::WriterHead;
+    let (_d, st) = store();
+    st.set_ns_info("shared", &[1; 32], &[2; 32]).unwrap();
+    assert_eq!(st.ns_info("shared").unwrap(), Some(([1; 32], [2; 32])));
+    assert_eq!(st.ns_info("other").unwrap(), None);
+    st.set_member_channel("ns:shared", &[3; 16]).unwrap();
+    assert_eq!(st.member_channel("ns:shared").unwrap(), Some([3; 16]));
+    let h = |w: u8| WriterHead { writer: [w; 32], head: vec![w; 258], commit: (Cid::of(&[w]), Seed([w; 32])) };
+    st.set_writer_head(&[3; 16], &h(5)).unwrap();
+    st.set_writer_head(&[3; 16], &h(6)).unwrap();
+    st.set_writer_head(&[4; 16], &h(7)).unwrap();
+    assert_eq!(st.writer_heads(&[3; 16]).unwrap(), vec![h(5), h(6)]);
+    assert_eq!(st.writer_head(&[3; 16], &[6; 32]).unwrap(), Some(h(6)));
+}
+

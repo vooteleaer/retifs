@@ -72,6 +72,7 @@ See the [threat model](../04-threat-model.md).
   - Decisions 5 and 8 must be specified multi-writer from the start.
 
 ## Implementation status (2026-10-19)
+- **(Superseded by [ADR-0017](0017-multi-writer-namespaces.md) slice 2: commits now carry operations, not snapshots.)**
 - **Every modification is a version, single writer:** each local namespace is its writer's channel ([ADR-0015](0015-signed-channels.md)), created on first write. Every `rec add`, `set` and `rm` writes a namespace snapshot ([ADR-0016](0016-records-and-snapshots.md)) and a signed commit linking the previous one; there is no batching. The snapshot is sorted by record ID and chunked by content, so a change rewrites a chunk or two: in a 41-record namespace, one attribute change stored 3 new chunks (snapshot and commit).
 - **History:** `retifs rec history NS ID` walks the commit chain and shows the versions where a record changed; `retifs query NS --at VERSION …` queries the namespace as it was (the same terms, matched in memory against that version's snapshot).
 - **Retention:** every version is kept locally; only the latest is placed on other nodes (older ones are unneeded there but stay pinned here).

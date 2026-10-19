@@ -49,6 +49,7 @@ use retifs_core::{
     lease::{self, node_destination, Lease, LeaseId, LeaseKey, Receipt, Renewal},
     stamp,
     manifest::{self, decode_node, decode_root, NodeEntry},
+    ops::{merge, Op, OpsFile, WriterCommit},
     record::{Record, RecordId, Snapshot, Value},
     open, ChunkToken, Cid, ConvergenceSecret, FileRef,
 };
@@ -861,12 +862,15 @@ async fn handle(d: &Daemon, req: Request) -> Result<Response, String> {
             writable(&ns)?;
             let mut id: RecordId = [0; 16];
             getrandom::fill(&mut id).expect("OS entropy");
-            let mut rec = Record { id, attrs: Default::default(), blocks: Vec::new() };
+            let mut ops = Vec::new();
+            let has_size = attrs.iter().any(|(k, _)| k == "size");
             for (k, v) in attrs {
-                rec.attrs.insert(k, to_value(&v)?);
+                ops.push(Op::Set(id, k, to_value(&v)?));
             }
             if let Some(data) = data {
-                rec.attrs.entry("size".into()).or_insert(Value::Int(data.len() as i64));
+                if !has_size {
+                    ops.push(Op::Set(id, "size".into(), Value::Int(data.len() as i64)));
+                }
                 let store = d.store.clone();
                 // One record secret per record: its content versions dedup.
                 let secret_name = format!("retifs-record/{ns}/{}", hex(&id));
@@ -877,25 +881,23 @@ async fn handle(d: &Daemon, req: Request) -> Result<Response, String> {
                 .map_err(|e| e.to_string())??;
                 d.store.need_file(&file).map_err(|e| e.to_string())?;
                 d.upkeep_wake.notify_one();
-                rec.blocks.push(file);
+                ops.push(Op::Blocks(id, vec![file]));
             }
-            d.store.put_record(&ns, &rec).map_err(|e| e.to_string())?;
-            commit_namespace(d, &ns).await?;
+            write_ops(d, &ns, ops).await?;
+            let rec = d.store.get_record(&ns, &id).map_err(|e| e.to_string())?.ok_or("record not visible after writing")?;
             Ok(Response::Records { records: vec![view(&rec)] })
         }
 
         Request::RecordSet { ns, id, attrs, unset } => {
             writable(&ns)?;
             let id = parse_record_id(&id)?;
-            let mut rec = d.store.get_record(&ns, &id).map_err(|e| e.to_string())?.ok_or("no such record")?;
-            for k in unset {
-                rec.attrs.remove(&k);
-            }
+            d.store.get_record(&ns, &id).map_err(|e| e.to_string())?.ok_or("no such record")?;
+            let mut ops: Vec<Op> = unset.into_iter().map(|k| Op::Unset(id, k)).collect();
             for (k, v) in attrs {
-                rec.attrs.insert(k, to_value(&v)?);
+                ops.push(Op::Set(id, k, to_value(&v)?));
             }
-            d.store.put_record(&ns, &rec).map_err(|e| e.to_string())?;
-            commit_namespace(d, &ns).await?;
+            write_ops(d, &ns, ops).await?;
+            let rec = d.store.get_record(&ns, &id).map_err(|e| e.to_string())?.ok_or("record not visible after writing")?;
             Ok(Response::Records { records: vec![view(&rec)] })
         }
 
@@ -908,7 +910,7 @@ async fn handle(d: &Daemon, req: Request) -> Result<Response, String> {
             writable(&ns)?;
             let id = parse_record_id(&id)?;
             let rec = d.store.get_record(&ns, &id).map_err(|e| e.to_string())?.ok_or("no such record")?;
-            d.store.delete_record(&ns, &id).map_err(|e| e.to_string())?;
+            write_ops(d, &ns, vec![Op::Delete(id)]).await?;
             // Its content is no longer needed here (unless another record uses it).
             let still_used: std::collections::HashSet<Cid> = d
                 .store
@@ -921,7 +923,6 @@ async fn handle(d: &Daemon, req: Request) -> Result<Response, String> {
             for b in rec.blocks.iter().filter(|b| !still_used.contains(&b.root)) {
                 forget(d, b)?;
             }
-            commit_namespace(d, &ns).await?;
             Ok(Response::Records { records: Vec::new() })
         }
 
@@ -930,11 +931,11 @@ async fn handle(d: &Daemon, req: Request) -> Result<Response, String> {
             let found = match at {
                 None => d.store.query(&ns, &terms).map_err(|e| e.to_string())?,
                 Some(seq) => {
-                    let (_, _, snap) = versions(d, &ns)?
+                    let (_, _, records) = versions(d, &ns)?
                         .into_iter()
                         .find(|(v, _, _)| *v == seq)
                         .ok_or_else(|| format!("version {seq} of {ns} isn't held here"))?;
-                    snap.records.into_iter().filter(|r| terms.iter().all(|t| t.matches(r))).collect()
+                    records.into_iter().filter(|r| terms.iter().all(|t| t.matches(r))).collect()
                 }
             };
             Ok(Response::Records { records: found.iter().map(view).collect() })
@@ -944,10 +945,10 @@ async fn handle(d: &Daemon, req: Request) -> Result<Response, String> {
             let id = parse_record_id(&id)?;
             let entries = versions(d, &ns)?
                 .into_iter()
-                .map(|(version, time_ms, snap)| HistoryEntry {
+                .map(|(version, time_ms, records)| HistoryEntry {
                     version,
                     time_ms,
-                    record: snap.records.iter().find(|r| r.id == id).map(view),
+                    record: records.iter().find(|r| r.id == id).map(view),
                 })
                 .collect();
             Ok(Response::History { entries })
@@ -1023,7 +1024,7 @@ async fn publish_channel(d: &Daemon, name: &str, data: Vec<u8>, compress: bool) 
     let file = tokio::task::spawn_blocking(move || store_file(&store, &data, false, false, Some(&record), opts))
         .await
         .map_err(|e| e.to_string())??;
-    let key = ChannelKey::from_secrets(c.signing_seed, c.read_key);
+    let key = channel_key(d, &c);
     let (_, sealed) = Commit::create(&key, c.seq + 1, now_ms(), c.last, file);
     d.store.insert(&sealed.cid, &sealed.ciphertext, tier::PINNED).map_err(|e| e.to_string())?;
     d.store.register_serving(&[(sealed.cid, ChunkToken::for_seed(&sealed.seed))]).map_err(|e| e.to_string())?;
@@ -1069,53 +1070,127 @@ fn writable(ns: &str) -> Result<(), String> {
     Ok(())
 }
 
-/// Records the namespace's current state as a new version (ADR-0006: every
-/// modification is a version): a snapshot and a signed commit in the
-/// namespace's own channel, created on first write. Only the latest version
-/// is placed elsewhere; older ones stay here as history.
-async fn commit_namespace(d: &Daemon, ns: &str) -> Result<u64, String> {
-    if d.store.own_channel(ns).map_err(|e| e.to_string())?.is_none() {
-        let mut secrets = [0u8; 64];
-        getrandom::fill(&mut secrets).expect("OS entropy");
-        d.store
-            .create_channel(ns, secrets[..32].try_into().unwrap(), secrets[32..].try_into().unwrap())
-            .map_err(|e| e.to_string())?;
+/// The channel a namespace's own writes go to (separate from channels that
+/// publish snapshots, like `channel publish-ns`).
+fn ns_channel(ns: &str) -> String {
+    format!("ns:{ns}")
+}
+
+/// The namespace's identity (creator, read key); created on first write, with
+/// this node as its creator (ADR-0017).
+fn ensure_namespace(d: &Daemon, ns: &str) -> Result<ChannelAddr, String> {
+    if let Some((creator, read_key)) = d.store.ns_info(ns).map_err(|e| e.to_string())? {
+        return Ok(ChannelAddr { writer: creator, read_key });
     }
-    let previous = latest_root(d, ns)?;
-    let snap = Snapshot::new(d.store.records(ns).map_err(|e| e.to_string())?).map_err(|e| e.to_string())?;
-    let (seq, file) = publish_channel(d, ns, snap.encode(), true).await?;
-    if let Some(prev) = previous
-        && prev.root != file.root
-    {
-        d.store.unneed_file(&prev.root).map_err(|e| e.to_string())?;
+    let mut secrets = [0u8; 64];
+    getrandom::fill(&mut secrets).expect("OS entropy");
+    let (seed, read_key): ([u8; 32], [u8; 32]) = (secrets[..32].try_into().unwrap(), secrets[32..].try_into().unwrap());
+    d.store.create_channel(&ns_channel(ns), seed, read_key).map_err(|e| e.to_string())?;
+    let creator = ChannelKey::from_secrets(seed, read_key).writer();
+    d.store.set_ns_info(ns, &creator, &read_key).map_err(|e| e.to_string())?;
+    Ok(ChannelAddr { writer: creator, read_key })
+}
+
+/// The signing key of an own channel: its own namespace, or a member's key
+/// writing to another's (ADR-0017).
+fn channel_key(d: &Daemon, c: &retifs_store::OwnChannel) -> ChannelKey {
+    match d.store.member_channel(&c.name).ok().flatten() {
+        Some(ns_id) => ChannelKey::member(c.signing_seed, c.read_key, ns_id),
+        None => ChannelKey::from_secrets(c.signing_seed, c.read_key),
     }
+}
+
+/// One modification of a namespace (ADR-0006, ADR-0017): its operations are
+/// committed to this node's writer chain, then the namespace is rebuilt by
+/// merging every writer chain held here.
+async fn write_ops(d: &Daemon, ns: &str, ops: Vec<Op>) -> Result<u64, String> {
+    ensure_namespace(d, ns)?;
+    let (seq, _) = publish_channel(d, &ns_channel(ns), OpsFile { ops }.encode(), false).await?;
+    materialize(d, ns)?;
     Ok(seq)
 }
 
-/// The tree the namespace's own channel last committed.
-fn latest_root(d: &Daemon, ns: &str) -> Result<Option<FileRef>, String> {
-    let Some(c) = d.store.own_channel(ns).map_err(|e| e.to_string())? else { return Ok(None) };
-    let Some((cid, seed)) = c.last else { return Ok(None) };
-    let addr = ChannelKey::from_secrets(c.signing_seed, c.read_key).addr();
-    let ct = d.store.fetch(&cid).map_err(|e| e.to_string())?.ok_or("latest commit isn't local")?;
-    let commit = Commit::decode(&open(&cid, &seed, &ct).map_err(|e| e.to_string())?, &addr).map_err(|e| e.to_string())?;
-    Ok(Some(commit.root))
+/// A writer's chain, oldest first, as far back as its commits and operations
+/// files are local: (sequence number, commit).
+fn walk_ops_chain(d: &Daemon, addr: &ChannelAddr, last: Option<(Cid, retifs_core::Seed)>) -> Vec<(u64, WriterCommit)> {
+    let mut out = Vec::new();
+    let mut next = last;
+    while let Some((cid, seed)) = next {
+        let Some(commit) = d
+            .store
+            .fetch(&cid)
+            .ok()
+            .flatten()
+            .and_then(|ct| open(&cid, &seed, &ct).ok())
+            .and_then(|pt| Commit::decode(&pt, addr).ok())
+        else {
+            break;
+        };
+        let Some(ops) = manifest::read_all(&*d.store, &commit.root)
+            .ok()
+            .filter(|b| OpsFile::is_ops(b))
+            .and_then(|b| OpsFile::decode(&b).ok())
+        else {
+            break;
+        };
+        out.push((commit.seq, WriterCommit { time_ms: commit.time_ms, ops: ops.ops }));
+        next = commit.prev;
+    }
+    out.reverse();
+    out
 }
 
-/// The namespace's versions held here, newest first: (version, time, snapshot).
-/// Walks the commit chain of its own channel back as far as commits and
-/// snapshots are local.
-fn versions(d: &Daemon, ns: &str) -> Result<Vec<(u64, u64, Snapshot)>, String> {
-    let c = d.store.own_channel(ns).map_err(|e| e.to_string())?.ok_or_else(|| format!("{ns} has no versions here"))?;
-    let addr = ChannelKey::from_secrets(c.signing_seed, c.read_key).addr();
+type Chains = std::collections::BTreeMap<[u8; 32], Vec<(u64, WriterCommit)>>;
+
+/// Every writer chain of a namespace held here: this node's and the others'.
+fn chains(d: &Daemon, ns: &str) -> Result<(ChannelAddr, [u8; 32], Chains), String> {
+    let addr = ensure_namespace(d, ns)?;
+    let mut out = Chains::new();
+    let mut own_writer = addr.writer;
+    if let Some(c) = d.store.own_channel(&ns_channel(ns)).map_err(|e| e.to_string())? {
+        own_writer = channel_key(d, &c).writer();
+        out.insert(own_writer, walk_ops_chain(d, &addr, c.last));
+    }
+    for h in d.store.writer_heads(&addr.ns_id()).map_err(|e| e.to_string())? {
+        if h.writer != own_writer {
+            out.insert(h.writer, walk_ops_chain(d, &addr, Some(h.commit)));
+        }
+    }
+    Ok((addr, own_writer, out))
+}
+
+/// Rebuilds a namespace's local view by merging every writer chain held here.
+fn materialize(d: &Daemon, ns: &str) -> Result<retifs_core::ops::Merged, String> {
+    let (addr, _, chains) = chains(d, ns)?;
+    let plain = chains.into_iter().map(|(w, c)| (w, c.into_iter().map(|(_, c)| c).collect())).collect();
+    let merged = merge(&addr.writer, &plain, now_ms());
+    d.store.replace_namespace(ns, &merged.records).map_err(|e| e.to_string())?;
+    Ok(merged)
+}
+
+/// The namespace as of each of this node's versions, newest first:
+/// (version, time, records). A version includes every writer's operations up
+/// to its time.
+fn versions(d: &Daemon, ns: &str) -> Result<Vec<(u64, u64, Vec<Record>)>, String> {
+    if ns.starts_with("ch-") || d.store.ns_info(ns).map_err(|e| e.to_string())?.is_none() {
+        return Err(format!("{ns} has no version history here"));
+    }
+    let (addr, own, chains) = chains(d, ns)?;
+    let own_chain = chains.get(&own).cloned().unwrap_or_default();
     let mut out = Vec::new();
-    let mut next = c.last;
-    while let Some((cid, seed)) = next {
-        let Some(ct) = d.store.fetch(&cid).map_err(|e| e.to_string())? else { break };
-        let commit = Commit::decode(&open(&cid, &seed, &ct).map_err(|e| e.to_string())?, &addr).map_err(|e| e.to_string())?;
-        let Some(snap) = read_snapshot(&d.store, &commit.root) else { break };
-        out.push((commit.seq, commit.time_ms, snap));
-        next = commit.prev;
+    for (seq, c) in own_chain.iter().rev() {
+        let upto: std::collections::BTreeMap<[u8; 32], Vec<WriterCommit>> = chains
+            .iter()
+            .map(|(w, chain)| {
+                let kept = chain
+                    .iter()
+                    .filter(|(s, wc)| if *w == own { s <= seq } else { wc.time_ms <= c.time_ms })
+                    .map(|(_, wc)| wc.clone())
+                    .collect();
+                (*w, kept)
+            })
+            .collect();
+        out.push((*seq, c.time_ms, merge(&addr.writer, &upto, now_ms()).records));
     }
     Ok(out)
 }
