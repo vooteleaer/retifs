@@ -55,7 +55,8 @@ Prototypes are throwaway. They're for learning, not for locking in the format. T
 - [x] Records, canonical encoding and snapshots; local attribute index and BeFS-style queries; `rec add/set/get/rm`, `query` ([ADR-0016](adr/0016-records-and-snapshots.md)).
 - [x] Namespaces published over channels: snapshot versions, followers rebuild them and fetch their content ([ADR-0016](adr/0016-records-and-snapshots.md)).
 - [x] NomadNet bridge: any node holding a site namespace (author or follower) serves it as a NomadNet node ([ADR-0016](adr/0016-records-and-snapshots.md)).
-- [ ] Signed per-modification commits inside namespaces, Prolly-tree index; `watch` / `transaction` / `at` in the API.
+- [x] Every modification is a version (single writer): a signed commit per change in the namespace's own channel; `rec history`, `query --at` ([ADR-0006](adr/0006-versioning-and-sharing.md)).
+- [ ] Multi-writer namespaces (merge of per-writer chains), Prolly-tree index; `watch` / `transaction` / `at` in the API.
 - [ ] `keep:<device>` tag and query-based keep rules (proactive pull).
 - [ ] Blind index, remote `/query`, live query.
 - [ ] Per-writer commit chains (one commit per modification), merge, history queries, per-record `versions`.

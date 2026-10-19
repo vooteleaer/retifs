@@ -39,7 +39,8 @@ use std::{
 };
 
 use libretifs::{
-    read_frame, write_frame, AttrValue, ChannelInfo, Envelope, FollowInfo, GetStats, RecordView, Request, Response, Status,
+    read_frame, write_frame, AttrValue, ChannelInfo, Envelope, FollowInfo, GetStats, HistoryEntry, RecordView, Request,
+    Response, Status,
     PROTOCOL_VERSION,
 };
 use personal_rns::prelude::*;
@@ -857,6 +858,7 @@ async fn handle(d: &Daemon, req: Request) -> Result<Response, String> {
         Request::Channels => channels(d),
 
         Request::RecordCreate { ns, attrs, data } => {
+            writable(&ns)?;
             let mut id: RecordId = [0; 16];
             getrandom::fill(&mut id).expect("OS entropy");
             let mut rec = Record { id, attrs: Default::default(), blocks: Vec::new() };
@@ -878,10 +880,12 @@ async fn handle(d: &Daemon, req: Request) -> Result<Response, String> {
                 rec.blocks.push(file);
             }
             d.store.put_record(&ns, &rec).map_err(|e| e.to_string())?;
+            commit_namespace(d, &ns).await?;
             Ok(Response::Records { records: vec![view(&rec)] })
         }
 
         Request::RecordSet { ns, id, attrs, unset } => {
+            writable(&ns)?;
             let id = parse_record_id(&id)?;
             let mut rec = d.store.get_record(&ns, &id).map_err(|e| e.to_string())?.ok_or("no such record")?;
             for k in unset {
@@ -891,6 +895,7 @@ async fn handle(d: &Daemon, req: Request) -> Result<Response, String> {
                 rec.attrs.insert(k, to_value(&v)?);
             }
             d.store.put_record(&ns, &rec).map_err(|e| e.to_string())?;
+            commit_namespace(d, &ns).await?;
             Ok(Response::Records { records: vec![view(&rec)] })
         }
 
@@ -900,6 +905,7 @@ async fn handle(d: &Daemon, req: Request) -> Result<Response, String> {
         }
 
         Request::RecordDelete { ns, id } => {
+            writable(&ns)?;
             let id = parse_record_id(&id)?;
             let rec = d.store.get_record(&ns, &id).map_err(|e| e.to_string())?.ok_or("no such record")?;
             d.store.delete_record(&ns, &id).map_err(|e| e.to_string())?;
@@ -915,13 +921,36 @@ async fn handle(d: &Daemon, req: Request) -> Result<Response, String> {
             for b in rec.blocks.iter().filter(|b| !still_used.contains(&b.root)) {
                 forget(d, b)?;
             }
+            commit_namespace(d, &ns).await?;
             Ok(Response::Records { records: Vec::new() })
         }
 
-        Request::Query { ns, terms } => {
+        Request::Query { ns, terms, at } => {
             let terms: Vec<retifs_store::Term> = terms.iter().map(|t| retifs_store::Term::parse(t)).collect::<Result<_, _>>()?;
-            let found = d.store.query(&ns, &terms).map_err(|e| e.to_string())?;
+            let found = match at {
+                None => d.store.query(&ns, &terms).map_err(|e| e.to_string())?,
+                Some(seq) => {
+                    let (_, _, snap) = versions(d, &ns)?
+                        .into_iter()
+                        .find(|(v, _, _)| *v == seq)
+                        .ok_or_else(|| format!("version {seq} of {ns} isn't held here"))?;
+                    snap.records.into_iter().filter(|r| terms.iter().all(|t| t.matches(r))).collect()
+                }
+            };
             Ok(Response::Records { records: found.iter().map(view).collect() })
+        }
+
+        Request::RecordHistory { ns, id } => {
+            let id = parse_record_id(&id)?;
+            let entries = versions(d, &ns)?
+                .into_iter()
+                .map(|(version, time_ms, snap)| HistoryEntry {
+                    version,
+                    time_ms,
+                    record: snap.records.iter().find(|r| r.id == id).map(view),
+                })
+                .collect();
+            Ok(Response::History { entries })
         }
 
         Request::Want { cap, from } => {
@@ -1030,6 +1059,65 @@ fn version_files(store: &SlabStore, f: &FileRef) -> Vec<FileRef> {
         files.extend(snap.records.iter().flat_map(|r| r.blocks.iter().copied()));
     }
     files
+}
+
+/// Followed channels' namespaces belong to their writer.
+fn writable(ns: &str) -> Result<(), String> {
+    if ns.starts_with("ch-") {
+        return Err(format!("{ns} is a followed channel's namespace: read-only here"));
+    }
+    Ok(())
+}
+
+/// Records the namespace's current state as a new version (ADR-0006: every
+/// modification is a version): a snapshot and a signed commit in the
+/// namespace's own channel, created on first write. Only the latest version
+/// is placed elsewhere; older ones stay here as history.
+async fn commit_namespace(d: &Daemon, ns: &str) -> Result<u64, String> {
+    if d.store.own_channel(ns).map_err(|e| e.to_string())?.is_none() {
+        let mut secrets = [0u8; 64];
+        getrandom::fill(&mut secrets).expect("OS entropy");
+        d.store
+            .create_channel(ns, secrets[..32].try_into().unwrap(), secrets[32..].try_into().unwrap())
+            .map_err(|e| e.to_string())?;
+    }
+    let previous = latest_root(d, ns)?;
+    let snap = Snapshot::new(d.store.records(ns).map_err(|e| e.to_string())?).map_err(|e| e.to_string())?;
+    let (seq, file) = publish_channel(d, ns, snap.encode(), true).await?;
+    if let Some(prev) = previous
+        && prev.root != file.root
+    {
+        d.store.unneed_file(&prev.root).map_err(|e| e.to_string())?;
+    }
+    Ok(seq)
+}
+
+/// The tree the namespace's own channel last committed.
+fn latest_root(d: &Daemon, ns: &str) -> Result<Option<FileRef>, String> {
+    let Some(c) = d.store.own_channel(ns).map_err(|e| e.to_string())? else { return Ok(None) };
+    let Some((cid, seed)) = c.last else { return Ok(None) };
+    let addr = ChannelKey::from_secrets(c.signing_seed, c.read_key).addr();
+    let ct = d.store.fetch(&cid).map_err(|e| e.to_string())?.ok_or("latest commit isn't local")?;
+    let commit = Commit::decode(&open(&cid, &seed, &ct).map_err(|e| e.to_string())?, &addr).map_err(|e| e.to_string())?;
+    Ok(Some(commit.root))
+}
+
+/// The namespace's versions held here, newest first: (version, time, snapshot).
+/// Walks the commit chain of its own channel back as far as commits and
+/// snapshots are local.
+fn versions(d: &Daemon, ns: &str) -> Result<Vec<(u64, u64, Snapshot)>, String> {
+    let c = d.store.own_channel(ns).map_err(|e| e.to_string())?.ok_or_else(|| format!("{ns} has no versions here"))?;
+    let addr = ChannelKey::from_secrets(c.signing_seed, c.read_key).addr();
+    let mut out = Vec::new();
+    let mut next = c.last;
+    while let Some((cid, seed)) = next {
+        let Some(ct) = d.store.fetch(&cid).map_err(|e| e.to_string())? else { break };
+        let commit = Commit::decode(&open(&cid, &seed, &ct).map_err(|e| e.to_string())?, &addr).map_err(|e| e.to_string())?;
+        let Some(snap) = read_snapshot(&d.store, &commit.root) else { break };
+        out.push((commit.seq, commit.time_ms, snap));
+        next = commit.prev;
+    }
+    Ok(out)
 }
 
 fn to_value(v: &AttrValue) -> Result<Value, String> {

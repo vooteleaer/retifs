@@ -110,8 +110,16 @@ pub enum Request {
     RecordSet { ns: String, id: String, attrs: Vec<(String, AttrValue)>, unset: Vec<String> },
     RecordGet { ns: String, id: String },
     RecordDelete { ns: String, id: String },
-    /// Records matching every term (`key=value`, `key>n`, `key^=prefix`, `has:key`, …).
-    Query { ns: String, terms: Vec<String> },
+    /// Records matching every term (`key=value`, `key>n`, `key^=prefix`, `has:key`, …),
+    /// now or as of version `at` of the namespace.
+    Query {
+        ns: String,
+        terms: Vec<String>,
+        #[serde(default)]
+        at: Option<u64>,
+    },
+    /// Every version of a record, newest first (ADR-0006: every modification is a version).
+    RecordHistory { ns: String, id: String },
 }
 
 /// An attribute value (ADR-0016).
@@ -147,6 +155,15 @@ impl std::fmt::Display for AttrValue {
             }
         }
     }
+}
+
+/// One version of a namespace as seen by one record.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct HistoryEntry {
+    pub version: u64,
+    pub time_ms: u64,
+    /// The record at that version; None: it didn't exist (or was deleted).
+    pub record: Option<RecordView>,
 }
 
 /// A record as the API shows it.
@@ -190,6 +207,9 @@ pub enum Response {
     },
     Records {
         records: Vec<RecordView>,
+    },
+    History {
+        entries: Vec<HistoryEntry>,
     },
     Error {
         message: String,

@@ -19,7 +19,12 @@
 //!     retifs [--store DIR] rec add NS [KEY=VALUE]... [--file PATH]
 //!     retifs [--store DIR] rec set NS ID [KEY=VALUE]... [--unset KEY]...
 //!     retifs [--store DIR] rec get NS ID | rec rm NS ID
-//!     retifs [--store DIR] query NS [TERM]...
+//!     retifs [--store DIR] rec history NS ID
+//!     retifs [--store DIR] query NS [--at VERSION] [TERM]...
+//!
+//! Every change to a namespace is a version (ADR-0006): a signed commit in the
+//! namespace's own chain. `rec history` shows a record's versions; `--at`
+//! queries the namespace as it was.
 //!
 //! Channels (ADR-0015): a writer publishes versions; followers keep the latest.
 //! Records (ADR-0016): attributes and content blocks, queried BeFS style:
@@ -49,7 +54,7 @@ fn usage() -> ! {
          retifs [--store DIR] channel create NAME | channel publish NAME FILE [--compress] | channel publish-ns NAME NS\n\
          retifs [--store DIR] follow ADDRESS [--from NODE]... | channels\n\
          retifs [--store DIR] rec add NS [KEY=VALUE]... [--file PATH] | rec set NS ID [KEY=VALUE]... [--unset KEY]...\n\
-         retifs [--store DIR] rec get NS ID | rec rm NS ID | query NS [TERM]..."
+         retifs [--store DIR] rec get NS ID | rec rm NS ID | rec history NS ID | query NS [--at VERSION] [TERM]..."
     );
     std::process::exit(2);
 }
@@ -228,6 +233,30 @@ async fn main() {
                 }
                 "get" => libretifs::Request::RecordGet { ns, id: rest.first().cloned().unwrap_or_else(|| usage()) },
                 "rm" => libretifs::Request::RecordDelete { ns, id: rest.first().cloned().unwrap_or_else(|| usage()) },
+                "history" => {
+                    let id = rest.first().cloned().unwrap_or_else(|| usage());
+                    match client.call(libretifs::Request::RecordHistory { ns, id }).await.unwrap_or_else(|e| fail(e)) {
+                        libretifs::Response::History { entries } => {
+                            let mut last: Option<Option<libretifs::RecordView>> = None;
+                            for e in entries.iter().rev() {
+                                if last.as_ref() == Some(&e.record) {
+                                    continue; // unchanged in this version
+                                }
+                                match &e.record {
+                                    Some(r) => {
+                                        let attrs: Vec<String> = r.attrs.iter().map(|(k, v)| format!("{k}={v}")).collect();
+                                        println!("version {}: {}", e.version, attrs.join(" "));
+                                    }
+                                    None => println!("version {}: (absent)", e.version),
+                                }
+                                last = Some(e.record.clone());
+                            }
+                        }
+                        libretifs::Response::Error { message } => fail(message),
+                        _ => fail("unexpected response"),
+                    }
+                    return;
+                }
                 _ => usage(),
             };
             for r in client.records(req).await.unwrap_or_else(|e| fail(e)) {
@@ -236,8 +265,13 @@ async fn main() {
         }
         "query" => {
             let ns = it.next().unwrap_or_else(|| usage());
-            let terms: Vec<String> = it.collect();
-            let found = client.records(libretifs::Request::Query { ns, terms }).await.unwrap_or_else(|e| fail(e));
+            let mut terms: Vec<String> = it.collect();
+            let at = terms.iter().position(|t| t == "--at").map(|i| {
+                let v = terms.get(i + 1).and_then(|v| v.parse().ok()).unwrap_or_else(|| usage());
+                terms.drain(i..=i + 1);
+                v
+            });
+            let found = client.records(libretifs::Request::Query { ns, terms, at }).await.unwrap_or_else(|e| fail(e));
             for r in &found {
                 print_record(r);
             }

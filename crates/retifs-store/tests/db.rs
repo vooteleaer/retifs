@@ -70,3 +70,24 @@ fn values_parse_like_typed_literals() {
     assert_eq!(Term::parse("has:name").unwrap(), Term::Has("name".into()));
     assert!(Term::parse("=x").is_err());
 }
+
+#[test]
+fn in_memory_matching_agrees_with_the_index() {
+    let (_d, st) = store();
+    let s = |v: &str| Value::Str(v.into());
+    let recs = vec![
+        rec(1, &[("type", s("image")), ("album", s("Prangli 2026")), ("width", Value::Int(4000)), ("tags", Value::List(vec![s("sea"), s("boat")]))]),
+        rec(2, &[("type", s("image")), ("album", s("Tallinn")), ("width", Value::Int(1200)), ("rating", Value::Float(-1.5))]),
+        rec(3, &[("type", s("document")), ("name", s("notes")), ("width", Value::Int(-5))]),
+    ];
+    for r in &recs {
+        st.put_record("photos", r).unwrap();
+    }
+    for query in ["type=image", "type=image width>2000", "width>=-5 width<1200", "album^=Pran", "tags=boat", "has:rating", "rating<0", "rating<0.0", ""] {
+        let terms: Vec<Term> = query.split_whitespace().map(|t| Term::parse(t).unwrap()).collect();
+        let by_index = ids(st.query("photos", &terms).unwrap());
+        let in_memory: Vec<u8> = recs.iter().filter(|r| terms.iter().all(|t| t.matches(r))).map(|r| r.id[0]).collect();
+        assert_eq!(by_index, in_memory, "{query}");
+    }
+}
+

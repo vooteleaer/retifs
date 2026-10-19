@@ -66,6 +66,28 @@ impl Term {
     }
 }
 
+impl Term {
+    /// Whether a record satisfies this term, the same way the index answers it
+    /// (for records held in memory, e.g. an older version's snapshot).
+    pub fn matches(&self, r: &Record) -> bool {
+        let keys = |k: &str| r.attrs.get(k).map(index_values).unwrap_or_default();
+        match self {
+            Term::Has(k) => r.attrs.contains_key(k),
+            Term::Eq(k, v) => sort_key(v).is_some_and(|want| keys(k).contains(&want)),
+            Term::Prefix(k, p) => keys(k).iter().any(|sk| sk.first() == Some(&4) && sk[1..].starts_with(p.as_bytes())),
+            Term::Range(k, lo, hi, lo_incl, hi_incl) => {
+                let tag = lo.as_ref().or(hi.as_ref()).and_then(sort_key).map(|s| s[0]);
+                let (lo, hi) = (lo.as_ref().and_then(sort_key), hi.as_ref().and_then(sort_key));
+                keys(k).iter().any(|sk| {
+                    Some(sk[0]) == tag
+                        && lo.as_ref().is_none_or(|l| if *lo_incl { sk >= l } else { sk > l })
+                        && hi.as_ref().is_none_or(|h| if *hi_incl { sk <= h } else { sk < h })
+                })
+            }
+        }
+    }
+}
+
 fn unquote(v: &str) -> String {
     v.strip_prefix('"').and_then(|v| v.strip_suffix('"')).unwrap_or(v).to_string()
 }

@@ -290,6 +290,15 @@ impl SlabStore {
         Ok(n)
     }
 
+    /// Stops keeping `root` elsewhere (no longer needed, leases run out) but
+    /// leaves the local copy as it is: an older version kept here as history.
+    pub fn unneed_file(&self, root: &Cid) -> Result<usize, StoreError> {
+        let w = self.db.begin_write()?;
+        w.open_table(NEEDED)?.remove(root.as_bytes().as_slice())?;
+        w.commit()?;
+        self.unlist_root(root, None)
+    }
+
     /// Makes these chunks of a forgotten file evictable: own (pinned) copies
     /// move to the cache tier and stop being served. Chunks held for others
     /// (leases) are untouched. The caller leaves out chunks other needed files
