@@ -237,7 +237,7 @@ async fn main() {
                             i += 1;
                         }
                     }
-                    libretifs::Request::RecordSet { ns, id, attrs, unset }
+                    libretifs::Request::RecordSet { ns, id, attrs, unset, data: None }
                 }
                 "get" => libretifs::Request::RecordGet { ns, id: rest.first().cloned().unwrap_or_else(|| usage()) },
                 "rm" => libretifs::Request::RecordDelete { ns, id: rest.first().cloned().unwrap_or_else(|| usage()) },

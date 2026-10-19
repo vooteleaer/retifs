@@ -932,13 +932,34 @@ async fn handle(d: &Daemon, req: Request) -> Result<Response, String> {
             Ok(Response::Records { records: vec![view(&rec)] })
         }
 
-        Request::RecordSet { ns, id, attrs, unset } => {
+        Request::RecordSet { ns, id, attrs, unset, data } => {
             writable(&ns)?;
             let id = parse_record_id(&id)?;
-            d.store.get_record(&ns, &id).map_err(|e| e.to_string())?.ok_or("no such record")?;
+            let before = d.store.get_record(&ns, &id).map_err(|e| e.to_string())?.ok_or("no such record")?;
             let mut ops: Vec<Op> = unset.into_iter().map(|k| Op::Unset(id, k)).collect();
+            let has_size = attrs.iter().any(|(k, _)| k == "size");
             for (k, v) in attrs {
                 ops.push(Op::Set(id, k, to_value(&v)?));
+            }
+            if let Some(data) = data {
+                if !has_size {
+                    ops.push(Op::Set(id, "size".into(), Value::Int(data.len() as i64)));
+                }
+                let store = d.store.clone();
+                // The record's own secret: unchanged chunks dedup against earlier versions.
+                let secret_name = format!("retifs-record/{ns}/{}", hex(&id));
+                let file = tokio::task::spawn_blocking(move || {
+                    store_file(&store, &data, false, false, Some(&secret_name), manifest::WriteOpts::default())
+                })
+                .await
+                .map_err(|e| e.to_string())??;
+                d.store.need_file(&file).map_err(|e| e.to_string())?;
+                // Earlier content stays here as history, no longer kept elsewhere.
+                for old in before.blocks.iter().filter(|b| b.root != file.root) {
+                    d.store.unneed_file(&old.root).map_err(|e| e.to_string())?;
+                }
+                d.upkeep_wake.notify_one();
+                ops.push(Op::Blocks(id, vec![file]));
             }
             write_ops(d, &ns, ops).await?;
             let rec = d.store.get_record(&ns, &id).map_err(|e| e.to_string())?.ok_or("record not visible after writing")?;

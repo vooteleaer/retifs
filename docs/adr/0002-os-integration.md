@@ -31,3 +31,42 @@ The mount exposes plaintext to processes in the user's session, and root on the 
 ## Consequences
 - Easier: no kernel code; Linux works in phase 4; the later Haiku frontend gets real attributes and queries.
 - Harder: two frontends to maintain. Linux has no native queries, so the `.query/` convention is ours. Booting from retifs (phase 5) still needs a kernel-side path.
+
+## Implementation status (2026-10-19)
+`retifs-mount [--store DIR] NS MOUNTPOINT` (crate `retifs-fuse`, the `fuser` crate without libfuse) mounts one namespace. It is a client of the local API like any app: it holds no keys and no store. On other platforms it builds but refuses to mount.
+
+**The view:**
+- A record with a `path` attribute is the file at that path; its content block is the file's content.
+- `type = directory` records give empty directories; other directories are implied by the paths below them.
+- Records without a path are under `/.records/<id>`.
+- Two records claiming one path: the later ID is shown as `name~<first 8 of its ID>`.
+
+**Attributes as xattrs:**
+- Every attribute is `user.retifs.<key>`, readable and writable.
+- Text maps to typed values: numbers, `true`/`false` and `null` are typed, `0x…` is bytes, JSON strings and lists are themselves, anything else is a string. A string that would read back as another type is shown quoted.
+- Writing `user.retifs.path` moves the file.
+
+**Queries:**
+- `/.query/<terms>/` is any name of comma-separated terms (as `retifs query` takes them), percent-decoded: `%2F` is `/`, `%2C` a comma inside a term.
+- It lists the matching records as symlinks to their place in the tree, e.g. `.query/album=Prangli 2026/`, `.query/path^=%2Fphotos%2F,type=photo/`.
+
+**Writes:**
+- Content is buffered per open file and written back on flush or close as one new version, with `size` and `mtime` (O_TRUNC arrives with the open, so `echo > f` is one version). A write is one operation, a commit on the writer's chain.
+- `RecordSet` in the local API now takes content too, so attributes and content change in one commit.
+- Renaming a file over an existing one keeps the target record, with its ID, attributes and history: the target takes the new content, and the renamed record is deleted. That is how editors and `sed -i` save, and without it every save would make a new record and lose the file's tags.
+- Directory renames move every record below; unlink and rmdir delete records.
+- The tree is re-read from the daemon at most once a second, so other members' writes appear within that.
+
+**Live test** (WSL2 Debian, kernel 6.18, against an offline Python RNS shared instance):
+- read, create, write, append, truncate, a 3 MiB copy (hash matches);
+- mkdir, rename into a directory, rmdir refusing a non-empty directory, unlink;
+- xattrs set, read and removed, checked through the CLI;
+- a query directory and a percent-encoded path-prefix query;
+- `sed -i`: same record ID, attribute kept, one more version.
+
+**Not yet:**
+- **Contents in memory:** a file's whole content is held while it's open, and reads fetch the whole file. Range reads via the manifest's random access, and FUSE passthrough for cached reads, come later.
+- **Offline reads:** a file whose content isn't local fails with `EIO`; see the [open questions](../06-open-questions.md).
+- **Several renames are several commits:** a directory rename or a save is not yet one transaction.
+- **Permissions:** the mounting user owns everything. Modes aren't stored.
+- **Mounting as a normal user** needs `fusermount3` (the `fuse3` package); the test ran as root.

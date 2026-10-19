@@ -106,8 +106,16 @@ pub enum Request {
         #[serde(default, with = "serde_bytes")]
         data: Option<Vec<u8>>,
     },
-    /// Sets and unsets attributes of a record.
-    RecordSet { ns: String, id: String, attrs: Vec<(String, AttrValue)>, unset: Vec<String> },
+    /// Sets and unsets attributes of a record; `data`, if given, replaces its
+    /// content (and `size`), in the same commit.
+    RecordSet {
+        ns: String,
+        id: String,
+        attrs: Vec<(String, AttrValue)>,
+        unset: Vec<String>,
+        #[serde(default, with = "serde_bytes")]
+        data: Option<Vec<u8>>,
+    },
     RecordGet { ns: String, id: String },
     RecordDelete { ns: String, id: String },
     /// Records matching every term (`key=value`, `key>n`, `key^=prefix`, `has:key`, …),
