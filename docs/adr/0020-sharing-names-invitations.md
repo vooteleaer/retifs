@@ -25,14 +25,24 @@ Sharing works, but by hand: a namespace address is about 140 characters (`retifs
 - **Fingerprint words:** a key's fingerprint can be shown as a few words from a fixed list (`SHA-256(key)`, 11 bits per word). Both sides compare them when it matters (adding a contact in person, a first grant).
 
 ### Links and QR codes
-One link format for everything a QR code, an NFC tap, a message or a clipboard carries:
+Apps share different things: an album, a photo, a playlist, a calendar, a store. So one link envelope carries many kinds, and every retifs app can tell what a code is, whichever app made it:
 ```text
-retifs:node/<node address>[?name=<display name>]
-retifs:ns/<namespace address>                      read-only: the address as today
-retifs:invite/<invitation>                         see below
+retifs:<kind>/<what>[?view=<hint>&name=<label>&…]
+
+kind    what                                      e.g.
+node    a node address                            add a contact
+ns      a namespace address (read)                a shared calendar, read-only
+invite  an invitation (see below)                 join and write
+rec     namespace address + record ID             one record, through the namespace
+query   namespace address + query terms           an album (album=Prangli), a smart playlist
+ch      a channel address                         follow a store or a site
+cap     a read-cap (+ attributes)                 one file, nothing else
 ```
-- QR is the main in-person channel: shown on one screen, scanned by the other. A namespace address or an invitation is a few hundred characters, well within an easily scanned code.
+- **`view`** hints which app opens it (`photos`, `music`, `calendar`, `store`). Without one, the record type decides, the way Android routes intents to apps.
+- **Unknown kinds and parameters** are shown for what they are (with a generic action: open in the gateway, save the file), never an error. New kinds can be added without breaking printed codes.
+- **QR** is the main in-person channel: shown on one screen, scanned by the other. A namespace address or an invitation is a few hundred characters, well within an easily scanned code.
 - Over a distance the same link goes in an LXMF message (end-to-end encrypted to the recipient, who is often already an LXMF contact), so sharing reuses Reticulum messaging and needs no new channel.
+- **Sharing one record** without the rest of its namespace: a `cap` link (its content and attributes, no access to anything else; can't be revoked) or a small share namespace holding just that record (revocable, updatable). Which one an app offers is open.
 
 ### Invitations: one-step sharing
 ```text
@@ -59,4 +69,5 @@ invitation = { "ns": namespace address, "node": creator's node, "secret": 32 ran
 
 ## Open
 - The word list for fingerprints (an existing one, e.g. the PGP word list or BIP-39 English, or our own).
+- One-record sharing: `cap` links, share namespaces, or both.
 - Whether a profile is per node or per person (a person has several nodes; a profile record in their namespace could list them).
