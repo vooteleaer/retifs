@@ -1670,8 +1670,8 @@ async fn handle(d: &Daemon, req: Request) -> Result<Response, String> {
                 _ => return Err("keep mode is all or rules".into()),
             };
             d.store.set_ns_keep_by_rules(&ns, by_rules).map_err(|e| e.to_string())?;
-            let merged = materialize(d, &ns)?;
-            apply_keep(d, &ns, &merged.records)?;
+            materialize(d, &ns)?;
+            apply_keep(d, &ns, &d.store.records(&ns).map_err(|e| e.to_string())?)?;
             Ok(Response::Namespace(ns_view(d, &ns)?))
         }
 
@@ -1903,7 +1903,7 @@ fn ns_view(d: &Daemon, ns: &str) -> Result<NsView, String> {
                 (hex(w), shown)
             })
             .collect(),
-        records: merged.records.len(),
+        records: d.store.records(ns).map_err(|e| e.to_string())?.len(),
         peers: d.store.ns_peers(ns).map_err(|e| e.to_string())?.len(),
         checkpoint: d.store.ns_checkpoint(ns).map_err(|e| e.to_string())?.map(|f| f.to_string()),
         device: d.device.clone(),
@@ -2115,8 +2115,9 @@ async fn sync_ns(d: &Daemon, ns: &str) -> Result<(), String> {
             d.ns_wake.notify_one(); // a new read key: newer versions may be readable now
         }
         // Content kept on this device: pulled now, released when no longer kept.
-        apply_keep(d, ns, &merged.records)?;
-        println!("ns {ns}: merged, {} record(s), {} writer(s)", merged.records.len(), merged.writers.len());
+        let records = d.store.records(ns).map_err(|e| e.to_string())?;
+        apply_keep(d, ns, &records)?;
+        println!("ns {ns}: merged, {} record(s), {} writer(s)", records.len(), merged.writers.len());
     }
     Ok(())
 }
@@ -2938,10 +2939,20 @@ async fn write_ops(d: &Daemon, ns: &str, mut ops: Vec<Op>) -> Result<u64, String
         materialize(d, ns)?;
         d.ns_cache.lock().unwrap().get(ns).and_then(|e| e.applied.values().map(|(_, t, _)| t + 1).max()).unwrap_or(0)
     };
+    // Only a change to keep tags or rules, or a deletion, can change what's
+    // kept: own new content is kept anyway (deciding it read every record on
+    // each write; the scale test's import got slower with every record).
+    let keep_may_change = ops.iter().any(|op| match op {
+        Op::Set(_, k, v) => k == "keep" || k.starts_with("keep:") || (k == "type" && *v == Value::Str("keep-rule".into())) || k == "query" || k == "device",
+        Op::Unset(_, k) => k == "keep" || k.starts_with("keep:") || k == "query" || k == "device",
+        Op::Delete(_) => true,
+        _ => false,
+    });
     let (seq, _) = publish_channel(d, &ns_channel(ns), OpsFile { ops }.encode(), false, not_before).await?;
-    let merged = materialize(d, ns)?;
-    // A new tag or rule (or a changed record) may change what's kept here.
-    apply_keep(d, ns, &merged.records)?;
+    materialize(d, ns)?;
+    if keep_may_change {
+        apply_keep(d, ns, &d.store.records(ns).map_err(|e| e.to_string())?)?;
+    }
     Ok(seq)
 }
 
@@ -3151,30 +3162,27 @@ fn chains(d: &Daemon, ns: &str, full: bool) -> Result<(ChannelAddr, [u8; 32], Ch
 }
 
 /// Writes the records that changed since the last merge (all of them the first time).
-fn apply_view(d: &Daemon, ns: &str, records: &[Record]) -> Result<(), String> {
+fn apply_view(d: &Daemon, ns: &str) -> Result<(), String> {
     let mut cache = d.ns_cache.lock().unwrap();
     let entry = cache.entry(ns.to_string()).or_default();
-    let mut changed = false;
+    let changed;
     let dirty = entry.state.as_mut().map(|s| s.take_dirty()).unwrap_or_default();
     if let (true, Some(st)) = (entry.view_built, entry.state.as_ref()) {
         // Only the records the state says changed: no copy of every record,
         // no comparison of everything on each write.
+        let mut changes = Vec::new();
         for id in dirty {
             let now = st.record(&id);
-            let before = d.store.get_record(ns, &id).map_err(|e| e.to_string())?;
-            if now != before {
-                match &now {
-                    Some(r) => d.store.put_record(ns, r).map_err(|e| e.to_string())?,
-                    None => {
-                        d.store.delete_record(ns, &id).map_err(|e| e.to_string())?;
-                    }
-                }
-                changed = true;
+            if now != d.store.get_record(ns, &id).map_err(|e| e.to_string())? {
+                changes.push((id, now));
             }
         }
+        changed = !changes.is_empty();
+        d.store.apply_records(ns, &changes).map_err(|e| e.to_string())?;
     } else {
         // First time (or after a rebuild): the view is rewritten from the state.
-        d.store.replace_namespace(ns, records).map_err(|e| e.to_string())?;
+        let records = entry.state.as_ref().map(|s| s.records()).unwrap_or_default();
+        d.store.replace_namespace(ns, &records).map_err(|e| e.to_string())?;
         entry.view_built = entry.state.is_some();
         changed = true;
     }
@@ -3260,6 +3268,8 @@ fn save_checkpoint(d: &Daemon, ns: &str, state: &State, frontier: Vec<Frontier>)
 }
 
 /// Rebuilds a namespace's local view by merging every writer chain held here.
+/// The result's `records` is empty: the records are in the store's view
+/// (`d.store.records(ns)`), updated here from what changed.
 fn materialize(d: &Daemon, ns: &str) -> Result<retifs_core::ops::Merged, String> {
     resume(d, ns)?;
     let lazy = d.store.ns_lazy(ns).map_err(|e| e.to_string())?;
@@ -3272,7 +3282,7 @@ fn materialize(d: &Daemon, ns: &str) -> Result<retifs_core::ops::Merged, String>
         if entry.needs_history
             && let Some(st) = &entry.state
         {
-            break st.merged(); // as it was, until sync brings the history
+            break st.merged_meta(); // as it was, until sync brings the history
         }
         // Apply only the new commits, unless one is misdated or brings a
         // control operation older than data already applied: then rebuild
@@ -3366,9 +3376,9 @@ fn materialize(d: &Daemon, ns: &str) -> Result<retifs_core::ops::Merged, String>
                 println!("ns {ns}: pruned {} tombstone(s)", gone.len());
             }
             checkpoint = Some((st.clone(), frontier));
-            break st.merged();
+            break st.merged_meta();
         }
-        break state.merged();
+        break state.merged_meta();
     };
     if let Some((state, frontier)) = checkpoint {
         let reach: Vec<([u8; 32], u64, Cid)> = frontier.iter().map(|f| (f.writer, f.seq, f.commit)).collect();
@@ -3391,7 +3401,7 @@ fn materialize(d: &Daemon, ns: &str) -> Result<retifs_core::ops::Merged, String>
             Err(e) => println!("ns {ns}: checkpoint failed: {e}"),
         }
     }
-    apply_view(d, ns, &merged.records)?;
+    apply_view(d, ns)?;
     // Rotated read keys wrapped to this node: take them, newest last.
     if let Some(identity) = d.store.ns_identity(ns).map_err(|e| e.to_string())? {
         let me: [u8; 32] = keywrap::public(&identity)[32..].try_into().unwrap();

@@ -209,6 +209,42 @@ impl SlabStore {
         Ok(())
     }
 
+    /// Puts (`Some`) and deletes (`None`) many records in one transaction: a
+    /// merge that changed 500 records writes the view once, not 500 times
+    /// (each with its own sync to disk).
+    pub fn apply_records(&self, ns: &str, changes: &[(RecordId, Option<Record>)]) -> Result<(), StoreError> {
+        if changes.is_empty() {
+            return Ok(());
+        }
+        if changes.iter().any(|(_, r)| r.as_ref().is_some_and(|r| r.attrs.keys().any(|k| k.contains(' ')))) {
+            return Err(StoreError::Full("attribute keys may not contain NUL"));
+        }
+        let w = self.db.begin_write()?;
+        {
+            w.open_table(NAMESPACES)?.insert(ns, ())?;
+            let mut records = w.open_table(RECORDS)?;
+            let mut attrs = w.open_table(ATTRS)?;
+            for (id, rec) in changes {
+                let key = [ns_prefix(ns).as_slice(), id].concat();
+                if let Some(old) = records.remove(key.as_slice())?.map(|v| v.value().to_vec())
+                    && let Ok(old) = Record::decode(&old)
+                {
+                    for k in index_keys(ns, &old) {
+                        attrs.remove(k.as_slice())?;
+                    }
+                }
+                if let Some(rec) = rec {
+                    records.insert(key.as_slice(), rec.encode().as_slice())?;
+                    for k in index_keys(ns, rec) {
+                        attrs.insert(k.as_slice(), ())?;
+                    }
+                }
+            }
+        }
+        w.commit()?;
+        Ok(())
+    }
+
     pub fn get_record(&self, ns: &str, id: &RecordId) -> Result<Option<Record>, StoreError> {
         let r = self.db.begin_read()?;
         let key = [ns_prefix(ns).as_slice(), id].concat();
@@ -327,17 +363,16 @@ impl SlabStore {
 
     /// Replaces a namespace's records with a snapshot's (a followed channel's new version).
     pub fn replace_namespace(&self, ns: &str, records: &[Record]) -> Result<(), StoreError> {
+        // One transaction for the whole namespace (a rebuild of 100,000
+        // records wrote and synced each one on its own).
         let keep: BTreeMap<RecordId, &Record> = records.iter().map(|r| (r.id, r)).collect();
-        for old in self.records(ns)? {
-            if !keep.contains_key(&old.id) {
-                self.delete_record(ns, &old.id)?;
-            }
-        }
+        let mut changes: Vec<(RecordId, Option<Record>)> =
+            self.records(ns)?.into_iter().filter(|old| !keep.contains_key(&old.id)).map(|old| (old.id, None)).collect();
         for r in records {
             if self.get_record(ns, &r.id)?.as_ref() != Some(r) {
-                self.put_record(ns, r)?;
+                changes.push((r.id, Some(r.clone())));
             }
         }
-        Ok(())
+        self.apply_records(ns, &changes)
     }
 }

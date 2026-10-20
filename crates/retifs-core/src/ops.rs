@@ -796,10 +796,17 @@ impl State {
 
     /// The merged view, as [`merge`] gives it.
     pub fn merged(&self) -> Merged {
+        Merged { records: self.records(), ..self.merged_meta() }
+    }
+
+    /// Like [`State::merged`] without the records (empty): writers, limits,
+    /// identities and rekeys. Building every record is the expensive part, and
+    /// a node that merges on each write needs it only now and then.
+    pub fn merged_meta(&self) -> Merged {
         Merged {
             identities: self.identities.clone(),
             rekeys: self.rekeys.clone(),
-            records: self.records(),
+            records: Vec::new(),
             writers: self
                 .rights
                 .iter()
