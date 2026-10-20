@@ -1122,6 +1122,7 @@ dependencies = [
  "libretifs",
  "tiny_http",
  "tokio",
+ "windows-sys 0.61.2",
 ]
 
 [[package]]

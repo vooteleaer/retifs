@@ -1,9 +1,12 @@
 //! Who is asking: the gateway answers only its own user. On Linux the owner
 //! of a localhost TCP connection is in `/proc/net/tcp{,6}` (the uid column of
-//! the client's socket), so other users on the machine are refused. Processes
-//! of the same user could use the daemon's socket anyway.
+//! the client's socket), so other users on the machine are refused. On
+//! Windows the TCP table names the connection's process, and its token's user
+//! SID must be ours. Processes of the same user could use the daemon's socket
+//! (pipe) anyway.
 
 #![cfg_attr(not(target_os = "linux"), allow(dead_code))]
+#![cfg_attr(windows, allow(unsafe_code))]
 
 use std::net::{IpAddr, SocketAddr};
 
@@ -22,10 +25,134 @@ pub fn is_own_user(peer: &SocketAddr, port: u16) -> bool {
         == Some(me)
 }
 
+/// Windows: the process owning the client's end of the connection must run
+/// as this user (same token user SID). Fails closed.
+#[cfg(windows)]
+pub fn is_own_user(peer: &SocketAddr, port: u16) -> bool {
+    win::owner_pid(peer, port).is_some_and(win::same_user)
+}
+
 /// Elsewhere there is no cheap way to tell; the gateway listens on loopback only.
-#[cfg(not(target_os = "linux"))]
+#[cfg(not(any(target_os = "linux", windows)))]
 pub fn is_own_user(_peer: &SocketAddr, _port: u16) -> bool {
     true
+}
+
+#[cfg(windows)]
+mod win {
+    use std::net::{IpAddr, Ipv4Addr, Ipv6Addr, SocketAddr};
+
+    use windows_sys::Win32::{
+        Foundation::{CloseHandle, HANDLE},
+        NetworkManagement::IpHelper::{GetExtendedTcpTable, MIB_TCP6ROW_OWNER_PID, MIB_TCPROW_OWNER_PID, TCP_TABLE_OWNER_PID_CONNECTIONS},
+        Networking::WinSock::{AF_INET, AF_INET6},
+        Security::{EqualSid, GetTokenInformation, TokenUser, TOKEN_QUERY, TOKEN_USER},
+        System::Threading::{GetCurrentProcess, OpenProcess, OpenProcessToken, PROCESS_QUERY_LIMITED_INFORMATION},
+    };
+
+    /// A port as the TCP table stores it: network order in the low 16 bits.
+    fn port_of(dw: u32) -> u16 {
+        u16::from_be(dw as u16)
+    }
+
+    fn table(af: u16) -> Option<Vec<u8>> {
+        let mut size = 0u32;
+        for _ in 0..4 {
+            let mut buf = vec![0u8; size as usize];
+            let ptr = if buf.is_empty() { std::ptr::null_mut() } else { buf.as_mut_ptr().cast() };
+            // SAFETY: buf has `size` bytes; the call writes at most that many and updates `size`.
+            let rc = unsafe { GetExtendedTcpTable(ptr, &mut size, 0, af as u32, TCP_TABLE_OWNER_PID_CONNECTIONS, 0) };
+            if rc == 0 && !buf.is_empty() {
+                return Some(buf);
+            }
+        }
+        None
+    }
+
+    /// The process owning the TCP connection whose local end is `peer` and remote port `port`.
+    pub fn owner_pid(peer: &SocketAddr, port: u16) -> Option<u32> {
+        let ip = match peer.ip() {
+            IpAddr::V6(v6) => v6.to_ipv4_mapped().map(IpAddr::V4).unwrap_or(IpAddr::V6(v6)),
+            v4 => v4,
+        };
+        let peer = SocketAddr::new(ip, peer.port());
+        match ip {
+            IpAddr::V4(_) => {
+                let buf = table(AF_INET)?;
+                let n = u32::from_ne_bytes(buf.get(..4)?.try_into().ok()?) as usize;
+                let row = std::mem::size_of::<MIB_TCPROW_OWNER_PID>();
+                (0..n).find_map(|i| {
+                    let at = 4 + i * row;
+                    let bytes = buf.get(at..at + row)?;
+                    // SAFETY: `bytes` is one whole row; read_unaligned copes with any alignment.
+                    let r: MIB_TCPROW_OWNER_PID = unsafe { std::ptr::read_unaligned(bytes.as_ptr().cast()) };
+                    let local = SocketAddr::new(IpAddr::V4(Ipv4Addr::from(r.dwLocalAddr.to_ne_bytes())), port_of(r.dwLocalPort));
+                    (local == peer && port_of(r.dwRemotePort) == port).then_some(r.dwOwningPid)
+                })
+            }
+            IpAddr::V6(_) => {
+                let buf = table(AF_INET6)?;
+                let n = u32::from_ne_bytes(buf.get(..4)?.try_into().ok()?) as usize;
+                let row = std::mem::size_of::<MIB_TCP6ROW_OWNER_PID>();
+                (0..n).find_map(|i| {
+                    let at = 4 + i * row;
+                    let bytes = buf.get(at..at + row)?;
+                    // SAFETY: as above.
+                    let r: MIB_TCP6ROW_OWNER_PID = unsafe { std::ptr::read_unaligned(bytes.as_ptr().cast()) };
+                    let local = SocketAddr::new(IpAddr::V6(Ipv6Addr::from(r.ucLocalAddr)), port_of(r.dwLocalPort));
+                    (local == peer && port_of(r.dwRemotePort) == port).then_some(r.dwOwningPid)
+                })
+            }
+        }
+    }
+
+    /// The TOKEN_USER of a process (its buffer holds the SID).
+    fn token_user(process: HANDLE) -> Option<Vec<u8>> {
+        let mut token: HANDLE = std::ptr::null_mut();
+        // SAFETY: plain Win32 calls on handles we own; buffers sized by the first call.
+        unsafe {
+            if OpenProcessToken(process, TOKEN_QUERY, &mut token) == 0 {
+                return None;
+            }
+            let mut len = 0u32;
+            GetTokenInformation(token, TokenUser, std::ptr::null_mut(), 0, &mut len);
+            let mut buf = vec![0u8; len as usize];
+            let ok = len > 0 && GetTokenInformation(token, TokenUser, buf.as_mut_ptr().cast(), len, &mut len) != 0;
+            CloseHandle(token);
+            ok.then_some(buf)
+        }
+    }
+
+    /// Whether process `pid` runs as the same user as this one.
+    pub fn same_user(pid: u32) -> bool {
+        // SAFETY: the handle is checked and closed; SIDs point into buffers alive below.
+        unsafe {
+            let other = OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, 0, pid);
+            if other.is_null() {
+                return false; // e.g. another user's process: not ours to open
+            }
+            let theirs = token_user(other);
+            CloseHandle(other);
+            let (Some(theirs), Some(mine)) = (theirs, token_user(GetCurrentProcess())) else { return false };
+            let a = std::ptr::read_unaligned(theirs.as_ptr().cast::<TOKEN_USER>()).User.Sid;
+            let b = std::ptr::read_unaligned(mine.as_ptr().cast::<TOKEN_USER>()).User.Sid;
+            EqualSid(a, b) != 0
+        }
+    }
+
+    #[cfg(test)]
+    mod tests {
+        #[test]
+        fn finds_this_process_as_the_owner_of_its_own_connection() {
+            let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+            let port = listener.local_addr().unwrap().port();
+            let _client = std::net::TcpStream::connect(("127.0.0.1", port)).unwrap();
+            let (_conn, peer) = listener.accept().unwrap();
+            assert_eq!(super::owner_pid(&peer, port), Some(std::process::id()));
+            assert!(super::super::is_own_user(&peer, port));
+            assert_eq!(super::owner_pid(&"127.0.0.1:1".parse().unwrap(), port), None);
+        }
+    }
 }
 
 /// The uid of the socket whose local end is `peer` and remote port is `port`,
