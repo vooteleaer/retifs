@@ -12,6 +12,9 @@
 //!
 //! This crate has no Reticulum dependency, so applications stay small.
 
+#[cfg(unix)]
+pub mod fdpass;
+
 use std::{
     io,
     path::{Path, PathBuf},
@@ -61,6 +64,18 @@ pub enum Request {
     Remote { node: String, req: Box<Request> },
     AppList,
     AppRemove { name: String },
+    /// Like `Put`, but the file comes as an open descriptor sent with this
+    /// frame (SCM_RIGHTS, Unix sockets only): the daemon reads it itself, so
+    /// the bytes don't travel through the socket. Same file, same read-cap.
+    PutFd {
+        public: bool,
+        #[serde(default)]
+        compress: bool,
+        #[serde(default)]
+        publish: bool,
+        #[serde(default)]
+        record: Option<String>,
+    },
     /// Chunk, encrypt and pin `data`; returns its read-cap.
     Put {
         #[serde(with = "serde_bytes")]
@@ -664,6 +679,43 @@ impl Client {
         self
     }
 
+    /// Stores an open file by handing the daemon its descriptor (Unix): the
+    /// file is never read into this process. Returns the read-cap.
+    #[cfg(unix)]
+    pub async fn put_fd(
+        &mut self,
+        file: &std::fs::File,
+        public: bool,
+        compress: bool,
+        publish: bool,
+        record: Option<String>,
+    ) -> Result<String, ClientError> {
+        use std::os::fd::AsRawFd;
+        use tokio::io::{AsyncWriteExt, Interest};
+        if self.via.is_some() {
+            return Err(ClientError::Daemon("a descriptor can't travel over a Link: put without --via".into()));
+        }
+        let id = self.next_id;
+        self.next_id = self.next_id.wrapping_add(1);
+        let msg = Request::PutFd { public, compress, publish, record };
+        let body = rmp_serde::to_vec_named(&Envelope { v: PROTOCOL_VERSION, id, msg }).map_err(|e| ClientError::Io(io::Error::other(e)))?;
+        let frame = [&(body.len() as u32).to_be_bytes()[..], &body].concat();
+        let sock = self.stream.as_raw_fd();
+        let sent = loop {
+            self.stream.writable().await.map_err(ClientError::Io)?;
+            match self.stream.try_io(Interest::WRITABLE, || fdpass::send_with_fd(sock, &frame, file.as_raw_fd())) {
+                Ok(n) => break n,
+                Err(e) if e.kind() == io::ErrorKind::WouldBlock => continue,
+                Err(e) => return Err(ClientError::Io(e)),
+            }
+        };
+        self.stream.write_all(&frame[sent..]).await.map_err(ClientError::Io)?;
+        match self.reply(id).await? {
+            Response::Put { cap } => Ok(cap),
+            _ => Err(ClientError::Unexpected),
+        }
+    }
+
     pub async fn call(&mut self, msg: Request) -> Result<Response, ClientError> {
         let msg = match &self.via {
             Some(node) => Request::Remote { node: node.clone(), req: Box::new(msg) },
@@ -672,6 +724,10 @@ impl Client {
         let id = self.next_id;
         self.next_id = self.next_id.wrapping_add(1);
         write_frame(&mut self.stream, &Envelope { v: PROTOCOL_VERSION, id, msg }).await.map_err(ClientError::Io)?;
+        self.reply(id).await
+    }
+
+    async fn reply(&mut self, id: u32) -> Result<Response, ClientError> {
         let reply: Envelope<Response> = read_frame(&mut self.stream)
             .await
             .map_err(ClientError::Io)?

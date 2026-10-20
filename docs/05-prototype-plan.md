@@ -18,7 +18,8 @@ Prototypes are throwaway. They're for learning, not for locking in the format. T
 - [x] Local store, continued: keep rules ([ADR-0005](adr/0005-local-store-offline.md)).
 - [x] `libretifs` + local endpoint (Unix socket / Windows named pipe): `ping`, `put`, `get`, `status` via `retifsd` ([ADR-0004](adr/0004-native-record-api.md), implementation status).
 - [x] Local API, continued: records and attributes, queries, history, `Watch`, transactions, range reads, write sessions (streamed into the store), per-app capabilities ([ADR-0004](adr/0004-native-record-api.md)).
-- [ ] Local API, open: fd passing, faster cache writes (batch per tree level, keep segment files open).
+- [x] fd passing on Unix: `put` hands the daemon the open file ([ADR-0004](adr/0004-native-record-api.md)).
+- [ ] Local API, open: descriptors on Windows, faster cache writes (batch per tree level, keep segment files open).
 - [x] Local HTTP gateway, `retifs-gateway` (a client of `libretifs`, the base for the browser extension): every namespace is a site at `http://<namespace>.localhost:8740/` with its own origin. It's read-only, has a content security policy that allows only its own origin, and refuses foreign `Host` headers (DNS rebinding). Range requests are answered from on-demand reads, so video seeks. It answers only its own user (connection owner from `/proc/net/tcp` on Linux, the owning process's user SID on Windows) and refuses cross-site background requests.
 - [ ] Gateway, continued: NomadNet pages fetched over RNS, so any NomadNet node can be browsed; micron rendered as HTML.
 - [ ] Browser extension (later; Firefox first, Manifest V3): `web+retifs:` links and pasted addresses open through the gateway, micron rendered as HTML, a popup with node status and copies, "follow this site" and "save to retifs". Privileged actions go through a native-messaging host talking to the local API, never through the gateway.
@@ -86,6 +87,9 @@ Prototypes are throwaway. They're for learning, not for locking in the format. T
 - [x] Packaging, first step: systemd user units for retifsd, retifs-mount@<namespace> and retifs-gateway (`packaging/systemd`), and "Try it" in the README.
 - [ ] Linux, continued: FUSE passthrough, several namespaces in one mount, distribution packages (.deb, apk).
 - [ ] apkovl in the user namespace.
+
+## Later: user clients (Android, Linux, Haiku, Windows)
+- [ ] An app in the spirit of the Nextcloud mobile and desktop clients, on `libretifs` (locally) or `--via` an own node (phones): browse namespaces and records, search (local, own node, blind index), import and export files, extract metadata from files into attributes (EXIF, audio tags, document properties), keep rules per device, sharing (addresses, grants, search capabilities). Native per platform: Android, a Linux desktop app, Haiku (Tracker already shows attributes), Windows.
 
 ## Phase 5: thin client
 - [ ] USB stick: UKI + EROFS/dm-verity + LUKS/F2FS cache + YubiKey.

@@ -107,7 +107,8 @@ async fn main() {
         None => Client::connect(&store).await,
     }
     .unwrap_or_else(|e| fail(e))
-    .via(via);
+    .via(via.clone());
+    let via_set = via.is_some();
     match command.as_str() {
         "ping" => {
             let (node, chunks, usage) = client.ping().await.unwrap_or_else(|e| fail(e));
@@ -134,8 +135,24 @@ async fn main() {
             } else {
                 Some(std::path::absolute(&path).unwrap_or_else(|_| path.clone()).to_string_lossy().into_owned())
             };
-            let data = std::fs::read(&path).unwrap_or_else(|e| fail(format!("{}: {e}", path.display())));
-            let cap = client.put(data, public, compress, publish, record).await.unwrap_or_else(|e| fail(e));
+            // On Unix the daemon gets the open file and reads it itself (fd
+            // passing): nothing is copied through the socket. `--copy` sends the bytes.
+            #[cfg(unix)]
+            let by_fd = !flags.iter().any(|a| a == "--copy") && !via_set;
+            #[cfg(not(unix))]
+            let by_fd = !via_set && false;
+            let cap = if by_fd {
+                #[cfg(unix)]
+                {
+                    let f = std::fs::File::open(&path).unwrap_or_else(|e| fail(format!("{}: {e}", path.display())));
+                    client.put_fd(&f, public, compress, publish, record).await.unwrap_or_else(|e| fail(e))
+                }
+                #[cfg(not(unix))]
+                unreachable!()
+            } else {
+                let data = std::fs::read(&path).unwrap_or_else(|e| fail(format!("{}: {e}", path.display())));
+                client.put(data, public, compress, publish, record).await.unwrap_or_else(|e| fail(e))
+            };
             println!("{cap}");
         }
         "get" => {

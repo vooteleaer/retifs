@@ -59,7 +59,8 @@ The first slice exists: `crates/libretifs` (client, no Reticulum dependency) and
 - **Operations:** `ping`, `put` (file → pinned → read-cap), `get` (local store first, then the given nodes; fetched chunks cached) and `status` (local presence, walking the manifest offline).
 - **Since added (2026-10-20):** records, attributes, queries, history ([ADR-0016](0016-records-and-snapshots.md), [ADR-0017](0017-multi-writer-namespaces.md)), `Watch`, transactions, range reads and write sessions ([ADR-0002](0002-os-integration.md)), per-app capabilities (below). The [API draft](../07-api.md) maps each section to what exists.
 - **Remote use over a Link (2026-10-20):** own devices only, admitted by node address, with app-style scopes ([ADR-0019](0019-remote-query-and-blind-index.md)).
-- **Not yet:** fd passing (bulk data travels in the message, ≤ 256 MiB, or through a write session).
+- **fd passing (2026-10-20, Unix):** `PutFd` sends the frame with the open file's descriptor attached (SCM_RIGHTS). The daemon reads its sockets with `recvmsg`, keeps up to 4 received descriptors per connection, and streams the file into the store itself: the same file and read-cap as `Put` with the bytes. `retifs put` uses it by default (`--copy` sends the bytes). Apps can't (like `Put`). Live (WSL2, 100 MiB): the CLI peaked at 10 MiB instead of 202 MiB, with the same read-cap both ways.
+- **Not yet:** descriptors on Windows (named pipes would need handle duplication).
 - **Measured locally (two daemons, one machine):**
   - `put` 10 MiB, then local `get` in 0.04–0.06 s.
   - The second daemon fetched it from the first over Reticulum in 2.5 s (4 links, cache writes not fsynced); afterwards `status` showed it complete, and a repeat `get` was fully local.
@@ -82,5 +83,5 @@ The first slice exists: `crates/libretifs` (client, no Reticulum dependency) and
 - **Not yet:**
   - narrower app scopes (record filters, keys) as capability chains, the same as between people;
   - Flatpak/portal identity;
-  - fd passing for bulk data.
+  - descriptors on Windows.
 

@@ -1019,7 +1019,10 @@ async fn local_api(endpoint: String, daemon: Arc<Daemon>, apps: bool) {
                         .and_then(|pid| std::fs::read_link(format!("/proc/{pid}/exe")).ok())
                         .map(|p| p.to_string_lossy().into_owned())
                 });
-                tokio::spawn(connection(stream, daemon.clone(), exe));
+                // Read with recvmsg, so descriptors sent with PutFd arrive.
+                let stream = libretifs::fdpass::FdStream::new(stream);
+                let fds = Some(stream.fds.clone());
+                tokio::spawn(connection(stream, daemon.clone(), exe, fds));
             }
             Err(e) => eprintln!("local API accept: {e}"),
         }
@@ -1041,7 +1044,7 @@ async fn local_api(endpoint: String, daemon: Arc<Daemon>, apps: bool) {
         }
         let connected = server;
         server = ServerOptions::new().create(&endpoint).expect("next pipe instance");
-        tokio::spawn(connection(connected, daemon.clone(), apps.then_some(None)));
+        tokio::spawn(connection(connected, daemon.clone(), apps.then_some(None), None));
     }
 }
 
@@ -1055,7 +1058,10 @@ struct AppScope {
 /// A local API connection. `app`: `None` for the owner's socket (everything
 /// allowed); `Some(exe)` for the app socket, where the first message must be
 /// `Hello` with a token, and every request is checked against its scope.
-async fn connection(mut stream: impl AsyncRead + AsyncWrite + Unpin, daemon: Arc<Daemon>, app: Option<Option<String>>) {
+/// Descriptors received on a connection (Unix sockets; none on Windows pipes).
+type FdQueue = std::sync::Arc<std::sync::Mutex<std::collections::VecDeque<std::fs::File>>>;
+
+async fn connection(mut stream: impl AsyncRead + AsyncWrite + Unpin, daemon: Arc<Daemon>, app: Option<Option<String>>, fds: Option<FdQueue>) {
     let mut scope: Option<AppScope> = None;
     loop {
         let req: Envelope<Request> = match read_frame(&mut stream).await {
@@ -1067,7 +1073,17 @@ async fn connection(mut stream: impl AsyncRead + AsyncWrite + Unpin, daemon: Arc
             }
         };
         let msg = match (&app, &scope) {
-            (None, _) => handle(&daemon, req.msg).await.unwrap_or_else(|message| Response::Error { message }),
+            (None, _) => match req.msg {
+                Request::PutFd { public, compress, publish, record } => {
+                    let file = fds.as_ref().and_then(|q| q.lock().unwrap().pop_front());
+                    match file {
+                        Some(f) => put_file(&daemon, f, public, compress, publish, record).await,
+                        None => Err("PutFd came without a descriptor".into()),
+                    }
+                    .unwrap_or_else(|message| Response::Error { message })
+                }
+                other => handle(&daemon, other).await.unwrap_or_else(|message| Response::Error { message }),
+            },
             (Some(exe), None) => match hello(&daemon, req.msg, exe.as_deref()) {
                 Ok(s) => {
                     scope = Some(s);
@@ -1309,6 +1325,8 @@ async fn handle(d: &Daemon, req: Request) -> Result<Response, String> {
                 }),
             })
         }
+
+        Request::PutFd { .. } => Err("PutFd needs the owner's Unix socket (the descriptor travels with the frame)".into()),
 
         Request::Put { data, public, compress, publish, record } => {
             let store = d.store.clone();
@@ -1709,6 +1727,39 @@ async fn handle(d: &Daemon, req: Request) -> Result<Response, String> {
 
 /// Writes `data` as pinned own data and registers it for serving: to holders
 /// of its read-cap (serve token), and to anyone if `publish`.
+/// `PutFd`: stores a file the client handed over as a descriptor, read and
+/// chunked as a stream (the same file, and read-cap, as `Put` with its bytes).
+async fn put_file(d: &Daemon, file: std::fs::File, public: bool, compress: bool, publish: bool, record: Option<String>) -> Result<Response, String> {
+    let store = d.store.clone();
+    let opts = manifest::WriteOpts {
+        compression: if compress { retifs_core::Compression::Zstd } else { retifs_core::Compression::Off },
+        ..Default::default()
+    };
+    let file = tokio::task::spawn_blocking(move || -> Result<FileRef, String> {
+        let secret = secret(&store, public, record.as_deref());
+        let opts = manifest::WriteOpts { stable_padding: record.is_some() && !public, ..opts };
+        let mut pinned = retifs_store::TrackedPinned::new(&store);
+        let (file, blobs) = match manifest::write_reader(&mut pinned, &secret, std::io::BufReader::with_capacity(1 << 20, file), opts) {
+            Ok(written) => written,
+            Err(e) => {
+                let _ = pinned.roll_back();
+                return Err(e.to_string());
+            }
+        };
+        let tokens: Vec<_> = blobs.iter().map(|(c, s)| (*c, ChunkToken::for_seed(s))).collect();
+        store.register_serving(&tokens).map_err(|e| e.to_string())?;
+        if publish {
+            store.publish(&blobs.iter().map(|(c, _)| *c).collect::<Vec<_>>()).map_err(|e| e.to_string())?;
+        }
+        Ok(file)
+    })
+    .await
+    .map_err(|e| e.to_string())??;
+    d.store.need_file(&file).map_err(|e| e.to_string())?;
+    d.upkeep_wake.notify_one();
+    Ok(Response::Put { cap: file.to_string() })
+}
+
 fn store_file(
     store: &SlabStore,
     data: &[u8],
