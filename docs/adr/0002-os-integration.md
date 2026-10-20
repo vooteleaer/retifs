@@ -75,6 +75,8 @@ The mount exposes plaintext to processes in the user's session, and root on the 
   - Measured: with the only holder stopped, a read of a range not held failed after its 8 s wait; with no peer known, at once.
 - A lookup that misses re-reads the namespace if its view is older than 100 ms, so a record made a moment ago by another program is found.
 
+**Watching (2026-10-20):** the local API's `Watch { ns, since, timeout_ms }` is a long poll that answers as soon as the namespace's records change here, whether from a local write or other members' writes merged in. It returns a change count. The mount keeps one watch open on a thread of its own and re-reads the namespace only when told, at the latest every 30 s, instead of every second. Live: an attribute set through the CLI showed through the mount's xattrs within 2 s.
+
 **Transactions (2026-10-20):** the local API's `Transaction { ns, steps }` applies creates, sets and deletes as one commit (one version), so other members see all of them or none. The single-record requests are one-step transactions. The mount uses them for directory renames (every record below in one commit) and for saves that rename over a file (the target's new content and the temporary record's deletion in one commit). Live: moving a directory of two files added exactly one version.
 
 **Not yet:**

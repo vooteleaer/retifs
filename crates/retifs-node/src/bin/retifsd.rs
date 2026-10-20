@@ -519,6 +519,9 @@ struct Daemon {
     announced_wake: Notify,
     /// This device's name for keep tags and rules (ADR-0005).
     device: String,
+    /// Per namespace, how often its records changed here (for `watch`).
+    changes: Mutex<HashMap<String, u64>>,
+    changed: Notify,
 }
 
 impl Daemon {
@@ -664,6 +667,8 @@ async fn serve(store: Arc<SlabStore>, identity: node::IdentitySecret, endpoint: 
         announced: Mutex::new(std::collections::HashSet::new()),
         announced_wake: Notify::new(),
         device: args.device.clone(),
+        changes: Mutex::new(HashMap::new()),
+        changed: Notify::new(),
     });
     println!("attached to shared instance {of}");
     println!("serving {} chunks as retifs.node <{}>", store.len().unwrap_or(0), daemon.node_hex);
@@ -968,6 +973,23 @@ async fn handle(d: &Daemon, req: Request) -> Result<Response, String> {
         Request::RecordDelete { ns, id } => {
             transaction(d, &ns, vec![TxStep::Delete { id }]).await?;
             Ok(Response::Records { records: Vec::new() })
+        }
+
+        Request::Watch { ns, since, timeout_ms } => {
+            let deadline = tokio::time::Instant::now() + Duration::from_millis(timeout_ms.min(600_000));
+            loop {
+                // Registered before looking, so a change in between isn't missed.
+                let notified = d.changed.notified();
+                tokio::pin!(notified);
+                notified.as_mut().enable();
+                let count = d.changes.lock().unwrap().get(&ns).copied().unwrap_or(0);
+                if count != since {
+                    return Ok(Response::Changed { count });
+                }
+                if tokio::time::timeout_at(deadline, notified).await.is_err() {
+                    return Ok(Response::Changed { count });
+                }
+            }
         }
 
         Request::Transaction { ns, steps } => {
@@ -2158,21 +2180,37 @@ fn apply_view(d: &Daemon, ns: &str, records: &[Record]) -> Result<(), String> {
     let mut cache = d.ns_cache.lock().unwrap();
     let entry = cache.entry(ns.to_string()).or_default();
     let new: std::collections::BTreeMap<RecordId, Record> = records.iter().map(|r| (r.id, r.clone())).collect();
+    let mut changed = false;
     match &entry.records {
-        None => d.store.replace_namespace(ns, records).map_err(|e| e.to_string())?,
+        None => {
+            d.store.replace_namespace(ns, records).map_err(|e| e.to_string())?;
+            changed = true;
+        }
         Some(old) => {
             for id in old.keys().filter(|id| !new.contains_key(*id)) {
                 d.store.delete_record(ns, id).map_err(|e| e.to_string())?;
+                changed = true;
             }
             for (id, r) in &new {
                 if old.get(id) != Some(r) {
                     d.store.put_record(ns, r).map_err(|e| e.to_string())?;
+                    changed = true;
                 }
             }
         }
     }
     entry.records = Some(new);
+    drop(cache);
+    if changed {
+        ns_changed(d, ns);
+    }
     Ok(())
+}
+
+/// Wakes `watch`es of `ns`: its records changed here.
+fn ns_changed(d: &Daemon, ns: &str) {
+    *d.changes.lock().unwrap().entry(ns.to_string()).or_insert(0) += 1;
+    d.changed.notify_waiters();
 }
 
 /// Resumes a namespace from its local checkpoint, if the cache is empty
@@ -2505,6 +2543,7 @@ async fn follow_pass(d: &Daemon, mut f: retifs_store::Follow) -> Result<(), Stri
         && let Some(snap) = read_snapshot(&d.store, &cur)
     {
         d.store.replace_namespace(&channel_ns(&f.addr), &snap.records).map_err(|e| e.to_string())?;
+        ns_changed(d, &channel_ns(&f.addr));
         for b in snap.records.iter().flat_map(|r| r.blocks.iter()) {
             if !complete(&d.store, b) && !d.store.is_wanted(&b.root).unwrap_or(false) {
                 d.store.want_file(b, &f.hints).map_err(|e| e.to_string())?;

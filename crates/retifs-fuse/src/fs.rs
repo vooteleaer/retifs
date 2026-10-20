@@ -3,6 +3,10 @@
 
 use std::{
     collections::HashMap,
+    sync::{
+        atomic::{AtomicBool, Ordering},
+        Arc,
+    },
     ffi::OsStr,
     path::Path,
     time::{Duration, Instant, SystemTime, UNIX_EPOCH},
@@ -20,6 +24,8 @@ use crate::tree::{self, Node, Tree, QUERY_DIR};
 /// tree is re-read from the daemon (other members' writes show up after this).
 const TTL: Duration = Duration::from_secs(1);
 const XATTR_PREFIX: &str = "user.retifs.";
+/// Without a change notice, the namespace is re-read at least this often.
+const RESYNC: Duration = Duration::from_secs(30);
 /// `user.retifs.local`: computed, whether a file's content is on this device.
 const LOCAL_XATTR: &str = "local";
 /// Content kept in memory for reads, at most.
@@ -56,6 +62,8 @@ pub struct RetifsFs {
     started: SystemTime,
     /// How long a read may wait for content that isn't here yet.
     wait: Duration,
+    /// Set by the watcher thread when the namespace changed.
+    changed: Arc<AtomicBool>,
 }
 
 pub fn mount(store: &Path, ns: &str, mountpoint: &Path, wait: Duration) -> Result<(), String> {
@@ -78,9 +86,38 @@ pub fn mount(store: &Path, ns: &str, mountpoint: &Path, wait: Duration) -> Resul
         gid: unsafe { libc::getgid() },
         started: SystemTime::now(),
         wait,
+        changed: watch(store, ns),
     };
     let opts = [MountOption::FSName(format!("retifs:{ns}")), MountOption::Subtype("retifs".into()), MountOption::DefaultPermissions];
     fuser::mount2(fs, mountpoint, &opts).map_err(|e| e.to_string())
+}
+
+/// Watches namespace `ns` on a thread of its own (a long poll on the local
+/// API) and raises the flag on every change, so the mount re-reads it only
+/// when something changed: a local write, or another member's merged in.
+fn watch(store: &Path, ns: &str) -> Arc<AtomicBool> {
+    let flag = Arc::new(AtomicBool::new(true));
+    let (store, ns, out) = (store.to_path_buf(), ns.to_string(), flag.clone());
+    std::thread::spawn(move || {
+        let Ok(rt) = tokio::runtime::Builder::new_current_thread().enable_all().build() else { return };
+        let mut since = 0;
+        loop {
+            let Ok(mut client) = rt.block_on(Client::connect(&store)) else {
+                std::thread::sleep(Duration::from_secs(5)); // the daemon restarting
+                continue;
+            };
+            // Until the connection fails (then reconnect).
+            while let Ok(Response::Changed { count }) = rt.block_on(client.call(Request::Watch { ns: ns.clone(), since, timeout_ms: 30_000 })) {
+                if count != since {
+                    since = count;
+                    out.store(true, Ordering::Release);
+                }
+            }
+            out.store(true, Ordering::Release);
+            std::thread::sleep(Duration::from_secs(1));
+        }
+    });
+    flag
 }
 
 fn now_ms() -> i64 {
@@ -110,8 +147,11 @@ impl RetifsFs {
     }
 
     /// Re-reads the namespace if the tree is older than the TTL (or `force`).
+    /// Re-reads the namespace if it changed (the watcher says so), if `force`,
+    /// or at the latest every RESYNC in case the watcher missed something.
     fn refresh(&mut self, force: bool) {
-        if !force && self.loaded.is_some_and(|t| t.elapsed() < TTL) {
+        let changed = self.changed.swap(false, Ordering::AcqRel);
+        if !force && !changed && self.loaded.is_some_and(|t| t.elapsed() < RESYNC) {
             return;
         }
         if let Ok(records) = self.records(Vec::new()) {

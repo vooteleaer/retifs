@@ -130,6 +130,11 @@ pub enum Request {
     },
     RecordGet { ns: String, id: String },
     RecordDelete { ns: String, id: String },
+    /// Waits until namespace `ns` changes (a local write, or other members'
+    /// writes merged in), for at most `timeout_ms`. `since` is the change
+    /// count from the previous answer (0 at first: answers at once). The
+    /// answer is the current count; equal to `since` means nothing changed.
+    Watch { ns: String, since: u64, timeout_ms: u64 },
     /// Several changes as one commit (one version): other members see all of
     /// them or none. Returns the created and changed records, in step order.
     Transaction { ns: String, steps: Vec<TxStep> },
@@ -302,6 +307,10 @@ pub enum Response {
     Range {
         #[serde(with = "serde_bytes")]
         data: Vec<u8>,
+    },
+    Changed {
+        /// The namespace's change count on this node.
+        count: u64,
     },
     Verified {
         ok: bool,
