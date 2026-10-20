@@ -1112,6 +1112,7 @@ name = "retifs-node"
 version = "0.0.1"
 dependencies = [
  "getrandom 0.3.4",
+ "libc",
  "libretifs",
  "personal-rns",
  "redb",

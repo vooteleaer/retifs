@@ -70,6 +70,12 @@ fn usage() -> ! {
 
 #[tokio::main(flavor = "current_thread")]
 async fn main() {
+    // Like any command-line tool: a closed pipe (`retifs query … | head -1`)
+    // ends the program quietly instead of panicking on the next print.
+    #[cfg(unix)]
+    unsafe {
+        libc::signal(libc::SIGPIPE, libc::SIG_DFL);
+    }
     let mut args: Vec<String> = std::env::args().skip(1).collect();
     let mut store = default_store_dir();
     if let Some(i) = args.iter().position(|a| a == "--store") {

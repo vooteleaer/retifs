@@ -24,3 +24,6 @@ retifs-core = { path = "../retifs-core" }
 retifs-net = { path = "../retifs-net" }
 retifs-store = { path = "../retifs-store" }
 tokio = { version = "1", features = ["full"] }
+
+[target.'cfg(unix)'.dependencies]
+libc = "0.2"
