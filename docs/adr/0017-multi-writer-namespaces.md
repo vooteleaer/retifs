@@ -96,5 +96,6 @@ See the [threat model](../04-threat-model.md).
   - Vectors: `ops-v1.json` has a key-limited, expiring grant (14/14, with an independent Python merge that includes narrowing). `prolly-v1.json`'s stamped replay uses the same rules (18/18).
   - Daemon and CLI: `retifs ns grant NS KEY --keys rating,@content --until 2026-12-31` (or `+30d`, or milliseconds), and `ns info` shows each writer's limits.
   - Live, two daemons: B, granted only `rating` for one minute, set `rating` and `title`. Only `rating` counted, on both nodes. After the minute, B's next `rating` was ignored everywhere, and `ns info` marks the grant expired.
-- **Not yet:** filtering by record content, keeping concurrent content versions side by side, announcing new writers without a known peer.
+- **Filtering grants by record content:** **decided (2026-10-20): no record filters in grants.** A filter on a record's content would depend on the record's state at the time of the write, so an older operation arriving late could change which later writes count. Data operations would no longer apply in any order, and every late arrival would need a rebuild. Contributors who should touch only some records get their own namespace (or a shared one), and queries combine namespaces (`retifs query photos-alice,photos-bob album=Prangli`).
+- **Not yet:** keeping concurrent content versions side by side, announcing new writers without a known peer.
 

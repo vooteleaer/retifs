@@ -66,7 +66,7 @@ fn usage() -> ! {
          retifs [--store DIR] channel create NAME | channel publish NAME FILE [--compress] | channel publish-ns NAME NS\n\
          retifs [--store DIR] follow ADDRESS [--from NODE]... | channels\n\
          retifs [--store DIR] rec add NS [KEY=VALUE]... [--file PATH] | rec set NS ID [KEY=VALUE]... [--unset KEY]...\n\
-         retifs [--store DIR] rec get NS ID | rec rm NS ID | rec history NS ID | query NS [--at VERSION] [TERM]... [--search NODE]\n\
+         retifs [--store DIR] rec get NS ID | rec rm NS ID | rec history NS ID | query NS[,NS]... [--at VERSION] [TERM]... [--search NODE]\n\
          retifs [--store DIR] ns address NS | ns info NS | ns checkpoint NS | ns search NS | ns verify NS | ns keep NS all|rules | ns join NAME ADDRESS [--from NODE]...\n\
          retifs [--store DIR] ns grant NS WRITER [--grant] [--from NODE]... | ns revoke NS WRITER"
     );
@@ -428,11 +428,22 @@ async fn main() {
                 }
                 return;
             }
-            let found = client.records(libretifs::Request::Query { ns, terms, at }).await.unwrap_or_else(|e| fail(e));
-            for r in &found {
-                print_record(r);
+            // Several namespaces (NS1,NS2): each contributor writes its own,
+            // and a query combines them (instead of record filters in grants).
+            let names: Vec<String> = ns.split(',').map(str::trim).filter(|n| !n.is_empty()).map(String::from).collect();
+            let mut total = 0;
+            for n in &names {
+                let req = libretifs::Request::Query { ns: n.clone(), terms: terms.clone(), at };
+                let found = client.records(req).await.unwrap_or_else(|e| fail(format!("{n}: {e}")));
+                for r in &found {
+                    if names.len() > 1 {
+                        print!("{n}/");
+                    }
+                    print_record(r);
+                }
+                total += found.len();
             }
-            println!("{} record(s)", found.len());
+            println!("{total} record(s)");
         }
         "forget" => {
             let cap = it.next().unwrap_or_else(|| usage());
