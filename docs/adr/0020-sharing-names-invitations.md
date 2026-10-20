@@ -27,17 +27,17 @@ Sharing works, but by hand: a namespace address is about 140 characters (`retifs
 ### Links and QR codes
 Apps share different things: an album, a photo, a playlist, a calendar, a store. So one link envelope carries many kinds, and every retifs app can tell what a code is, whichever app made it:
 ```text
-retifs:<kind>/<what>[?view=<hint>&name=<label>&…]
+retifs:<kind>/<what>[?q=<query>&view=<hint>&name=<label>&…]
 
 kind    what                                      e.g.
 node    a node address                            add a contact
-ns      a namespace address (read)                a shared calendar, read-only
-invite  an invitation (see below)                 join and write
-rec     namespace address + record ID             one record, through the namespace
-query   namespace address + query terms           an album (album=Prangli), a smart playlist
+ns      a namespace address (read) + query        a calendar; an album (q=album=Prangli); one record (q=@<id>)
+invite  an invitation (see below) + query         join and write, opening on a view
 ch      a channel address                         follow a store or a site
 cap     a read-cap (+ attributes)                 one file, nothing else
 ```
+- **`q`** is a query in the CLI's terms (URL-encoded): what the recipient's app opens on. An album, a playlist, one record and a whole namespace are all a namespace plus a query (or none).
+- **A query is a view, not a limit.** The address carries the read key, so whoever has the link can read the whole namespace. Sharing only an album means the album is its own namespace (a share namespace, or albums kept as namespaces). Apps must say so ("this shares your whole Photos library") rather than let a query look like a limit.
 - **`view`** hints which app opens it (`photos`, `music`, `calendar`, `store`). Without one, the record type decides, the way Android routes intents to apps.
 - **Unknown kinds and parameters** are shown for what they are (with a generic action: open in the gateway, save the file), never an error. New kinds can be added without breaking printed codes.
 - **QR** is the main in-person channel: shown on one screen, scanned by the other. A namespace address or an invitation is a few hundred characters, well within an easily scanned code.
@@ -47,7 +47,7 @@ cap     a read-cap (+ attributes)                 one file, nothing else
 ### Invitations: one-step sharing
 ```text
 invitation = { "ns": namespace address, "node": creator's node, "secret": 32 random bytes,
-               "rights": [...], "limits": { "keys"?, "until"? }, "expires": time }   canonical msgpack, base32 in the link
+               "rights": [...], "limits": { "keys"?, "until"? }, "expires": time, "q"?: query }   canonical msgpack, base32 in the link
 ```
 1. The creator's node makes the invitation and keeps `H(secret)` with the rights, limits and expiry, as pending.
 2. The invitation travels as a link (QR, LXMF, …).
