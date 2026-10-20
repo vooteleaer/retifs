@@ -19,6 +19,7 @@
 //!     retifs [--store DIR] rec add NS [KEY=VALUE]... [--file PATH]
 //!     retifs [--store DIR] rec set NS ID [KEY=VALUE]... [--unset KEY]...
 //!     retifs [--store DIR] rec get NS ID | rec rm NS ID
+//!     retifs [--store DIR] rec import NS < LINES   (one record per line of KEY=VALUE, 500 per transaction)
 //!     retifs [--store DIR] rec history NS ID
 //!     retifs [--store DIR] query NS [--at VERSION] [TERM]...
 //!     retifs [--store DIR] query NS KEY=VALUE... --search NODE   (through a search node's blind index)
@@ -66,7 +67,7 @@ fn usage() -> ! {
          retifs [--store DIR] channel create NAME | channel publish NAME FILE [--compress] | channel publish-ns NAME NS\n\
          retifs [--store DIR] follow ADDRESS [--from NODE]... | channels\n\
          retifs [--store DIR] rec add NS [KEY=VALUE]... [--file PATH] | rec set NS ID [KEY=VALUE]... [--unset KEY]...\n\
-         retifs [--store DIR] rec get NS ID | rec rm NS ID | rec history NS ID | query NS[,NS]... [--at VERSION] [TERM]... [--search NODE]\n\
+         retifs [--store DIR] rec get NS ID | rec rm NS ID | rec history NS ID | rec import NS < LINES | query NS[,NS]... [--at VERSION] [TERM]... [--search NODE]\n\
          retifs [--store DIR] ns address NS | ns info NS | ns checkpoint NS | ns search NS | ns verify NS | ns keep NS all|rules | ns join NAME ADDRESS [--from NODE]... [--lazy]\n\
          retifs [--store DIR] ns grant NS WRITER [--grant] [--from NODE]... | ns revoke NS WRITER"
     );
@@ -249,6 +250,33 @@ async fn main() {
             let sub = it.next().unwrap_or_else(|| usage());
             let ns = it.next().unwrap_or_else(|| usage());
             let rest: Vec<String> = it.collect();
+            if sub == "import" {
+                // One record per input line (KEY=VALUE pairs, separated by
+                // tabs, or by spaces when there are no tabs), in transactions
+                // of 500: one commit each, not one per record.
+                use std::io::BufRead;
+                let mut steps = Vec::new();
+                let mut total = 0usize;
+                for line in std::io::stdin().lock().lines() {
+                    let line = line.unwrap_or_else(|e| fail(e));
+                    let fields: Vec<&str> = if line.contains('\t') { line.split('\t').collect() } else { line.split_whitespace().collect() };
+                    let attrs: Vec<_> = fields.iter().filter(|f| !f.is_empty()).map(|f| attr(f)).collect();
+                    if attrs.is_empty() {
+                        continue;
+                    }
+                    steps.push(libretifs::TxStep::Create { attrs, data: None });
+                    total += 1;
+                    if steps.len() == 500 {
+                        let req = libretifs::Request::Transaction { ns: ns.clone(), steps: std::mem::take(&mut steps) };
+                        client.call(req).await.unwrap_or_else(|e| fail(e));
+                    }
+                }
+                if !steps.is_empty() {
+                    client.call(libretifs::Request::Transaction { ns: ns.clone(), steps }).await.unwrap_or_else(|e| fail(e));
+                }
+                println!("{total} record(s) imported");
+                return;
+            }
             let req = match sub.as_str() {
                 "add" => {
                     let mut attrs = Vec::new();
