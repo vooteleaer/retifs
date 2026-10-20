@@ -15,9 +15,10 @@ Prototypes are throwaway. They're for learning, not for locking in the format. T
 - [x] Transfer, continued: transport trait (client side), several links per peer, multi-source with retry, local-first cache ([first-transfer](recon/first-transfer.md)).
 - [ ] Transfer, open: LAN throughput ceiling, occasional unsettled request with ≥4 links, serving side behind the transport trait.
 - [x] Local store: slab segments per size class + redb index, tier flags, slot reuse, CID-verified reads (`crates/retifs-store`, [ADR-0007](adr/0007-local-store-layout.md)).
-- [ ] Local store, continued: keep rules ([ADR-0005](adr/0005-local-store-offline.md)).
+- [x] Local store, continued: keep rules ([ADR-0005](adr/0005-local-store-offline.md)).
 - [x] `libretifs` + local endpoint (Unix socket / Windows named pipe): `ping`, `put`, `get`, `status` via `retifsd` ([ADR-0004](adr/0004-native-record-api.md), implementation status).
-- [ ] Local API, continued: records/attributes (`create`, `put_block`, `set`, `query`), streaming / fd passing, per-app capabilities, faster cache writes (batch per tree level, keep segment files open).
+- [x] Local API, continued: records and attributes, queries, history, `Watch`, transactions, range reads, write sessions (streamed into the store), per-app capabilities ([ADR-0004](adr/0004-native-record-api.md)).
+- [ ] Local API, open: fd passing, remote use over a Link, faster cache writes (batch per tree level, keep segment files open).
 - [x] Local HTTP gateway, `retifs-gateway` (a client of `libretifs`, the base for the browser extension): every namespace is a site at `http://<namespace>.localhost:8740/` with its own origin. It's read-only, has a content security policy that allows only its own origin, and refuses foreign `Host` headers (DNS rebinding). Range requests are answered from on-demand reads, so video seeks.
 - [ ] Gateway, continued: NomadNet pages fetched over RNS, so any NomadNet node can be browsed; micron rendered as HTML.
 - [ ] Browser extension (later; Firefox first, Manifest V3): `web+retifs:` links and pasted addresses open through the gateway, micron rendered as HTML, a popup with node status and copies, "follow this site" and "save to retifs". Privileged actions go through a native-messaging host talking to the local API, never through the gateway.
@@ -29,7 +30,7 @@ Prototypes are throwaway. They're for learning, not for locking in the format. T
 - [ ] Spare tier: fill free space with replicas by need score (rarest first), evicted first, idle bandwidth only.
 - [x] Want-list in the store (readable wants); `/retifs/have`; event-driven seeker woken by announces; `retifs want`; partial `status` ([ADR-0010](adr/0010-continuous-seeking.md), implementation status).
 - [x] Blind wants for leases (CID + access token, pulled by the holder).
-- [ ] Range reads of partially available files.
+- [x] Range reads of partially available files: only the chunks a range needs, fetched on demand ([ADR-0002](adr/0002-os-integration.md)).
 - [x] Request privacy: per-chunk access proofs (no file token on the wire), one-item requests (`--private-requests`, `batch: 1`), PADMÉ padding with padding fetched like data, per-record personal secrets (versions dedup) ([ADR-0008](adr/0008-chunk-encryption-and-cid.md), [ADR-0010](adr/0010-continuous-seeking.md)).
 - [ ] Request privacy, continued: sliced `have` per peer, decoy prefixes, several links with jitter.
 - [ ] Holder map: per-chunk/per-group holders from receipts, `have` answers, hints and announces; source ranking, load spreading, failover, measured copy counts.
@@ -60,13 +61,15 @@ Prototypes are throwaway. They're for learning, not for locking in the format. T
 - [x] Multi-writer namespaces: operations per commit, merge per field in stamp order, grants and revokes, join and sync between members ([ADR-0017](adr/0017-multi-writer-namespaces.md)).
 - [x] Read-key rotation on revoke: identities, rekey wrapped with RNS Identity.encrypt, crossing rotations via per-key heads ([ADR-0017](adr/0017-multi-writer-namespaces.md)).
 - [x] Namespace state as a Prolly tree; checkpoints: local resume, named in chains, new members start from a grant holder's checkpoint, history fetched on demand, `ns verify` ([ADR-0018](adr/0018-state-trees.md)).
-- [ ] Multi-writer, continued: filtered grants, pruning tombstones (hybrid logical clock for commit times: done, ADR-0017); `watch` (done: long poll per namespace), transactions (done), `at` (`query --at`).
+- [x] Multi-writer, continued: hybrid logical clock for commit times, grants limited by attribute key and expiry and narrowed on delegation, `watch` (long poll per namespace), transactions, `query --at` ([ADR-0017](adr/0017-multi-writer-namespaces.md)).
+- [ ] Multi-writer, open: grants filtered by record content, pruning tombstones.
 - [x] `keep:<device>` tag and query-based keep rules (proactive pull), keep mode per namespace, `user.retifs.local` ([ADR-0005](adr/0005-local-store-offline.md)).
 - [ ] Blind index, remote `/query`, live query.
-- [ ] Per-writer commit chains (one commit per modification), merge, history queries, per-record `versions`.
+- [x] Per-writer commit chains (one commit per modification), merge, history queries, per-record `versions` ([ADR-0017](adr/0017-multi-writer-namespaces.md)).
 
 ## Phase 3: identity and permissions
-- [ ] Capability chains, group namespaces, filtered share namespaces, validate-on-read, key rotation on removal.
+- [x] Group namespaces, validate-on-read (every reader checks grants on merge), key rotation on removal, limited grants narrowed on delegation ([ADR-0017](adr/0017-multi-writer-namespaces.md)).
+- [ ] Capability chains between people beyond grants, filtered share namespaces.
 - [ ] YubiKey-backed Prns `IdentitySigner` (upstream: fallible `sign()`, X25519 exchange through a trait).
 - [x] Per-app capabilities on the local socket: an app socket with tokens scoped to namespaces and read/write, pinned to the executable on Linux ([ADR-0004](adr/0004-native-record-api.md)).
 - [ ] Session capabilities; app scopes as capability chains (record filters, keys).

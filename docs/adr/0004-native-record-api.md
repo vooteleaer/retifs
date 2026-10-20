@@ -57,7 +57,8 @@ The first slice exists: `crates/libretifs` (client, no Reticulum dependency) and
 - **Endpoint:** a Unix socket at `<store>/retifs.sock` (mode 0600), or on Windows a named pipe `\\.\pipe\retifs-<hash of store path>`. The store defaults to `$RETIFS_STORE`, `$XDG_DATA_HOME/retifs`, `~/.local/share/retifs` or `%LOCALAPPDATA%\retifs`.
 - **Framing:** `u32_be length ‖ msgpack {v, id, msg}`.
 - **Operations:** `ping`, `put` (file → pinned → read-cap), `get` (local store first, then the given nodes; fetched chunks cached) and `status` (local presence, walking the manifest offline).
-- **Not yet:** records, attributes, queries, `watch`, transactions and history (§5–10 of the [API draft](../07-api.md)); per-app capabilities and `SO_PEERCRED`; fd passing (bulk data travels in the message, ≤ 256 MiB); remote use over a Link.
+- **Since added (2026-10-20):** records, attributes, queries, history ([ADR-0016](0016-records-and-snapshots.md), [ADR-0017](0017-multi-writer-namespaces.md)), `Watch`, transactions, range reads and write sessions ([ADR-0002](0002-os-integration.md)), per-app capabilities (below). The [API draft](../07-api.md) maps each section to what exists.
+- **Not yet:** fd passing (bulk data travels in the message, ≤ 256 MiB, or through a write session); remote use over a Link.
 - **Measured locally (two daemons, one machine):**
   - `put` 10 MiB, then local `get` in 0.04–0.06 s.
   - The second daemon fetched it from the first over Reticulum in 2.5 s (4 links, cache writes not fsynced); afterwards `status` showed it complete, and a repeat `get` was fully local.

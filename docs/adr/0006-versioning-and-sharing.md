@@ -77,5 +77,6 @@ See the [threat model](../04-threat-model.md).
 - **History:** `retifs rec history NS ID` walks the commit chain and shows the versions where a record changed; `retifs query NS --at VERSION …` queries the namespace as it was (the same terms, matched in memory against that version's snapshot).
 - **Retention:** every version is kept locally; only the latest is placed on other nodes (older ones are unneeded there but stay pinned here).
 - **Sharing:** a namespace's channel address shares it read-only; followers get its latest version. Followed namespaces (`ch-…`) are read-only.
-- **Not yet:** several writers per namespace (per-writer chains merged by every reader, LWW per author and key, capabilities), transactions over several records, per-record history beyond what local snapshots hold, thinning policies.
+- **Since done (2026-10-20):** several writers per namespace and transactions over several records ([ADR-0017](0017-multi-writer-namespaces.md)); history fetched from peers on demand when a node started from a checkpoint ([ADR-0018](0018-state-trees.md)).
+- **Not yet:** thinning policies.
 

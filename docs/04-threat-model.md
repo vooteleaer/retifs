@@ -8,9 +8,9 @@ Every crypto decision is checked against this.
 |---|---|---|
 | **Pinning node** | encrypted chunks, their (padded) size, request timing | content, structure (which chunks belong together), attributes, who the owner is |
 | **Foreign machine** (thin client) | what the session capability allows, during the session | root or device key; any rights after the session ends |
-| **Local application** | what its per-app capability allows | the rest of the user's data; a FUSE mount is a deliberate broad grant |
+| **Local application** | what its per-app capability allows (an app-socket token scoped to namespaces and read/write, pinned to its executable on Linux) | the rest of the user's data; a FUSE mount and the gateway are deliberate broad grants |
 | **Network observer** | RNS traffic patterns | content, CIDs (the Link is encrypted) |
-| **Malicious co-author** (in a group) | everything they were granted | un-narrowed rights, forging others' signatures, rewriting history |
+| **Malicious co-author** (in a group) | everything they were granted; reading the whole namespace (limits restrict writes, not reads) | un-narrowed rights (limits only narrow on delegation), writes outside its keys or after its expiry, forging others' signatures, rewriting history |
 | **Former member** | what they already received | new content after key rotation |
 | **Sybil / spammer** | cheap identities | unlimited storage, announces, attributes (stamps, quotas) |
 | **Prober / tracker** (knows CIDs: created honeypot chunks, or computed them from a known public file) | whether *it* can fetch a chunk from nodes that serve it | which nodes hold, or read, a given chunk; what any node has in its cache |
@@ -25,6 +25,9 @@ Every crypto decision is checked against this.
 - **Junk leases:** per-lease signing keys rule out quotas per owner, so lease offers carry a proof-of-work stamp (LXMF construction, holder-set cost, [ADR-0014](adr/0014-placement-follows-need.md)); together with each holder's hold limit this makes filling nodes with junk costly, not impossible.
 - **Request patterns:** requests on one link are visibly one session, and bursts are visible in timing. Token linking is removed (per-chunk proofs), request grouping is avoidable (one item per request), and padding hides file size to a PADMÉ bucket; what remains is link/timing correlation ([ADR-0010](adr/0010-continuous-seeking.md)).
 - **File size** to a PADMÉ bucket (O(log log n) bits), not exactly ([ADR-0008](adr/0008-chunk-encryption-and-cid.md)).
+- **Local gateway:** `retifs-gateway` serves every namespace read-only on `127.0.0.1:8740` without authentication, so any local process or user can read them while it runs. The `Host` check stops DNS rebinding and each namespace is its own origin, but on a shared machine it is as broad as the mount (open question).
+- **Checkpoints:** a new member trusts the state a grant holder's checkpoint gives it. A dishonest holder (or one revoked after making it) can hand out a false state until `ns verify` replays the history against it ([ADR-0018](adr/0018-state-trees.md)).
+- **Commit clocks:** a member can date commits up to a day ahead and win conflicts within that window ([ADR-0017](adr/0017-multi-writer-namespaces.md)).
 
 ## Holder privacy (tracking and honeypot attacks)
 An attacker who knows CIDs (because it created distinctive chunks and got people to fetch them, or computed them from a known public file) could ask nodes "do you have these?" and learn who read what. Rules:

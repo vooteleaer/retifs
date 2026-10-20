@@ -53,5 +53,6 @@ See the [threat model](../04-threat-model.md). A snapshot is encrypted like any 
 - **NomadNet bridge (2026-10-19):** `retifsd --nomadnet NS [--nomadnet-name NAME]` runs a `nomadnetwork.node` destination (own identity, the name as announce app data, as NomadNet does) serving namespace NS, own or a followed channel's `ch-…`. A record with `path=/x.mu` (or `/page/x.mu`) is the page `/page/x.mu`, registered as a request path at run time (Prns `register_request_path`) and answered with the content as a msgpack `bin`, as NomadNet clients expect; without an `/index.mu` an index of the pages is generated as micron links. Paths follow the namespace (resynced every 15 s).
   - Live, with a Python RNS client speaking NomadNet's page protocol: the author's node served the generated index and a page; a follower of the site's channel served the same index and another page **with the author offline**. Before the follower had the site, it answered 13 index requests from elsewhere on the network (NomadNet clients or crawlers that heard its announce); it now says it is still fetching instead of serving an empty index.
   - Not yet: `/file/` downloads, NomadNet's `.allowed` access lists, form fields and dynamic pages.
-- **Not yet:** per-modification signed commits inside a namespace; Prolly trees; content-bound attributes (decision 7).
+- **Since done:** per-modification signed commits ([ADR-0017](0017-multi-writer-namespaces.md), as operations) and Prolly trees ([ADR-0018](0018-state-trees.md)).
+- **Not yet:** content-bound attributes (decision 7).
 

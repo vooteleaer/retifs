@@ -60,12 +60,12 @@ One commit is one modification (or one transaction): its operations take effect 
 ## Impact on the threat model
 See the [threat model](../04-threat-model.md).
 - A member can write within its rights; others' chains are signed, so it can't change them. A member with `grant` can admit others.
-- A revoked member keeps what it could read and, until key rotation, can still read new versions.
+- A revoked member keeps what it could read. The revoke rotates the read key, so versions written after a writer has seen the revoke are unreadable to it.
 - Clock games: future-dated commits are ignored beyond a day; within that window a member can win conflicts.
 
 ## Consequences
 - Easier: offline co-editing without a server; tiny commits; history is the list of operations.
-- Harder: readers replay all chains (checkpoints later); clocks matter for conflicts; key rotation still to do.
+- Harder: readers replay all chains, until they start from a checkpoint ([ADR-0018](0018-state-trees.md)); clocks matter for conflicts (a hybrid logical clock keeps one writer's commits ordered); a revoke has to rotate the read key.
 
 ## Implementation status (2026-10-19)
 - **Slice 1, format and merge:** `retifs_core::ops` (operations, canonical encoding, `merge`). Vectors `ops-v1.json`: every operations file re-encodes byte for byte with RNS's umsgpack, and an independent Python merge (`verify_ops_rns.py`) gives the same merged snapshot, ignored-operation count and final writer set (8/8). Unit tests: last writer wins per field regardless of arrival order; writes and grants count only with rights at their stamp (before a grant, after a revoke, an ungranted writer, a write-only writer granting); deletes, revival, commits dated before their predecessor or more than a day ahead.
@@ -96,5 +96,5 @@ See the [threat model](../04-threat-model.md).
   - Vectors: `ops-v1.json` has a key-limited, expiring grant (14/14, with an independent Python merge that includes narrowing). `prolly-v1.json`'s stamped replay uses the same rules (18/18).
   - Daemon and CLI: `retifs ns grant NS KEY --keys rating,@content --until 2026-12-31` (or `+30d`, or milliseconds), and `ns info` shows each writer's limits.
   - Live, two daemons: B, granted only `rating` for one minute, set `rating` and `title`. Only `rating` counted, on both nodes. After the minute, B's next `rating` was ignored everywhere, and `ns info` marks the grant expired.
-- **Not yet:** filtering by record content, keeping concurrent content versions side by side, checkpoints for new members (local checkpoints and resuming from them: [ADR-0018](0018-state-trees.md)), announcing new writers without a known peer.
+- **Not yet:** filtering by record content, keeping concurrent content versions side by side, announcing new writers without a known peer.
 
