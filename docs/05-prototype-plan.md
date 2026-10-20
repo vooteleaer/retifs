@@ -90,6 +90,10 @@ Prototypes are throwaway. They're for learning, not for locking in the format. T
 
 ## Later: user clients (Android, Linux, Haiku, Windows)
 - [ ] An app in the spirit of the Nextcloud mobile and desktop clients, on `libretifs` (locally) or `--via` an own node (phones): browse namespaces and records, search (local, own node, blind index), import and export files, extract metadata from files into attributes (EXIF, audio tags, document properties), keep rules per device, sharing (addresses, grants, search capabilities). Native per platform: Android, a Linux desktop app, Haiku (Tracker already shows attributes), Windows.
+- [ ] Conventions first: attribute keys and block roles per media type (image, audio, video, document), the mapping from EXIF and audio tags, time and location formats, thumbnail roles. One library, many apps (and Haiku's Tracker) reading the same records; also settles content-bound attributes (decision 7).
+- [ ] Apps on those records, iterated one at a time:
+  - photo suite in the spirit of Immich: albums as queries, thumbnail blocks, phone backup via the own node, timeline and map from range queries, faces and tags computed on own devices, shared albums as namespaces or grants;
+  - music player: library from audio tags, playback over range reads, offline by keep rules per device, playlists as records holding queries.
 
 ## Phase 5: thin client
 - [ ] USB stick: UKI + EROFS/dm-verity + LUKS/F2FS cache + YubiKey.
