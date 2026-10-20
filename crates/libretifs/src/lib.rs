@@ -130,6 +130,9 @@ pub enum Request {
     },
     RecordGet { ns: String, id: String },
     RecordDelete { ns: String, id: String },
+    /// Several changes as one commit (one version): other members see all of
+    /// them or none. Returns the created and changed records, in step order.
+    Transaction { ns: String, steps: Vec<TxStep> },
     /// Records matching every term (`key=value`, `key>n`, `key^=prefix`, `has:key`, …),
     /// now or as of version `at` of the namespace.
     Query {
@@ -193,6 +196,27 @@ impl std::fmt::Display for AttrValue {
             }
         }
     }
+}
+
+/// One step of a [`Request::Transaction`].
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(tag = "step", rename_all = "snake_case")]
+pub enum TxStep {
+    Create {
+        attrs: Vec<(String, AttrValue)>,
+        #[serde(default, with = "serde_bytes")]
+        data: Option<Vec<u8>>,
+    },
+    Set {
+        id: String,
+        attrs: Vec<(String, AttrValue)>,
+        unset: Vec<String>,
+        #[serde(default, with = "serde_bytes")]
+        data: Option<Vec<u8>>,
+    },
+    Delete {
+        id: String,
+    },
 }
 
 /// A multi-writer namespace as this node sees it.

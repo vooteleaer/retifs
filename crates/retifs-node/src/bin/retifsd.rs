@@ -40,7 +40,7 @@ use std::{
 
 use libretifs::{
     read_frame, write_frame, AttrValue, ChannelInfo, Envelope, FollowInfo, GetStats, HistoryEntry, NsView, RecordView,
-    Request, Response, Status,
+    Request, Response, Status, TxStep,
     PROTOCOL_VERSION,
 };
 use personal_rns::prelude::*;
@@ -951,67 +951,13 @@ async fn handle(d: &Daemon, req: Request) -> Result<Response, String> {
         Request::Channels => channels(d),
 
         Request::RecordCreate { ns, attrs, data } => {
-            writable(&ns)?;
-            let mut id: RecordId = [0; 16];
-            getrandom::fill(&mut id).expect("OS entropy");
-            let mut ops = Vec::new();
-            let has_size = attrs.iter().any(|(k, _)| k == "size");
-            for (k, v) in attrs {
-                ops.push(Op::Set(id, k, to_value(&v)?));
-            }
-            if let Some(data) = data {
-                if !has_size {
-                    ops.push(Op::Set(id, "size".into(), Value::Int(data.len() as i64)));
-                }
-                let store = d.store.clone();
-                // One record secret per record: its content versions dedup.
-                let secret_name = format!("retifs-record/{ns}/{}", hex(&id));
-                let file = tokio::task::spawn_blocking(move || {
-                    store_file(&store, &data, false, false, Some(&secret_name), manifest::WriteOpts::default())
-                })
-                .await
-                .map_err(|e| e.to_string())??;
-                d.store.need_file(&file).map_err(|e| e.to_string())?;
-                d.upkeep_wake.notify_one();
-                ops.push(Op::Blocks(id, vec![file]));
-            }
-            write_ops(d, &ns, ops).await?;
-            let rec = d.store.get_record(&ns, &id).map_err(|e| e.to_string())?.ok_or("record not visible after writing")?;
-            Ok(Response::Records { records: vec![view(&rec)] })
+            let records = transaction(d, &ns, vec![TxStep::Create { attrs, data }]).await?;
+            Ok(Response::Records { records })
         }
 
         Request::RecordSet { ns, id, attrs, unset, data } => {
-            writable(&ns)?;
-            let id = parse_record_id(&id)?;
-            let before = d.store.get_record(&ns, &id).map_err(|e| e.to_string())?.ok_or("no such record")?;
-            let mut ops: Vec<Op> = unset.into_iter().map(|k| Op::Unset(id, k)).collect();
-            let has_size = attrs.iter().any(|(k, _)| k == "size");
-            for (k, v) in attrs {
-                ops.push(Op::Set(id, k, to_value(&v)?));
-            }
-            if let Some(data) = data {
-                if !has_size {
-                    ops.push(Op::Set(id, "size".into(), Value::Int(data.len() as i64)));
-                }
-                let store = d.store.clone();
-                // The record's own secret: unchanged chunks dedup against earlier versions.
-                let secret_name = format!("retifs-record/{ns}/{}", hex(&id));
-                let file = tokio::task::spawn_blocking(move || {
-                    store_file(&store, &data, false, false, Some(&secret_name), manifest::WriteOpts::default())
-                })
-                .await
-                .map_err(|e| e.to_string())??;
-                d.store.need_file(&file).map_err(|e| e.to_string())?;
-                // Earlier content stays here as history, no longer kept elsewhere.
-                for old in before.blocks.iter().filter(|b| b.root != file.root) {
-                    d.store.unneed_file(&old.root).map_err(|e| e.to_string())?;
-                }
-                d.upkeep_wake.notify_one();
-                ops.push(Op::Blocks(id, vec![file]));
-            }
-            write_ops(d, &ns, ops).await?;
-            let rec = d.store.get_record(&ns, &id).map_err(|e| e.to_string())?.ok_or("record not visible after writing")?;
-            Ok(Response::Records { records: vec![view(&rec)] })
+            let records = transaction(d, &ns, vec![TxStep::Set { id, attrs, unset, data }]).await?;
+            Ok(Response::Records { records })
         }
 
         Request::RecordGet { ns, id } => {
@@ -1020,23 +966,13 @@ async fn handle(d: &Daemon, req: Request) -> Result<Response, String> {
         }
 
         Request::RecordDelete { ns, id } => {
-            writable(&ns)?;
-            let id = parse_record_id(&id)?;
-            let rec = d.store.get_record(&ns, &id).map_err(|e| e.to_string())?.ok_or("no such record")?;
-            write_ops(d, &ns, vec![Op::Delete(id)]).await?;
-            // Its content is no longer needed here (unless another record uses it).
-            let still_used: std::collections::HashSet<Cid> = d
-                .store
-                .namespaces()
-                .map_err(|e| e.to_string())?
-                .iter()
-                .flat_map(|n| d.store.records(n).unwrap_or_default())
-                .flat_map(|r| r.blocks.into_iter().map(|b| b.root))
-                .collect();
-            for b in rec.blocks.iter().filter(|b| !still_used.contains(&b.root)) {
-                forget(d, b)?;
-            }
+            transaction(d, &ns, vec![TxStep::Delete { id }]).await?;
             Ok(Response::Records { records: Vec::new() })
+        }
+
+        Request::Transaction { ns, steps } => {
+            let records = transaction(d, &ns, steps).await?;
+            Ok(Response::Records { records })
         }
 
         Request::NsAddress { ns } => {
@@ -1887,6 +1823,104 @@ fn channel_key(d: &Daemon, c: &retifs_store::OwnChannel) -> ChannelKey {
         Some(ns_id) => ChannelKey::member(c.signing_seed, c.read_key, ns_id),
         None => ChannelKey::from_secrets(c.signing_seed, c.read_key),
     }
+}
+
+/// Stores content for record `id` under the record's own secret (its
+/// versions dedup against each other) and keeps it placed.
+async fn store_content(d: &Daemon, ns: &str, id: &RecordId, data: Vec<u8>) -> Result<FileRef, String> {
+    let store = d.store.clone();
+    let secret_name = format!("retifs-record/{ns}/{}", hex(id));
+    let file = tokio::task::spawn_blocking(move || store_file(&store, &data, false, false, Some(&secret_name), manifest::WriteOpts::default()))
+        .await
+        .map_err(|e| e.to_string())??;
+    d.store.need_file(&file).map_err(|e| e.to_string())?;
+    d.upkeep_wake.notify_one();
+    Ok(file)
+}
+
+/// Applies `steps` as one commit (one version, ADR-0006): content is stored
+/// first, then every step's operations are written together, so other
+/// members see all of them or none. Returns the created and changed records,
+/// in step order. Content replaced or deleted stops being kept elsewhere
+/// (earlier versions stay here as history).
+async fn transaction(d: &Daemon, ns: &str, steps: Vec<TxStep>) -> Result<Vec<RecordView>, String> {
+    writable(ns)?;
+    if steps.is_empty() {
+        return Err("an empty transaction".into());
+    }
+    let mut ops = Vec::new();
+    let mut touched: Vec<RecordId> = Vec::new();
+    let mut replaced: Vec<FileRef> = Vec::new();
+    let mut deleted: Vec<FileRef> = Vec::new();
+    let mut seen: std::collections::HashSet<RecordId> = std::collections::HashSet::new();
+    for step in steps {
+        let (id, attrs, unset, data) = match step {
+            TxStep::Create { attrs, data } => {
+                let mut id: RecordId = [0; 16];
+                getrandom::fill(&mut id).expect("OS entropy");
+                (id, attrs, Vec::new(), data)
+            }
+            TxStep::Set { id, attrs, unset, data } => {
+                let id = parse_record_id(&id)?;
+                if !seen.contains(&id) {
+                    let before = d.store.get_record(ns, &id).map_err(|e| e.to_string())?.ok_or_else(|| format!("no such record {}", hex(&id)))?;
+                    if data.is_some() {
+                        replaced.extend(before.blocks);
+                    }
+                }
+                (id, attrs, unset, data)
+            }
+            TxStep::Delete { id } => {
+                let id = parse_record_id(&id)?;
+                if let Some(rec) = d.store.get_record(ns, &id).map_err(|e| e.to_string())? {
+                    deleted.extend(rec.blocks);
+                } else if !seen.contains(&id) {
+                    return Err(format!("no such record {}", hex(&id)));
+                }
+                ops.push(Op::Delete(id));
+                touched.retain(|t| *t != id);
+                continue;
+            }
+        };
+        seen.insert(id);
+        ops.extend(unset.into_iter().map(|k| Op::Unset(id, k)));
+        let has_size = attrs.iter().any(|(k, _)| k == "size");
+        for (k, v) in attrs {
+            ops.push(Op::Set(id, k, to_value(&v)?));
+        }
+        if let Some(data) = data {
+            if !has_size {
+                ops.push(Op::Set(id, "size".into(), Value::Int(data.len() as i64)));
+            }
+            ops.push(Op::Blocks(id, vec![store_content(d, ns, &id, data).await?]));
+        }
+        if !touched.contains(&id) {
+            touched.push(id);
+        }
+    }
+    write_ops(d, ns, ops).await?;
+    // Content no record uses any more: no longer kept elsewhere; deleted
+    // records' content also becomes evictable here.
+    let still_used: std::collections::HashSet<Cid> = d
+        .store
+        .namespaces()
+        .map_err(|e| e.to_string())?
+        .iter()
+        .flat_map(|n| d.store.records(n).unwrap_or_default())
+        .flat_map(|r| r.blocks.into_iter().map(|b| b.root))
+        .collect();
+    for old in replaced.iter().filter(|b| !still_used.contains(&b.root)) {
+        d.store.unneed_file(&old.root).map_err(|e| e.to_string())?;
+    }
+    for gone in deleted.iter().filter(|b| !still_used.contains(&b.root)) {
+        forget(d, gone)?;
+    }
+    let mut out = Vec::new();
+    for id in touched {
+        let rec = d.store.get_record(ns, &id).map_err(|e| e.to_string())?.ok_or("record not visible after writing")?;
+        out.push(view(&rec));
+    }
+    Ok(out)
 }
 
 /// One modification of a namespace (ADR-0006, ADR-0017): its operations are

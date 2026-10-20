@@ -75,8 +75,9 @@ The mount exposes plaintext to processes in the user's session, and root on the 
   - Measured: with the only holder stopped, a read of a range not held failed after its 8 s wait; with no peer known, at once.
 - A lookup that misses re-reads the namespace if its view is older than 100 ms, so a record made a moment ago by another program is found.
 
+**Transactions (2026-10-20):** the local API's `Transaction { ns, steps }` applies creates, sets and deletes as one commit (one version), so other members see all of them or none. The single-record requests are one-step transactions. The mount uses them for directory renames (every record below in one commit) and for saves that rename over a file (the target's new content and the temporary record's deletion in one commit). Live: moving a directory of two files added exactly one version.
+
 **Not yet:**
 - **Writes in memory:** a file being written is held whole until it's closed. FUSE passthrough for cached reads comes later.
-- **Several renames are several commits:** a directory rename or a save is not yet one transaction.
 - **Permissions:** the mounting user owns everything. Modes aren't stored.
 - **Mounting as a normal user** needs `fusermount3` (the `fuse3` package); the test ran as root.

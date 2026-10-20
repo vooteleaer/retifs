@@ -12,7 +12,7 @@ use fuser::{
     FileAttr, FileType, Filesystem, KernelConfig, MountOption, ReplyAttr, ReplyCreate, ReplyData, ReplyDirectory, ReplyEmpty,
     ReplyEntry, ReplyOpen, ReplyWrite, ReplyXattr, Request as Req, TimeOrNow,
 };
-use libretifs::{AttrValue, Client, RecordView, Request, Response};
+use libretifs::{AttrValue, Client, RecordView, Request, Response, TxStep};
 
 use crate::tree::{self, Node, Tree, QUERY_DIR};
 
@@ -598,10 +598,12 @@ impl Filesystem for RetifsFs {
             };
             let mtime = self.records.get(&source).and_then(|r| r.attrs.iter().find(|(k, _)| k == "mtime")).map(|(_, v)| v.clone());
             let attrs = vec![("mtime".into(), mtime.unwrap_or(AttrValue::Int(now_ms())))];
-            if let Err(e) = self.set(&target, attrs, Vec::new(), Some(data)) {
-                return reply.error(e);
-            }
-            if let Err(e) = self.call(Request::RecordDelete { ns: self.ns.clone(), id: source }) {
+            // One commit: the target takes the content, the temporary record goes.
+            let steps = vec![
+                TxStep::Set { id: target, attrs, unset: Vec::new(), data: Some(data) },
+                TxStep::Delete { id: source },
+            ];
+            if let Err(e) = self.call(Request::Transaction { ns: self.ns.clone(), steps }) {
                 return reply.error(e);
             }
             // The kernel now has `from`'s inode at `to`: point both at the target.
@@ -619,17 +621,20 @@ impl Filesystem for RetifsFs {
         } else if matches!(self.tree.get(&to), Some(Node::Dir { .. })) && !self.tree.children(&to).is_empty() {
             return reply.error(libc::ENOTEMPTY);
         }
-        for (p, id) in moving {
-            let new = format!("{to}{}", &p[from.len()..]);
-            if let Err(e) = self.call(Request::RecordSet {
-                ns: self.ns.clone(),
+        // Every record below moves in one commit: other members never see half a move.
+        let steps: Vec<TxStep> = moving
+            .into_iter()
+            .map(|(p, id)| TxStep::Set {
                 id,
-                attrs: vec![("path".into(), AttrValue::Str(new))],
+                attrs: vec![("path".into(), AttrValue::Str(format!("{to}{}", &p[from.len()..])))],
                 unset: Vec::new(),
                 data: None,
-            }) {
-                return reply.error(e);
-            }
+            })
+            .collect();
+        if !steps.is_empty()
+            && let Err(e) = self.call(Request::Transaction { ns: self.ns.clone(), steps })
+        {
+            return reply.error(e);
         }
         // The kernel keeps the moved inodes: their paths follow, and a replaced
         // file's inode no longer names anything.
