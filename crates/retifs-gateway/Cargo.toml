@@ -1,0 +1,17 @@
+[package]
+name = "retifs-gateway"
+version = "0.0.1"
+description = "retifs-gateway: namespaces as local read-only websites, one origin each (prototype)"
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+publish = false
+
+[[bin]]
+name = "retifs-gateway"
+path = "src/main.rs"
+
+[dependencies]
+libretifs = { path = "../libretifs" }
+tiny_http = "0.12"
+tokio = { version = "1", features = ["rt"] }

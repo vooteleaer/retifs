@@ -111,6 +111,8 @@ pub enum Request {
     Follow { address: String, from: Vec<String> },
     /// Channels written and followed here.
     Channels,
+    /// The namespaces with records here (own, joined and followed).
+    Namespaces,
     /// Creates a record in namespace `ns` (ADR-0016); `data` becomes its content block.
     RecordCreate {
         ns: String,
@@ -338,6 +340,9 @@ pub enum Response {
     Session {
         session: u64,
         size: u64,
+    },
+    Names {
+        names: Vec<String>,
     },
     Done,
     Verified {

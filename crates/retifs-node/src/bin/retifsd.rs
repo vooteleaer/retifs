@@ -1068,6 +1068,8 @@ async fn handle(d: &Daemon, req: Request) -> Result<Response, String> {
 
         Request::Channels => channels(d),
 
+        Request::Namespaces => Ok(Response::Names { names: d.store.namespaces().map_err(|e| e.to_string())? }),
+
         Request::RecordCreate { ns, attrs, data } => {
             let records = transaction(d, &ns, vec![TxStep::Create { attrs, data }]).await?;
             Ok(Response::Records { records })

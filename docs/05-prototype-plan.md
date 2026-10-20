@@ -18,7 +18,8 @@ Prototypes are throwaway. They're for learning, not for locking in the format. T
 - [ ] Local store, continued: keep rules ([ADR-0005](adr/0005-local-store-offline.md)).
 - [x] `libretifs` + local endpoint (Unix socket / Windows named pipe): `ping`, `put`, `get`, `status` via `retifsd` ([ADR-0004](adr/0004-native-record-api.md), implementation status).
 - [ ] Local API, continued: records/attributes (`create`, `put_block`, `set`, `query`), streaming / fd passing, per-app capabilities, faster cache writes (batch per tree level, keep segment files open).
-- [ ] Local HTTP gateway (a client of `libretifs`), also the base for the browser extension: one origin per site (`<site-id>.localhost`), a content security policy that blocks network access by default, read-only; optionally NomadNet pages fetched over RNS, so any NomadNet node can be browsed.
+- [x] Local HTTP gateway, `retifs-gateway` (a client of `libretifs`, the base for the browser extension): every namespace is a site at `http://<namespace>.localhost:8740/` with its own origin. It's read-only, has a content security policy that allows only its own origin, and refuses foreign `Host` headers (DNS rebinding). Range requests are answered from on-demand reads, so video seeks.
+- [ ] Gateway, continued: NomadNet pages fetched over RNS, so any NomadNet node can be browsed; micron rendered as HTML.
 - [ ] Browser extension (later; Firefox first, Manifest V3): `web+retifs:` links and pasted addresses open through the gateway, micron rendered as HTML, a popup with node status and copies, "follow this site" and "save to retifs". Privileged actions go through a native-messaging host talking to the local API, never through the gateway.
 - [ ] Alpine: `/etc/apk/repositories` → gateway (apk knows nothing about RNS).
 

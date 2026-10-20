@@ -102,6 +102,11 @@ Files, folders, albums, packages, versions and branches are all combinations of 
 
 - **Native API:** `retifsd` (cache, database, crypto, Prns) is a local shared instance, like `rnsd`. Applications use `libretifs` over a Unix socket and work with records, attributes, queries and history directly, with no paths. Each app gets a narrowed capability. Local and remote use the same messages. See [ADR-0004](adr/0004-native-record-api.md) and the [API draft](07-api.md).
 - **OS integration:** the file tree is one client of the native API, exposed through thin frontends. Linux (libfuse) is the primary target, and Haiku (userlandfs, native attributes and queries) comes later. See [ADR-0002](adr/0002-os-integration.md).
+- **Clients of the local API today:**
+  - the `retifs` CLI;
+  - `retifs-mount`, the FUSE file tree: attributes as xattrs, `.query/` directories, reads on demand, writes through write sessions;
+  - `retifs-gateway`: namespaces as local read-only websites, one origin each.
+- **The local API's building blocks:** records and queries, transactions (several changes as one commit), `watch` (wait for a namespace to change), write sessions (content written in place without holding it whole), and on-demand range reads.
 - Thin client: a minimal local bootstrap, with applications and data on the network. **The local disk is a cache**, and a pinned set enables offline use.
 - **Identity travels with you:** a YubiKey (device key, authorised by the root) plus a root identity kept offline. Login issues a short-lived session capability.
 - USB stick layout: EFI (UKI) · bootstrap EROFS + dm-verity · F2FS cache with LUKS (bound to the YubiKey) · writable layer on tmpfs.
