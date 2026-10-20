@@ -199,7 +199,15 @@ pub enum Request {
     NsAddress { ns: String },
     /// Joins another's namespace under local name `ns`, with a new writer key
     /// (returned; the creator grants it). `from`: other members' nodes.
-    NsJoin { ns: String, address: String, from: Vec<String> },
+    /// `lazy`: hold only the records needed (those changed since the
+    /// checkpoint, those asked for), fetched on demand (ADR-0018).
+    NsJoin {
+        ns: String,
+        address: String,
+        from: Vec<String>,
+        #[serde(default)]
+        lazy: bool,
+    },
     /// Grants a writer key `write` (and `grant` if asked); `from`: its node, to sync with.
     /// `keys` limits the writer to those attribute keys (`@content`,
     /// `@delete` for content and deletion); `until` (ms since the epoch) ends
@@ -323,6 +331,9 @@ pub struct NsView {
     /// Files pulled here because they're kept.
     #[serde(default)]
     pub kept: usize,
+    /// Only the records needed are held here, fetched on demand.
+    #[serde(default)]
+    pub lazy: bool,
 }
 
 /// One version of a namespace as seen by one record.

@@ -32,6 +32,9 @@ const NS_KEEP_MODE: TableDefinition<&str, u8> = TableDefinition::new("ns_keep_mo
 /// (namespace ‖ 0 ‖ root CID) → file: content this node pulled because it's kept,
 /// and may release when it no longer is.
 const NS_KEPT: TableDefinition<&[u8], &[u8]> = TableDefinition::new("ns_kept");
+/// Namespace name → 1 if this node holds only the part of its state it
+/// fetched on demand (a lazy member, ADR-0018).
+const NS_LAZY: TableDefinition<&str, u8> = TableDefinition::new("ns_lazy");
 
 pub(crate) fn open_tables(w: &redb::WriteTransaction) -> Result<(), StoreError> {
     w.open_table(NS_INFO)?;
@@ -45,6 +48,7 @@ pub(crate) fn open_tables(w: &redb::WriteTransaction) -> Result<(), StoreError> 
     w.open_table(NS_CHECKPOINT_PUBLISHED)?;
     w.open_table(NS_KEEP_MODE)?;
     w.open_table(NS_KEPT)?;
+    w.open_table(NS_LAZY)?;
     Ok(())
 }
 
@@ -118,6 +122,18 @@ impl SlabStore {
     pub fn ns_keep_by_rules(&self, name: &str) -> Result<bool, StoreError> {
         let r = self.db.begin_read()?;
         Ok(r.open_table(NS_KEEP_MODE)?.get(name)?.is_some_and(|v| v.value() == 1))
+    }
+
+    pub fn ns_lazy(&self, name: &str) -> Result<bool, StoreError> {
+        let r = self.db.begin_read()?;
+        Ok(r.open_table(NS_LAZY)?.get(name)?.is_some_and(|v| v.value() == 1))
+    }
+
+    pub fn set_ns_lazy(&self, name: &str, lazy: bool) -> Result<(), StoreError> {
+        let w = self.db.begin_write()?;
+        w.open_table(NS_LAZY)?.insert(name, lazy as u8)?;
+        w.commit()?;
+        Ok(())
     }
 
     pub fn set_ns_keep_by_rules(&self, name: &str, by_rules: bool) -> Result<(), StoreError> {

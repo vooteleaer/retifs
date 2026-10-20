@@ -277,6 +277,49 @@ pub fn read_all<S: Store, const K: usize>(store: &S, root: &Root) -> Result<Keye
     Ok(out)
 }
 
+/// The first node on `key`'s path from the root that isn't in the store, if
+/// any: fetching it and asking again walks the path down (partial state,
+/// a member that holds only the records it needs, ADR-0018).
+pub fn missing_on_path<S: Store>(store: &S, root: &Root, key: &[u8]) -> Result<Option<Root>, TreeError<S::Error>> {
+    let mut at = *root;
+    loop {
+        if store.get(&at.0).map_err(TreeError::Store)?.is_none() {
+            return Ok(Some(at));
+        }
+        match read_node(store, &at)? {
+            Node::Leaf(_) => return Ok(None),
+            Node::Internal(children) => {
+                let Some((_, child)) = children.iter().rev().find(|(first, _)| first.as_slice() <= key).or(children.first()) else {
+                    return Ok(None);
+                };
+                at = *child;
+            }
+        }
+    }
+}
+
+/// Every entry in the leaves held here, skipping subtrees that aren't (a
+/// partial state: each leaf held is complete, so its records are exact).
+pub fn read_present<S: Store, const K: usize>(store: &S, root: &Root) -> Result<KeyedEntries<K>, TreeError<S::Error>> {
+    let mut out: KeyedEntries<K> = Vec::new();
+    let mut stack = vec![*root];
+    while let Some(n) = stack.pop() {
+        if store.get(&n.0).map_err(TreeError::Store)?.is_none() {
+            continue;
+        }
+        match read_node(store, &n)? {
+            Node::Leaf(entries) => {
+                for (k, v) in entries {
+                    out.push((k.as_slice().try_into().map_err(|_| TreeError::Corrupt("key length"))?, v));
+                }
+            }
+            Node::Internal(children) => stack.extend(children.into_iter().rev().map(|(_, c)| c)),
+        }
+    }
+    out.sort_by_key(|(k, _)| *k);
+    Ok(out)
+}
+
 /// Every entry whose key starts with `prefix`, by key, reading only the
 /// nodes that can hold such keys (a blind index lookup, ADR-0019).
 pub fn scan_prefix<S: Store>(store: &S, root: &Root, prefix: &[u8]) -> Result<RawEntries, TreeError<S::Error>> {
@@ -405,6 +448,27 @@ mod tests {
             .collect();
         v.sort_by_key(|(k, _)| *k);
         v
+    }
+
+    #[test]
+    fn a_path_fetched_on_demand_gives_exact_records() {
+        let secret = ConvergenceSecret::for_record(&[6; 32], b"tree");
+        let mut full = Mem::default();
+        let all = entries(3000, 1);
+        let root = build(&mut full, &secret, all.clone()).unwrap().unwrap();
+        let mut part = Mem::default();
+        let want = all[1777].0;
+        let mut fetched = 0;
+        while let Some((cid, _)) = missing_on_path(&part, &root, &want).unwrap() {
+            part.put(cid, full.0[&cid].clone()).unwrap();
+            fetched += 1;
+        }
+        assert!((2..=4).contains(&fetched), "root to leaf: {fetched}");
+        assert_eq!(get(&part, &root, &want).unwrap(), Some(all[1777].1.clone()));
+        let present: Entries = read_present(&part, &root).unwrap();
+        assert!(present.contains(&all[1777]));
+        assert!(present.len() < 200, "one leaf's worth, not the tree: {}", present.len());
+        assert!(present.iter().all(|e| all.contains(e)));
     }
 
     #[test]

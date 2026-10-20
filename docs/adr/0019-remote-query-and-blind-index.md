@@ -92,7 +92,9 @@ A search node, beyond what a holder sees:
 - `retifs query NS KEY=VALUE… --search NODE`: the member sends tokens for the terms on declared keys (all `=` terms if it holds no settings), opens and intersects the entries, then checks every term, the others included, on the records it holds. Matches it doesn't hold are listed by ID.
 - Live, three daemons on one machine (60 records, `album` declared): the member found the 6 matching records through the search node in 19–36 ms. Results were exact-match only. A node without the capability, and a query for another namespace, got "no index here". The search node held no records of the namespace, and its logs named no album or title.
 
-**Not yet:** fetching unresolved matches' records from the state the descriptor names (a member that holds no state; tied to fetching part of a namespace, ADR-0018); several builders publishing to one index channel (their sequence numbers can collide); releasing index nodes of replaced versions on the search node; remote live queries beyond `Watch`; a cross-machine measurement over slow links.
+- A lazy member (ADR-0018) fetches the state paths of matches it doesn't hold, then checks them like any other.
+
+**Not yet:** a live test of search with a lazy member; several builders publishing to one index channel (their sequence numbers can collide); releasing index nodes of replaced versions on the search node; remote live queries beyond `Watch`; a cross-machine measurement over slow links.
 
 ## Consequences
 - Easier: a phone or LoRa node can query a namespace it doesn't hold; search can be delegated to always-on nodes without giving them the read key.

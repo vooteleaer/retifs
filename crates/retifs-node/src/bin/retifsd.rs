@@ -1440,7 +1440,12 @@ async fn handle(d: &Daemon, req: Request) -> Result<Response, String> {
         }
 
         Request::RecordGet { ns, id } => {
-            let rec = d.store.get_record(&ns, &parse_record_id(&id)?).map_err(|e| e.to_string())?.ok_or("no such record")?;
+            let rid = parse_record_id(&id)?;
+            if d.store.get_record(&ns, &rid).map_err(|e| e.to_string())?.is_none() && d.store.ns_lazy(&ns).map_err(|e| e.to_string())? {
+                fetch_paths(d, &ns, &[rid], &[]).await?;
+                materialize(d, &ns)?;
+            }
+            let rec = d.store.get_record(&ns, &rid).map_err(|e| e.to_string())?.ok_or("no such record")?;
             Ok(Response::Records { records: vec![view(&rec)] })
         }
 
@@ -1550,7 +1555,7 @@ async fn handle(d: &Daemon, req: Request) -> Result<Response, String> {
             Ok(Response::Channel { address: current_addr(d, &ns)?.to_string() })
         }
 
-        Request::NsJoin { ns, address, from } => {
+        Request::NsJoin { ns, address, from, lazy } => {
             writable(&ns)?;
             if d.store.ns_info(&ns).map_err(|e| e.to_string())?.is_some() {
                 return Err(format!("{ns} already exists here"));
@@ -1566,6 +1571,9 @@ async fn handle(d: &Daemon, req: Request) -> Result<Response, String> {
             d.store.set_ns_info(&ns, &addr.writer, &addr.read_key).map_err(|e| e.to_string())?;
             d.store.set_ns_identity(&ns, &identity).map_err(|e| e.to_string())?;
             d.store.add_ns_peers(&ns, &parse_peers(&from)?).map_err(|e| e.to_string())?;
+            if lazy {
+                d.store.set_ns_lazy(&ns, true).map_err(|e| e.to_string())?;
+            }
             write_ops(d, &ns, vec![Op::Identity(keywrap::public(&identity))]).await?;
             d.ns_seeking.lock().unwrap().insert(ns.clone());
             d.ns_wake.notify_one();
@@ -1621,6 +1629,9 @@ async fn handle(d: &Daemon, req: Request) -> Result<Response, String> {
         Request::NsInfo { ns } => Ok(Response::Namespace(ns_view(d, &ns)?)),
 
         Request::NsVerify { ns } => {
+            if d.store.ns_lazy(&ns).map_err(|e| e.to_string())? {
+                return Err(format!("{ns} is held lazily (part of its state): nothing whole to verify"));
+            }
             d.ns_cache.lock().unwrap().entry(ns.clone()).or_default().fetch_whole = true;
             sync_ns(d, &ns).await?;
             let (ok, detail) = verify_checkpoint(d, &ns)?;
@@ -1836,6 +1847,7 @@ fn ns_view(d: &Daemon, ns: &str) -> Result<NsView, String> {
         device: d.device.clone(),
         keep: if d.store.ns_keep_by_rules(ns).map_err(|e| e.to_string())? { "rules" } else { "all" }.into(),
         kept: d.store.ns_kept(ns).map_err(|e| e.to_string())?.len(),
+        lazy: d.store.ns_lazy(ns).map_err(|e| e.to_string())?,
     })
 }
 
@@ -2027,6 +2039,12 @@ async fn sync_ns(d: &Daemon, ns: &str) -> Result<(), String> {
             e.state = None;
         }
         changed = true;
+    }
+    if changed && d.store.ns_lazy(ns).map_err(|e| e.to_string())? {
+        let n = fill_lazy(d, ns).await?;
+        if n > 0 {
+            println!("ns {ns}: fetched {n} state node(s) for records changed since the checkpoint");
+        }
     }
     if changed {
         let keys_before = d.store.ns_keys(ns).map_err(|e| e.to_string())?.len();
@@ -2220,7 +2238,8 @@ async fn install_checkpoint(d: &Daemon, ns: &str, link: LinkId, file: &FileRef) 
     let cp = manifest::read_all(&*d.store, file)
         .map_err(|e| e.to_string())
         .and_then(|b| Checkpoint::decode(&b).map_err(|e| e.to_string()))?;
-    if let Some(root) = cp.state {
+    let lazy = d.store.ns_lazy(ns).map_err(|e| e.to_string())?;
+    if let Some(root) = cp.state.filter(|_| !lazy) {
         loop {
             let missing = prolly::missing(&*d.store, &root).map_err(|e| e.to_string())?;
             if missing.is_empty() {
@@ -2235,8 +2254,10 @@ async fn install_checkpoint(d: &Daemon, ns: &str, link: LinkId, file: &FileRef) 
             }
         }
     }
-    cp.load(&*d.store, &creator).map_err(|e| format!("checkpoint doesn't load: {e}"))?;
-    let chunks = file_chunks(&d.store, file)?;
+    if !lazy {
+        cp.load(&*d.store, &creator).map_err(|e| format!("checkpoint doesn't load: {e}"))?;
+    }
+    let chunks = if lazy { manifest_chunks(&d.store, file)? } else { file_chunks(&d.store, file)? };
     for (c, _) in &chunks {
         if let Some(t) = d.store.tier(c).map_err(|e| e.to_string())? {
             d.store.set_tier(c, t | tier::PINNED).map_err(|e| e.to_string())?;
@@ -2253,7 +2274,7 @@ async fn install_checkpoint(d: &Daemon, ns: &str, link: LinkId, file: &FileRef) 
 /// the last one (or `force`). Returns the search capability, or None if the
 /// namespace declares no searchable keys.
 async fn publish_index(d: &Daemon, ns: &str, force: bool) -> Result<Option<String>, String> {
-    if ns.starts_with("ch-") {
+    if ns.starts_with("ch-") || d.store.ns_lazy(ns).map_err(|e| e.to_string())? {
         return Ok(None);
     }
     if force {
@@ -2383,6 +2404,14 @@ async fn search_query(d: &Daemon, ns: &str, node: &str, terms: &[String]) -> Res
         });
     }
     let ids = ids.unwrap_or_default();
+    let mut held = held;
+    if d.store.ns_lazy(ns).map_err(|e| e.to_string())? {
+        let missing: Vec<RecordId> = ids.iter().filter(|id| !held.contains_key(*id)).copied().collect();
+        if !missing.is_empty() && fetch_paths(d, ns, &missing, &[]).await? > 0 {
+            materialize(d, ns)?;
+            held = d.store.records(ns).map_err(|e| e.to_string())?.into_iter().map(|r| (r.id, r)).collect();
+        }
+    }
     let mut records = Vec::new();
     let mut unresolved = Vec::new();
     for id in ids {
@@ -2396,11 +2425,98 @@ async fn search_query(d: &Daemon, ns: &str, node: &str, terms: &[String]) -> Res
     Ok(Response::Searched { records, unresolved, as_of_ms })
 }
 
+/// Fetches the state tree paths to `ids` from the checkpoint held here, from
+/// the namespace's peers (and `extra`): a lazy member's records on demand.
+/// Each leaf fetched is complete, so its records merge exactly; the state is
+/// reloaded from the checkpoint with them. Returns the nodes fetched.
+async fn fetch_paths(d: &Daemon, ns: &str, ids: &[RecordId], extra: &[PeerId]) -> Result<usize, String> {
+    let Some(file) = d.store.ns_checkpoint(ns).map_err(|e| e.to_string())? else { return Ok(0) };
+    let cp = manifest::read_all(&*d.store, &file)
+        .map_err(|e| e.to_string())
+        .and_then(|b| Checkpoint::decode(&b).map_err(|e| e.to_string()))?;
+    let Some(root) = cp.state else { return Ok(0) };
+    let mut peers = d.store.ns_peers(ns).map_err(|e| e.to_string())?;
+    peers.extend_from_slice(extra);
+    let mut pending: Vec<RecordId> = Vec::new();
+    for id in ids {
+        if prolly::missing_on_path(&*d.store, &root, id).map_err(|e| e.to_string())?.is_some() {
+            pending.push(*id);
+        }
+    }
+    let mut fetched = 0;
+    for peer in peers {
+        if pending.is_empty() {
+            break;
+        }
+        let Ok(link) = d.link_to(&peer).await else { continue };
+        // One round per tree level: every pending path's next missing node.
+        loop {
+            let mut wanted: Vec<(Cid, retifs_core::Seed)> = Vec::new();
+            for id in &pending {
+                if let Some(n) = prolly::missing_on_path(&*d.store, &root, id).map_err(|e| e.to_string())?
+                    && !wanted.contains(&n)
+                {
+                    wanted.push(n);
+                }
+            }
+            if wanted.is_empty() {
+                pending.clear();
+                break;
+            }
+            let round = seek_round(&d.transport, link, &wanted, false, Duration::from_secs(60)).await?;
+            if round.got.is_empty() {
+                break; // this peer lacks them: the next one
+            }
+            let mut tokens = Vec::new();
+            for (i, ct, _) in round.got {
+                d.store.insert(&wanted[i].0, &ct, tier::PINNED).map_err(|e| e.to_string())?;
+                tokens.push((wanted[i].0, ChunkToken::for_seed(&wanted[i].1)));
+                fetched += 1;
+            }
+            d.store.register_serving(&tokens).map_err(|e| e.to_string())?;
+        }
+    }
+    if fetched > 0 {
+        // Reload: the records of the new leaves come from the checkpoint,
+        // then every commit since applies on top.
+        if let Some(e) = d.ns_cache.lock().unwrap().get_mut(ns) {
+            e.state = None;
+        }
+    }
+    Ok(fetched)
+}
+
+/// A lazy member's sync: the records changed since the checkpoint need their
+/// checkpoint entries to merge exactly, so their paths are fetched first.
+async fn fill_lazy(d: &Daemon, ns: &str) -> Result<usize, String> {
+    let Some(file) = d.store.ns_checkpoint(ns).map_err(|e| e.to_string())? else { return Ok(0) };
+    let Ok(cp) = manifest::read_all(&*d.store, &file).map_err(|e| e.to_string()).and_then(|b| Checkpoint::decode(&b).map_err(|e| e.to_string())) else {
+        return Ok(0);
+    };
+    let frontier: HashMap<[u8; 32], u64> = cp.frontier.iter().map(|f| (f.writer, f.seq)).collect();
+    let (_, _, chains) = chains(d, ns, false)?;
+    let mut ids: std::collections::BTreeSet<RecordId> = std::collections::BTreeSet::new();
+    for (w, chain) in &chains {
+        let after = frontier.get(w).copied().unwrap_or(0);
+        for (_, c) in chain.iter().filter(|(seq, _)| *seq > after) {
+            for op in &c.ops {
+                match op {
+                    Op::Set(id, ..) | Op::Unset(id, _) | Op::Blocks(id, _) | Op::Delete(id) => {
+                        ids.insert(*id);
+                    }
+                    _ => {}
+                }
+            }
+        }
+    }
+    fetch_paths(d, ns, &ids.into_iter().collect::<Vec<_>>(), &[]).await
+}
+
 /// Names this node's latest checkpoint in its chain, if it holds `grant`
 /// and hasn't named this one yet (ADR-0018). The checkpoint file (with its
 /// state tree) is then needed and placed like the history.
 async fn publish_checkpoint(d: &Daemon, ns: &str) -> Result<(), String> {
-    if ns.starts_with("ch-") {
+    if ns.starts_with("ch-") || d.store.ns_lazy(ns).map_err(|e| e.to_string())? {
         return Ok(());
     }
     let Some(file) = d.store.ns_checkpoint(ns).map_err(|e| e.to_string())? else { return Ok(()) };
@@ -2992,7 +3108,10 @@ fn resume(d: &Daemon, ns: &str) -> Result<(), String> {
     let loaded = manifest::read_all(&*d.store, &file)
         .map_err(|e| e.to_string())
         .and_then(|b| Checkpoint::decode(&b).map_err(|e| e.to_string()))
-        .and_then(|cp| cp.load(&*d.store, &creator).map(|st| (cp, st)).map_err(|e| e.to_string()));
+        .and_then(|cp| {
+            let st = if d.store.ns_lazy(ns).map_err(|e| e.to_string())? { cp.load_present(&*d.store, &creator) } else { cp.load(&*d.store, &creator) };
+            st.map(|st| (cp, st)).map_err(|e| e.to_string())
+        });
     let (cp, state) = match loaded {
         Ok(x) => x,
         Err(e) => {
@@ -3048,6 +3167,7 @@ fn save_checkpoint(d: &Daemon, ns: &str, state: &State, frontier: Vec<Frontier>)
 /// Rebuilds a namespace's local view by merging every writer chain held here.
 fn materialize(d: &Daemon, ns: &str) -> Result<retifs_core::ops::Merged, String> {
     resume(d, ns)?;
+    let lazy = d.store.ns_lazy(ns).map_err(|e| e.to_string())?;
     let (addr, _, mut chains) = chains(d, ns, false)?;
     let now = now_ms();
     let mut checkpoint = None;
@@ -3134,7 +3254,7 @@ fn materialize(d: &Daemon, ns: &str) -> Result<retifs_core::ops::Merged, String>
             }
         }
         let state = entry.state.as_ref().expect("built above");
-        if entry.since_checkpoint >= CHECKPOINT_EVERY && !held_back && entry.gaps.is_empty() {
+        if entry.since_checkpoint >= CHECKPOINT_EVERY && !held_back && entry.gaps.is_empty() && !lazy {
             entry.since_checkpoint = 0;
             let frontier = entry
                 .applied
@@ -3426,6 +3546,20 @@ fn now_s() -> u64 {
 /// Every chunk of a file (manifest nodes, data and padding) with its access
 /// token, from the local store: what a lease for the whole file lists.
 fn file_chunks(store: &SlabStore, file: &FileRef) -> Result<Vec<(Cid, ChunkToken)>, String> {
+    let mut out = manifest_chunks(store, file)?;
+    // A checkpoint file comes with its state tree (ADR-0018).
+    if file.size <= 1 << 20
+        && let Some(root) = manifest::read_all(store, file).ok().and_then(|b| Checkpoint::decode(&b).ok()).and_then(|c| c.state)
+    {
+        let nodes = prolly::nodes(store, &root).map_err(|_| "not all of the checkpoint's state is local".to_string())?;
+        out.extend(nodes.iter().map(|(c, s)| (*c, ChunkToken::for_seed(s))));
+    }
+    Ok(out)
+}
+
+/// A file's own chunks (manifest nodes, data, padding), without a
+/// checkpoint's state tree.
+fn manifest_chunks(store: &SlabStore, file: &FileRef) -> Result<Vec<(Cid, ChunkToken)>, String> {
     let mut out = Vec::new();
     let mut level = vec![NodeEntry { cid: file.root, seed: file.seed, span: file.size }];
     while !level.is_empty() {
@@ -3446,13 +3580,6 @@ fn file_chunks(store: &SlabStore, file: &FileRef) -> Result<Vec<(Cid, ChunkToken
             }
         }
         level = next;
-    }
-    // A checkpoint file comes with its state tree (ADR-0018).
-    if file.size <= 1 << 20
-        && let Some(root) = manifest::read_all(store, file).ok().and_then(|b| Checkpoint::decode(&b).ok()).and_then(|c| c.state)
-    {
-        let nodes = prolly::nodes(store, &root).map_err(|_| "not all of the checkpoint's state is local".to_string())?;
-        out.extend(nodes.iter().map(|(c, s)| (*c, ChunkToken::for_seed(s))));
     }
     Ok(out)
 }

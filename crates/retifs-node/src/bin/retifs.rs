@@ -25,7 +25,7 @@
 //!     retifs [--store DIR] ns search NS   (publish the blind index; prints the search capability)
 //!
 //!     retifs [--store DIR] ns address NS | ns info NS
-//!     retifs [--store DIR] ns join NAME ADDRESS [--from NODE]...
+//!     retifs [--store DIR] ns join NAME ADDRESS [--from NODE]... [--lazy]
 //!     retifs [--store DIR] ns grant NS WRITER [--grant] [--keys K1,K2,@content,@delete] [--until YYYY-MM-DD|+30d] [--from NODE]... | ns revoke NS WRITER
 //!
 //! Several writers per namespace (ADR-0017): a member joins with the address
@@ -67,7 +67,7 @@ fn usage() -> ! {
          retifs [--store DIR] follow ADDRESS [--from NODE]... | channels\n\
          retifs [--store DIR] rec add NS [KEY=VALUE]... [--file PATH] | rec set NS ID [KEY=VALUE]... [--unset KEY]...\n\
          retifs [--store DIR] rec get NS ID | rec rm NS ID | rec history NS ID | query NS[,NS]... [--at VERSION] [TERM]... [--search NODE]\n\
-         retifs [--store DIR] ns address NS | ns info NS | ns checkpoint NS | ns search NS | ns verify NS | ns keep NS all|rules | ns join NAME ADDRESS [--from NODE]...\n\
+         retifs [--store DIR] ns address NS | ns info NS | ns checkpoint NS | ns search NS | ns verify NS | ns keep NS all|rules | ns join NAME ADDRESS [--from NODE]... [--lazy]\n\
          retifs [--store DIR] ns grant NS WRITER [--grant] [--from NODE]... | ns revoke NS WRITER"
     );
     std::process::exit(2);
@@ -318,6 +318,7 @@ async fn main() {
                     ns,
                     address: rest.first().cloned().unwrap_or_else(|| usage()),
                     from: froms(&rest),
+                    lazy: rest.iter().any(|a| a == "--lazy"),
                 },
                 "grant" => libretifs::Request::NsGrant {
                     ns,
@@ -347,6 +348,9 @@ async fn main() {
                         println!("  checkpoint {c}");
                     }
                     println!("  keeps      {} on device {} ({} file(s) pulled for it)", v.keep, v.device, v.kept);
+                    if v.lazy {
+                        println!("  lazy       only records needed are held (fetched on demand)");
+                    }
                 }
                 libretifs::Response::Verified { ok, detail } => {
                     println!("{detail}");

@@ -73,6 +73,21 @@ impl Checkpoint {
         frontier.iter().map(|f| (f.writer, f.seq, f.time_ms)).collect()
     }
 
+    /// The part of its state held here: the control timeline whole, and the
+    /// records of the leaves held (each exact). For a member that fetches
+    /// state on demand; it must not make checkpoints from it.
+    pub fn load_present<S: Store>(&self, store: &S, creator: &WriterKey) -> Result<State, TreeError<S::Error>> {
+        let entries = match &self.state {
+            Some(root) => prolly::read_present(store, root)?,
+            None => Vec::new(),
+        };
+        let mut stamped = Vec::with_capacity(entries.len());
+        for (id, bytes) in entries {
+            stamped.push((id, StampedRecord::decode(&bytes).map_err(|_| TreeError::Corrupt("stamped record"))?));
+        }
+        Ok(State::restore(creator, self.control.clone(), self.high, stamped))
+    }
+
     /// The state it describes (reads the whole tree).
     pub fn load<S: Store>(&self, store: &S, creator: &WriterKey) -> Result<State, TreeError<S::Error>> {
         let entries = match &self.state {
