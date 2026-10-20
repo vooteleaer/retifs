@@ -3204,6 +3204,8 @@ fn apply_view(d: &Daemon, ns: &str) -> Result<(), String> {
         d.store.replace_namespace(ns, &records).map_err(|e| e.to_string())?;
         entry.view_built = entry.state.is_some();
         changed = true;
+        drop(records);
+        trim_memory();
     }
     drop(cache);
     if changed {
@@ -3249,6 +3251,8 @@ fn resume(d: &Daemon, ns: &str) -> Result<(), String> {
     entry.view_built = false;
     entry.since_checkpoint = 0;
     println!("ns {ns}: resumed from checkpoint ({} writer(s))", cp.frontier.len());
+    drop(cache);
+    trim_memory();
     Ok(())
 }
 
@@ -3405,6 +3409,7 @@ fn materialize(d: &Daemon, ns: &str) -> Result<retifs_core::ops::Merged, String>
         match save_checkpoint(d, ns, &state, frontier) {
             Ok(file) => {
                 println!("ns {ns}: checkpoint {file}");
+                trim_memory();
                 // The commits it covers needn't stay in memory: chains are walked
                 // back only to it from now on, like after resuming from it, and
                 // a rebuild reads the history from the store.
@@ -3687,6 +3692,18 @@ async fn follow_pass(d: &Daemon, mut f: retifs_store::Follow) -> Result<(), Stri
         d.store.update_follow(&f).map_err(|e| e.to_string())?;
     }
     Ok(())
+}
+
+/// Gives memory freed after a large operation (loading or saving a
+/// checkpoint) back to the system. glibc's allocator otherwise keeps the
+/// peak: a daemon that resumed a 100,000-record namespace stayed at 457 MiB
+/// with 108 MiB of state live.
+fn trim_memory() {
+    #[cfg(all(target_os = "linux", target_env = "gnu"))]
+    // SAFETY: malloc_trim only returns free memory to the OS.
+    unsafe {
+        libc::malloc_trim(0);
+    }
 }
 
 fn now_s() -> u64 {
