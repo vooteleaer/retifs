@@ -988,6 +988,53 @@ impl StampedRecord {
 }
 
 impl State {
+    /// Deleted records that no writer can still bring back or change by an
+    /// operation stamped before their deletion (ADR-0018, pruning tombstones).
+    ///
+    /// `frontier`: how far each writer's chain has been applied, as
+    /// (writer, seq, time). A chain's times never go back (ADR-0017), so a
+    /// writer's next operation is stamped above `(time, writer, seq, max)`.
+    /// A tombstone `d` is needed while some writer could still send one at or
+    /// below `d` with write rights: for each of its grant intervals `(g, r]`,
+    /// an operation is possible in `(max(g, next), min(r, d)]`. Writers absent
+    /// from the frontier count as having written nothing. Expiry of limited
+    /// grants is ignored (it only ends rights earlier), so the rule errs on
+    /// the side of keeping.
+    pub fn prunable(&self, frontier: &[(WriterKey, u64, u64)]) -> Vec<RecordId> {
+        let next: BTreeMap<WriterKey, Stamp> = frontier.iter().map(|(w, seq, t)| (*w, (*t, *w, *seq, u32::MAX))).collect();
+        // Each writer's write intervals (from, until], until = None while it lasts.
+        let mut intervals: Vec<(Stamp, Stamp, Option<Stamp>)> = Vec::new(); // (after, from, until)
+        for (w, timeline) in &self.rights {
+            let after = next.get(w).copied().unwrap_or((0, *w, 0, 0));
+            for (i, (from, grant)) in timeline.iter().enumerate() {
+                if grant.as_ref().is_some_and(|g| g.rights.contains(&Right::Write)) {
+                    intervals.push((after, *from, timeline.get(i + 1).map(|(s, _)| *s)));
+                }
+            }
+        }
+        self.deleted
+            .iter()
+            .filter(|(id, d)| self.live.get(*id).is_none_or(|l| l <= *d))
+            .filter(|(_, d)| {
+                !intervals.iter().any(|(after, from, until)| {
+                    let lo = (*after).max(*from);
+                    let hi = until.map_or(**d, |u| u.min(**d));
+                    lo < hi
+                })
+            })
+            .map(|(id, _)| *id)
+            .collect()
+    }
+
+    /// Drops these records' CRDT state entirely (see [`State::prunable`]).
+    pub fn prune(&mut self, ids: &[RecordId]) {
+        let ids: std::collections::BTreeSet<&RecordId> = ids.iter().collect();
+        self.live.retain(|id, _| !ids.contains(id));
+        self.deleted.retain(|id, _| !ids.contains(id));
+        self.blocks.retain(|id, _| !ids.contains(id));
+        self.fields.retain(|(id, _), _| !ids.contains(id));
+    }
+
     /// Every record's CRDT state (tombstones included), by ID.
     pub fn stamped(&self) -> Vec<(RecordId, StampedRecord)> {
         let mut out: BTreeMap<RecordId, StampedRecord> = BTreeMap::new();
@@ -1062,6 +1109,56 @@ mod tests {
                 (w, cs)
             })
             .collect()
+    }
+
+    /// (writer, seq, time) of each chain's last commit.
+    fn reach(ch: &BTreeMap<WriterKey, Vec<WriterCommit>>) -> Vec<(WriterKey, u64, u64)> {
+        ch.iter().filter_map(|(w, cs)| cs.last().map(|c| (*w, c.seq, c.time_ms))).collect()
+    }
+
+    #[test]
+    fn tombstones_go_once_no_writer_can_precede_them() {
+        let alice = vec![
+            c(100, vec![Op::Grant(BOB, vec![Right::Write]), Op::Set(R, "title".into(), s("gone")), Op::Set(R2, "title".into(), s("kept"))]),
+            c(200, vec![Op::Delete(R)]),
+            c(300, vec![Op::Set(R2, "n".into(), Value::Int(1))]),
+        ];
+        // Bob hasn't written since his grant: he could still send an op
+        // stamped before the delete, so the tombstone stays.
+        let ch = chains(vec![(ALICE, alice.clone())]);
+        let st = State::build(&ALICE, &ch, 1_000);
+        assert!(st.prunable(&reach(&ch)).is_empty());
+        // Bob's chain reaches past the delete: nothing can precede it now.
+        let ch = chains(vec![(ALICE, alice.clone()), (BOB, vec![c(250, vec![Op::Set(R2, "b".into(), Value::Int(2))])])]);
+        let mut st = State::build(&ALICE, &ch, 1_000);
+        let before = st.records();
+        assert_eq!(st.prunable(&reach(&ch)), vec![R]);
+        st.prune(&[R]);
+        assert_eq!(st.records(), before, "visible records don't change");
+        assert!(st.stamped().iter().all(|(id, _)| *id != R));
+        // A later op revives it as before (its stamp is above the delete).
+        st.apply((400, BOB, 2, 0), &Op::Set(R, "title".into(), s("back")));
+        assert_eq!(st.record(&R).unwrap().attrs.get("title"), Some(&s("back")));
+    }
+
+    #[test]
+    fn revived_records_and_revoked_writers_keep_tombstones() {
+        // R is deleted, then set again: live, not prunable.
+        let alice = vec![c(100, vec![Op::Set(R, "a".into(), Value::Int(1))]), c(200, vec![Op::Delete(R)]), c(300, vec![Op::Set(R, "a".into(), Value::Int(2))])];
+        let ch = chains(vec![(ALICE, alice)]);
+        assert!(State::build(&ALICE, &ch, 1_000).prunable(&reach(&ch)).is_empty());
+        // Eve had write rights (100, 150] and never wrote: offline writes from
+        // then could still arrive, so a later delete's tombstone stays.
+        let alice = vec![
+            c(100, vec![Op::Grant(EVE, vec![Right::Write]), Op::Set(R, "a".into(), Value::Int(1))]),
+            c(150, vec![Op::Revoke(EVE)]),
+            c(200, vec![Op::Delete(R)]),
+        ];
+        let ch = chains(vec![(ALICE, alice.clone())]);
+        assert!(State::build(&ALICE, &ch, 1_000).prunable(&reach(&ch)).is_empty());
+        // Once her chain is known past her revoke, it goes.
+        let ch = chains(vec![(ALICE, alice), (EVE, vec![c(140, vec![Op::Set(R2, "e".into(), Value::Int(1))]), c(160, vec![])])]);
+        assert_eq!(State::build(&ALICE, &ch, 1_000).prunable(&reach(&ch)), vec![R]);
     }
 
     #[test]

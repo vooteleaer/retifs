@@ -116,6 +116,8 @@ def stamped_state(creator, chains):
                 events.append(((c["time_ms"], writer, c["seq"], i), ops_op(o)))
     events.sort(key=lambda e: e[0])
     rights = {creator: {"rights": {"grant", "write"}, "limits": (None, None)}}
+    # Each writer's rights over time, for pruning: [(from stamp, rights or None)].
+    timeline = {creator: [([0, bytes(32), 0, 0], {"grant", "write"})]}
     control, high, recs = [], None, {}
     for s, o in events:
         stamp = [s[0], s[1], s[2], s[3]]
@@ -127,8 +129,10 @@ def stamped_state(creator, chains):
             if tag in ("grant", "revoke") and holds(rights, w, "grant", s[0]) and o[1] != creator:
                 if tag == "grant":
                     rights[o[1]] = {"rights": set(o[2]), "limits": narrowed(rights[w]["limits"], limits_of(o))}
+                    timeline.setdefault(o[1], []).append((stamp, set(o[2])))
                 else:
                     rights.pop(o[1], None)
+                    timeline.setdefault(o[1], []).append((stamp, None))
             continue
         high = stamp
         if not allows(rights, w, o, s[0]):
@@ -146,7 +150,27 @@ def stamped_state(creator, chains):
             r["deleted"] = stamp
     for r in recs.values():
         r["fields"] = {k: r["fields"][k] for k in sorted(r["fields"], key=lambda k: k.encode("utf-8"))}
-    return control, high, recs
+    return control, high, recs, timeline
+
+
+def prune(recs, timeline, frontier):
+    """Drops dead records no writer can still precede (ADR-0018): a writer's
+    next op is stamped above [time, writer, seq, 2^32-1] of its frontier, and
+    it can write in each (from, until] it held write rights."""
+    nxt = {w: [t, w, seq, 2**32 - 1] for w, seq, t, _ in frontier}
+    intervals = []
+    for w, tl in timeline.items():
+        after = nxt.get(w, [0, w, 0, 0])
+        for i, (frm, r) in enumerate(tl):
+            if r is not None and "write" in r:
+                intervals.append((after, frm, tl[i + 1][0] if i + 1 < len(tl) else None))
+    for rid in list(recs):
+        r = recs[rid]
+        d = r["deleted"]
+        if d is None or (r["live"] is not None and r["live"] > d):
+            continue
+        if not any(max(a, f) < (min(u, d) if u is not None else d) for a, f, u in intervals):
+            del recs[rid]
 
 
 def visible(recs):
@@ -161,14 +185,17 @@ def check_checkpoint(doc, checks):
     v = doc["checkpoint"]
     creator = bytes.fromhex(v["creator"])
     chains = {bytes.fromhex(c["writer"]): c["commits"] for c in v["chains"]}
-    control, high, recs = stamped_state(creator, chains)
+    control, high, recs, timeline = stamped_state(creator, chains)
+    frontier = [[bytes.fromhex(w), s, t, bytes.fromhex(c)] for w, s, t, c in v["frontier"]]
+    before = len(recs)
+    prune(recs, timeline, frontier)
+    checks[f"checkpoint prunes tombstones ({before - len(recs)} of {before})"] = before - len(recs) == v.get("pruned", 0)
     secret = hkdf(32, bytes.fromhex(v["read_key"]), b"retifs/v1/record", b"retifs/v1/state")
     (cid, seed), store = build(doc, secret, sorted(recs.items()))
     checks["checkpoint state root cid"] = cid.hex() == v["state_root_cid"]
     checks["checkpoint state root seed"] = seed.hex() == v["state_root_seed"]
     checks[f"checkpoint state nodes ({len(store)})"] = sorted(c.hex() for c in store) == v["state_nodes"]
     checks["checkpoint visible records"] = visible(recs) == v["visible_records"]
-    frontier = [[bytes.fromhex(w), s, t, bytes.fromhex(c)] for w, s, t, c in v["frontier"]]
     cp = {
         "control": control,
         "frontier": frontier,

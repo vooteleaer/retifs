@@ -13,7 +13,7 @@
 - **Store generation in announces:** size and privacy of the counter that tells peers a node has new chunks ([ADR-0010](adr/0010-continuous-seeking.md)).
 - **Spam:** LXMF stamps on announces, pinning requests, attributes.
 - **App identity on Linux:** how to bind a per-app capability to a process reliably without a sandbox. Partly answered: tokens are pinned to the executable path on first use ([ADR-0004](adr/0004-native-record-api.md)). Open: a program replaced at the same path, interpreters (every Python app is `/usr/bin/python3`), Flatpak/portal identity, a user prompt.
-- **Removal race:** which of a member's writes count when they were made offline, concurrently with that member's removal? Causal rule needed.
+- **Removal race** (also keeps tombstones: a revoked writer whose chain stops before its revoke holds back pruning, [ADR-0018](adr/0018-state-trees.md)): which of a member's writes count when they were made offline, concurrently with that member's removal? Causal rule needed.
 - **Conflict UX:** how to show two heads to the user.
 - **Range/geo queries with a blind index** over the network.
 - **YubiKey PIV vs OpenPGP**: depends on the firmware.

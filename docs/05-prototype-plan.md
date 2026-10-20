@@ -63,7 +63,8 @@ Prototypes are throwaway. They're for learning, not for locking in the format. T
 - [x] Read-key rotation on revoke: identities, rekey wrapped with RNS Identity.encrypt, crossing rotations via per-key heads ([ADR-0017](adr/0017-multi-writer-namespaces.md)).
 - [x] Namespace state as a Prolly tree; checkpoints: local resume, named in chains, new members start from a grant holder's checkpoint, history fetched on demand, `ns verify` ([ADR-0018](adr/0018-state-trees.md)).
 - [x] Multi-writer, continued: hybrid logical clock for commit times, grants limited by attribute key and expiry and narrowed on delegation, `watch` (long poll per namespace), transactions, `query --at` ([ADR-0017](adr/0017-multi-writer-namespaces.md)).
-- [ ] Multi-writer, open: grants filtered by record content, pruning tombstones.
+- [x] Pruning tombstones in checkpoints: dead records no writer can still precede, by each writer's frontier and write intervals ([ADR-0018](adr/0018-state-trees.md)).
+- [ ] Multi-writer, open: grants filtered by record content.
 - [x] `keep:<device>` tag and query-based keep rules (proactive pull), keep mode per namespace, `user.retifs.local` ([ADR-0005](adr/0005-local-store-offline.md)).
 - [x] Remote queries to own nodes over a Link, full query language: `--via NODE`, devices admitted with app-style scopes ([ADR-0019](adr/0019-remote-query-and-blind-index.md)).
 - [x] Blind index for search nodes without the read key: declared keys, exact match, index channel derived from the read key, `/retifs/query` with proof, `query --search NODE`; vectors verified against RNS ([ADR-0019](adr/0019-remote-query-and-blind-index.md)).

@@ -170,6 +170,7 @@ fn checkpoint_vector() -> J {
         "state_nodes": nodes,
         "encoded": hex::encode(cp.encode()),
         "visible_records": state.records().len(),
+        "pruned": state.prunable(&frontier.iter().map(|f| (f.writer, f.seq, f.time_ms)).collect::<Vec<_>>()).len(),
     })
 }
 

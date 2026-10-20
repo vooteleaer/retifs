@@ -9,7 +9,8 @@
 //!                "state":    nil | [ root cid (bin 33), root seed (bin 32) ] }   Prolly tree of stamped records
 //! ```
 //! A checkpoint is a cache of a deterministic function: the state after each
-//! writer's commits up to its frontier. Commits after it apply as usual; a
+//! writer's commits up to its frontier, without the tombstones that frontier
+//! makes unneeded ([`State::prunable`]). Commits after it apply as usual; a
 //! control operation older than `high` needs the history (rebuild).
 
 use std::collections::BTreeMap;
@@ -61,9 +62,15 @@ impl Checkpoint {
         mut frontier: Vec<Frontier>,
     ) -> Result<Checkpoint, TreeError<S::Error>> {
         frontier.sort_by_key(|f| f.writer);
+        let mut state = state.clone();
+        state.prune(&state.prunable(&Self::reach(&frontier)));
         let entries = state.stamped().into_iter().map(|(id, r)| (id, r.encode())).collect();
         let root = prolly::build(store, secret, entries)?;
         Ok(Checkpoint { control: state.control().to_vec(), frontier, high: state.high(), state: root })
+    }
+
+    fn reach(frontier: &[Frontier]) -> Vec<(WriterKey, u64, u64)> {
+        frontier.iter().map(|f| (f.writer, f.seq, f.time_ms)).collect()
     }
 
     /// The state it describes (reads the whole tree).
@@ -99,7 +106,8 @@ impl Checkpoint {
         if chains.keys().any(|w| !self.frontier.iter().any(|f| f.writer == *w)) {
             return Ok(Some("the history given has writers it doesn't name"));
         }
-        let replayed = State::build(creator, chains, now_ms);
+        let mut replayed = State::build(creator, chains, now_ms);
+        replayed.prune(&replayed.prunable(&Self::reach(&self.frontier)));
         Ok(if replayed.control() != claimed.control() {
             Some("its grants, revokes or keys differ from the history")
         } else if replayed.high() != claimed.high() || replayed.stamped() != claimed.stamped() {
