@@ -522,6 +522,117 @@ struct Daemon {
     /// Per namespace, how often its records changed here (for `watch`).
     changes: Mutex<HashMap<String, u64>>,
     changed: Notify,
+    /// Open write sessions (the local API's WriteBegin … WriteCommit).
+    sessions: Mutex<HashMap<u64, WriteSession>>,
+    next_session: std::sync::atomic::AtomicU64,
+}
+
+/// A record's content being written in place: written ranges are spooled to
+/// a sparse file; the rest is the record's current content (`base`, up to
+/// `base_len` after truncations), then zeros.
+struct WriteSession {
+    ns: String,
+    id: RecordId,
+    base: Option<FileRef>,
+    base_len: u64,
+    spool: std::fs::File,
+    path: PathBuf,
+    /// Written ranges, start → end, merged.
+    extents: std::collections::BTreeMap<u64, u64>,
+    size: u64,
+    started: Instant,
+}
+
+/// Where a part of a session's content comes from.
+#[derive(Clone, Copy, PartialEq, Debug)]
+enum Piece {
+    Spool,
+    Base,
+    Zero,
+}
+
+impl WriteSession {
+    fn write_at(&mut self, offset: u64, data: &[u8]) -> std::io::Result<()> {
+        use std::io::{Seek, SeekFrom, Write};
+        self.spool.seek(SeekFrom::Start(offset))?;
+        self.spool.write_all(data)?;
+        let (mut a, mut b) = (offset, offset + data.len() as u64);
+        let touching: Vec<(u64, u64)> = self.extents.range(..=b).filter(|(_, e)| **e >= a).map(|(s, e)| (*s, *e)).collect();
+        for (s, e) in touching {
+            a = a.min(s);
+            b = b.max(e);
+            self.extents.remove(&s);
+        }
+        self.extents.insert(a, b);
+        self.size = self.size.max(offset + data.len() as u64);
+        Ok(())
+    }
+
+    fn truncate(&mut self, size: u64) {
+        self.extents = self.extents.iter().filter(|(s, _)| **s < size).map(|(s, e)| (*s, (*e).min(size))).collect();
+        self.base_len = self.base_len.min(size);
+        self.size = size;
+    }
+
+    /// `range` split by where its bytes come from.
+    fn pieces(&self, range: std::ops::Range<u64>) -> Vec<(std::ops::Range<u64>, Piece)> {
+        let end = range.end.min(self.size);
+        let mut out = Vec::new();
+        let mut pos = range.start.min(end);
+        while pos < end {
+            if let Some((_, e)) = self.extents.range(..=pos).next_back().filter(|(_, e)| **e > pos) {
+                let to = (*e).min(end);
+                out.push((pos..to, Piece::Spool));
+                pos = to;
+                continue;
+            }
+            let gap_end = self.extents.range(pos..).next().map_or(end, |(s, _)| (*s).min(end));
+            if pos < self.base_len {
+                let to = gap_end.min(self.base_len);
+                out.push((pos..to, Piece::Base));
+                pos = to;
+            } else {
+                out.push((pos..gap_end, Piece::Zero));
+                pos = gap_end;
+            }
+        }
+        out
+    }
+}
+
+/// A session's content as one stream (for committing): spooled ranges, the
+/// base's (already local), zeros.
+struct SessionReader {
+    pieces: std::collections::VecDeque<(std::ops::Range<u64>, Piece)>,
+    spool: std::fs::File,
+    base: Option<FileRef>,
+    store: Arc<SlabStore>,
+}
+
+impl std::io::Read for SessionReader {
+    fn read(&mut self, buf: &mut [u8]) -> std::io::Result<usize> {
+        use std::io::{Seek, SeekFrom};
+        let Some((range, piece)) = self.pieces.front().cloned() else { return Ok(0) };
+        let n = (range.end - range.start).min(buf.len() as u64).min(1 << 20) as usize;
+        match piece {
+            Piece::Spool => {
+                self.spool.seek(SeekFrom::Start(range.start))?;
+                self.spool.read_exact(&mut buf[..n])?;
+            }
+            Piece::Zero => buf[..n].fill(0),
+            Piece::Base => {
+                let base = self.base.as_ref().ok_or_else(|| std::io::Error::other("no base content"))?;
+                let data = manifest::read_range(&*self.store, base, range.start..range.start + n as u64).map_err(std::io::Error::other)?;
+                buf[..n].copy_from_slice(&data);
+            }
+        }
+        if range.start + n as u64 >= range.end {
+            self.pieces.pop_front();
+        } else {
+            self.pieces.front_mut().unwrap().0.start += n as u64;
+        }
+        Ok(n)
+    }
 }
 
 impl Daemon {
@@ -669,6 +780,8 @@ async fn serve(store: Arc<SlabStore>, identity: node::IdentitySecret, endpoint: 
         device: args.device.clone(),
         changes: Mutex::new(HashMap::new()),
         changed: Notify::new(),
+        sessions: Mutex::new(HashMap::new()),
+        next_session: std::sync::atomic::AtomicU64::new(1),
     });
     println!("attached to shared instance {of}");
     println!("serving {} chunks as retifs.node <{}>", store.len().unwrap_or(0), daemon.node_hex);
@@ -961,7 +1074,7 @@ async fn handle(d: &Daemon, req: Request) -> Result<Response, String> {
         }
 
         Request::RecordSet { ns, id, attrs, unset, data } => {
-            let records = transaction(d, &ns, vec![TxStep::Set { id, attrs, unset, data }]).await?;
+            let records = transaction(d, &ns, vec![TxStep::Set { id, attrs, unset, data, blocks: None }]).await?;
             Ok(Response::Records { records })
         }
 
@@ -990,6 +1103,79 @@ async fn handle(d: &Daemon, req: Request) -> Result<Response, String> {
                     return Ok(Response::Changed { count });
                 }
             }
+        }
+
+        Request::WriteBegin { ns, id, truncate } => {
+            writable(&ns)?;
+            let rid = parse_record_id(&id)?;
+            let rec = d.store.get_record(&ns, &rid).map_err(|e| e.to_string())?.ok_or("no such record")?;
+            let base = if truncate { None } else { rec.blocks.first().copied() };
+            let base_len = base.map_or(0, |f| f.size);
+            let dir = d.store.root().join("spool");
+            std::fs::create_dir_all(&dir).map_err(|e| e.to_string())?;
+            // Sessions left open for a day (a client that died) are dropped.
+            d.sessions.lock().unwrap().retain(|_, s| {
+                let keep = s.started.elapsed() < Duration::from_secs(86_400);
+                if !keep {
+                    let _ = std::fs::remove_file(&s.path);
+                }
+                keep
+            });
+            let session = d.next_session.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+            let path = dir.join(format!("{session}-{}", hex(&rid)));
+            let spool = std::fs::OpenOptions::new().read(true).write(true).create(true).truncate(true).open(&path).map_err(|e| e.to_string())?;
+            let s = WriteSession { ns, id: rid, base, base_len, spool, path, extents: Default::default(), size: base_len, started: Instant::now() };
+            d.sessions.lock().unwrap().insert(session, s);
+            Ok(Response::Session { session, size: base_len })
+        }
+
+        Request::WriteAt { session, offset, data } => {
+            let mut sessions = d.sessions.lock().unwrap();
+            let s = sessions.get_mut(&session).ok_or("no such write session")?;
+            s.write_at(offset, &data).map_err(|e| e.to_string())?;
+            Ok(Response::Done)
+        }
+
+        Request::WriteTruncate { session, size } => {
+            let mut sessions = d.sessions.lock().unwrap();
+            sessions.get_mut(&session).ok_or("no such write session")?.truncate(size);
+            Ok(Response::Done)
+        }
+
+        Request::WriteRead { session, offset, len } => {
+            let (pieces, spool, base, ns) = {
+                let sessions = d.sessions.lock().unwrap();
+                let s = sessions.get(&session).ok_or("no such write session")?;
+                (s.pieces(offset..offset.saturating_add(len)), s.spool.try_clone().map_err(|e| e.to_string())?, s.base, s.ns.clone())
+            };
+            let mut data = Vec::new();
+            for (range, piece) in pieces {
+                match piece {
+                    Piece::Base => {
+                        let base = base.as_ref().ok_or("no base content")?;
+                        data.extend(read_range_fetching(d, base, range, Some(&ns), Duration::from_secs(30)).await?);
+                    }
+                    other => {
+                        let mut r = SessionReader { pieces: [(range, other)].into(), spool: spool.try_clone().map_err(|e| e.to_string())?, base: None, store: d.store.clone() };
+                        std::io::Read::read_to_end(&mut r, &mut data).map_err(|e| e.to_string())?;
+                    }
+                }
+            }
+            Ok(Response::Range { data })
+        }
+
+        Request::WriteAbort { session } => {
+            if let Some(s) = d.sessions.lock().unwrap().remove(&session) {
+                let _ = std::fs::remove_file(&s.path);
+            }
+            Ok(Response::Done)
+        }
+
+        Request::WriteCommit { session, attrs } => {
+            let s = d.sessions.lock().unwrap().remove(&session).ok_or("no such write session")?;
+            let result = commit_session(d, &s, attrs).await;
+            let _ = std::fs::remove_file(&s.path);
+            Ok(Response::Records { records: result? })
         }
 
         Request::Transaction { ns, steps } => {
@@ -1720,6 +1906,13 @@ async fn publish_checkpoint(d: &Daemon, ns: &str) -> Result<(), String> {
 /// the transfer fits the slow-link budget (ADR-0013). Fetched chunks go to
 /// the cache tier: evictable, never served to others.
 async fn read_range_fetching(d: &Daemon, file: &FileRef, range: std::ops::Range<u64>, ns: Option<&str>, wait: Duration) -> Result<Vec<u8>, String> {
+    ensure_local(d, file, range.clone(), ns, wait).await?;
+    manifest::read_range(&*d.store, file, range).map_err(|e| e.to_string())
+}
+
+/// Makes sure every chunk `range` of `file` needs is here (see
+/// [`read_range_fetching`]) without reading it.
+async fn ensure_local(d: &Daemon, file: &FileRef, range: std::ops::Range<u64>, ns: Option<&str>, wait: Duration) -> Result<(), String> {
     let deadline = Instant::now() + wait;
     let mut peers: Vec<PeerId> = match ns {
         Some(ns) => d.store.ns_peers(ns).map_err(|e| e.to_string())?,
@@ -1733,7 +1926,7 @@ async fn read_range_fetching(d: &Daemon, file: &FileRef, range: std::ops::Range<
     loop {
         let missing = manifest::missing_for_range(&*d.store, file, range.clone()).map_err(|e| e.to_string())?;
         if missing.is_empty() {
-            return manifest::read_range(&*d.store, file, range).map_err(|e| e.to_string());
+            return Ok(());
         }
         if peers.is_empty() {
             return Err(format!("{}: not here, and no peer known to ask", file.root));
@@ -1847,6 +2040,43 @@ fn channel_key(d: &Daemon, c: &retifs_store::OwnChannel) -> ChannelKey {
     }
 }
 
+/// Stores a write session's content and commits it (with `attrs`) as one
+/// version. The base content the new one keeps is fetched first if it isn't
+/// here; then the content is streamed into the store, never whole in memory.
+async fn commit_session(d: &Daemon, s: &WriteSession, attrs: Vec<(String, AttrValue)>) -> Result<Vec<RecordView>, String> {
+    let pieces = s.pieces(0..s.size);
+    if let Some(base) = &s.base {
+        for (range, piece) in &pieces {
+            if *piece == Piece::Base {
+                ensure_local(d, base, range.clone(), Some(&s.ns), Duration::from_secs(120)).await?;
+            }
+        }
+    }
+    let reader = SessionReader { pieces: pieces.into(), spool: s.spool.try_clone().map_err(|e| e.to_string())?, base: s.base, store: d.store.clone() };
+    let store = d.store.clone();
+    let record = format!("retifs-record/{}/{}", s.ns, hex(&s.id));
+    let file = tokio::task::spawn_blocking(move || -> Result<FileRef, String> {
+        let secret = secret(&store, false, Some(&record));
+        let opts = manifest::WriteOpts { stable_padding: true, ..Default::default() };
+        let mut pinned = retifs_store::TrackedPinned::new(&store);
+        let (file, blobs) = match manifest::write_reader(&mut pinned, &secret, reader, opts) {
+            Ok(w) => w,
+            Err(e) => {
+                let _ = pinned.roll_back();
+                return Err(e.to_string());
+            }
+        };
+        let tokens: Vec<_> = blobs.iter().map(|(c, s)| (*c, ChunkToken::for_seed(s))).collect();
+        store.register_serving(&tokens).map_err(|e| e.to_string())?;
+        Ok(file)
+    })
+    .await
+    .map_err(|e| e.to_string())??;
+    d.store.need_file(&file).map_err(|e| e.to_string())?;
+    d.upkeep_wake.notify_one();
+    transaction(d, &s.ns, vec![TxStep::Set { id: hex(&s.id), attrs, unset: Vec::new(), data: None, blocks: Some(vec![file.to_string()]) }]).await
+}
+
 /// Stores content for record `id` under the record's own secret (its
 /// versions dedup against each other) and keeps it placed.
 async fn store_content(d: &Daemon, ns: &str, id: &RecordId, data: Vec<u8>) -> Result<FileRef, String> {
@@ -1882,13 +2112,26 @@ async fn transaction(d: &Daemon, ns: &str, steps: Vec<TxStep>) -> Result<Vec<Rec
                 getrandom::fill(&mut id).expect("OS entropy");
                 (id, attrs, Vec::new(), data)
             }
-            TxStep::Set { id, attrs, unset, data } => {
+            TxStep::Set { id, attrs, unset, data, blocks } => {
                 let id = parse_record_id(&id)?;
                 if !seen.contains(&id) {
                     let before = d.store.get_record(ns, &id).map_err(|e| e.to_string())?.ok_or_else(|| format!("no such record {}", hex(&id)))?;
-                    if data.is_some() {
+                    if data.is_some() || blocks.is_some() {
                         replaced.extend(before.blocks);
                     }
+                }
+                if let Some(caps) = blocks {
+                    let refs: Vec<FileRef> = caps
+                        .iter()
+                        .map(|c| c.parse().map_err(|e: retifs_core::ManifestError| e.to_string()))
+                        .collect::<Result<_, _>>()?;
+                    if !attrs.iter().any(|(k, _)| k == "size") {
+                        ops.push(Op::Set(id, "size".into(), Value::Int(refs.iter().map(|f| f.size).sum::<u64>() as i64)));
+                    }
+                    for f in &refs {
+                        d.store.need_file(f).map_err(|e| e.to_string())?;
+                    }
+                    ops.push(Op::Blocks(id, refs));
                 }
                 (id, attrs, unset, data)
             }
@@ -3570,3 +3813,61 @@ mod nomadnet {
     }
 }
 
+
+#[cfg(test)]
+mod write_session_tests {
+    use super::*;
+
+    fn session(base_len: u64) -> WriteSession {
+        let path = std::env::temp_dir().join(format!("retifs-spool-test-{}-{base_len}", std::process::id()));
+        let spool = std::fs::OpenOptions::new().read(true).write(true).create(true).truncate(true).open(&path).unwrap();
+        WriteSession {
+            ns: "t".into(),
+            id: [0; 16],
+            base: None,
+            base_len,
+            spool,
+            path,
+            extents: Default::default(),
+            size: base_len,
+            started: Instant::now(),
+        }
+    }
+
+    /// Overlapping and adjacent writes merge; unwritten parts come from the
+    /// base up to its (possibly truncated) end, then zeros.
+    #[test]
+    fn pieces_follow_writes_and_truncation() {
+        let mut s = session(100);
+        s.write_at(10, &[1; 10]).unwrap();
+        s.write_at(15, &[2; 10]).unwrap(); // overlaps
+        s.write_at(25, &[3; 5]).unwrap(); // adjacent
+        assert_eq!(s.extents.iter().map(|(a, b)| (*a, *b)).collect::<Vec<_>>(), [(10, 30)]);
+        assert_eq!(s.pieces(0..100), [(0..10, Piece::Base), (10..30, Piece::Spool), (30..100, Piece::Base)]);
+        s.write_at(150, &[4; 10]).unwrap(); // past the end: a hole of zeros
+        assert_eq!(s.size, 160);
+        assert_eq!(
+            s.pieces(90..160),
+            [(90..100, Piece::Base), (100..150, Piece::Zero), (150..160, Piece::Spool)]
+        );
+        s.truncate(20); // cuts the base and the write
+        assert_eq!(s.pieces(0..1000), [(0..10, Piece::Base), (10..20, Piece::Spool)]);
+        s.write_at(40, &[5; 2]).unwrap(); // grows again: no base bytes come back
+        assert_eq!(s.pieces(0..42), [(0..10, Piece::Base), (10..20, Piece::Spool), (20..40, Piece::Zero), (40..42, Piece::Spool)]);
+        // The stream gives exactly those bytes.
+        let mut r = SessionReader {
+            pieces: s.pieces(10..42).into(),
+            spool: s.spool.try_clone().unwrap(),
+            base: None,
+            store: Arc::new(SlabStore::open(std::env::temp_dir().join(format!("retifs-spool-store-{}", std::process::id()))).unwrap()),
+        };
+        let mut out = Vec::new();
+        std::io::Read::read_to_end(&mut r, &mut out).unwrap();
+        let mut want = vec![1u8; 5];
+        want.extend([2u8; 5]);
+        want.extend([0u8; 20]);
+        want.extend([5u8; 2]);
+        assert_eq!(out, want);
+        let _ = std::fs::remove_file(&s.path);
+    }
+}

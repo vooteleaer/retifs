@@ -79,7 +79,13 @@ The mount exposes plaintext to processes in the user's session, and root on the 
 
 **Transactions (2026-10-20):** the local API's `Transaction { ns, steps }` applies creates, sets and deletes as one commit (one version), so other members see all of them or none. The single-record requests are one-step transactions. The mount uses them for directory renames (every record below in one commit) and for saves that rename over a file (the target's new content and the temporary record's deletion in one commit). Live: moving a directory of two files added exactly one version.
 
+**Writes without buffering (2026-10-20):**
+- The local API has write sessions: `WriteBegin`, `WriteAt`, `WriteRead`, `WriteTruncate`, then `WriteCommit` or `WriteAbort`. The daemon spools written ranges to a sparse file under the store and keeps the record's previous content for everything not written, so only what changed crosses the API.
+- `WriteCommit` fetches any of the previous content it keeps that isn't here, then streams the result into the store with `manifest::write_reader`. That uses FastCDC over a stream and builds the same file (same root) as writing the bytes from memory, so dedup across versions is unchanged.
+- The mount writes through a session per open file. A save that renames over a file now gives the target the source's content by reference (`TxStep::Set` with `blocks`), without copying it.
+- Live (WSL2): a 200 MiB file written through the mount in 4.4 s, with the mount's peak memory at 3 MiB and the daemon's at 50 MiB. Overwriting 1 MiB in its middle in place matches the same change made locally.
+
 **Not yet:**
-- **Writes in memory:** a file being written is held whole until it's closed. FUSE passthrough for cached reads comes later.
+- FUSE passthrough for cached reads.
 - **Permissions:** the mounting user owns everything. Modes aren't stored.
 - **Mounting as a normal user** needs `fusermount3` (the `fuse3` package); the test ran as root.

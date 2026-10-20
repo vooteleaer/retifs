@@ -283,10 +283,75 @@ pub fn write_tracked(
     Ok((file, blobs))
 }
 
+/// Like [`write_tracked`], but reads the file from `source` as it goes: one
+/// chunk in memory at a time, however large the file. Gives the same file
+/// (same root) as writing the same bytes from a slice.
+pub fn write_reader(
+    store: &mut impl Store,
+    secret: &ConvergenceSecret,
+    mut source: impl std::io::Read,
+    opts: WriteOpts,
+) -> Result<(FileRef, Vec<(Cid, Seed)>), ManifestError> {
+    use std::io::Read;
+    let mut blobs = Vec::new();
+    // Small enough to inline? Read just past the limit to know.
+    let mut head = Vec::with_capacity(INLINE_MAX + 1);
+    (&mut source).take(INLINE_MAX as u64 + 1).read_to_end(&mut head).map_err(store_err)?;
+    if head.len() <= INLINE_MAX {
+        let file = write_inline(store, secret, &head, &mut blobs)?;
+        return Ok((file, blobs));
+    }
+    let mut level = Vec::new();
+    let mut size = 0u64;
+    for piece in chunker::split_reader(std::io::Cursor::new(head).chain(source)) {
+        let piece = piece.map_err(store_err)?;
+        size += piece.len() as u64;
+        let s = seal_with(secret, &piece, opts.compression).expect("chunker output fits a chunk");
+        Store::put(store, s.cid, s.ciphertext).map_err(store_err)?;
+        blobs.push((s.cid, s.seed));
+        level.push(Entry { cid: s.cid, seed: s.seed, span: piece.len() as u64 });
+    }
+    let file = finish_tree(store, secret, level, size, FANOUT, opts, &mut blobs)?;
+    Ok((file, blobs))
+}
+
+fn write_inline(store: &mut impl Store, secret: &ConvergenceSecret, data: &[u8], blobs: &mut Vec<(Cid, Seed)>) -> Result<FileRef, ManifestError> {
+    let mut node = vec![VERSION, KIND_INLINE];
+    node.extend_from_slice(&(data.len() as u16).to_be_bytes());
+    node.extend_from_slice(data);
+    let s = seal(secret, &node).expect("an inline node fits the 1 KiB class");
+    Store::put(store, s.cid, s.ciphertext).map_err(store_err)?;
+    blobs.push((s.cid, s.seed));
+    Ok(FileRef { root: s.cid, seed: s.seed, size: data.len() as u64 })
+}
+
 fn write_with_fanout(
     store: &mut impl Store,
     secret: &ConvergenceSecret,
     data: &[u8],
+    fanout: usize,
+    opts: WriteOpts,
+    blobs: &mut Vec<(Cid, Seed)>,
+) -> Result<FileRef, ManifestError> {
+    if data.len() <= INLINE_MAX {
+        return write_inline(store, secret, data, blobs);
+    }
+    let mut level = Vec::new();
+    for piece in chunker::split(data) {
+        let s = seal_with(secret, piece, opts.compression).expect("chunker output fits a chunk");
+        Store::put(store, s.cid, s.ciphertext).map_err(store_err)?;
+        blobs.push((s.cid, s.seed));
+        level.push(Entry { cid: s.cid, seed: s.seed, span: piece.len() as u64 });
+    }
+    finish_tree(store, secret, level, data.len() as u64, fanout, opts, blobs)
+}
+
+/// Padding (if asked) and the node levels above the data chunks.
+fn finish_tree(
+    store: &mut impl Store,
+    secret: &ConvergenceSecret,
+    mut level: Vec<Entry>,
+    size: u64,
     fanout: usize,
     opts: WriteOpts,
     blobs: &mut Vec<(Cid, Seed)>,
@@ -296,20 +361,6 @@ fn write_with_fanout(
         blobs.push((s.cid, s.seed));
         Ok((s.cid, s.seed))
     };
-
-    if data.len() <= INLINE_MAX {
-        let mut node = vec![VERSION, KIND_INLINE];
-        node.extend_from_slice(&(data.len() as u16).to_be_bytes());
-        node.extend_from_slice(data);
-        let (cid, seed) = put(store, seal(secret, &node).expect("an inline node fits the 1 KiB class"))?;
-        return Ok(FileRef { root: cid, seed, size: data.len() as u64 });
-    }
-
-    let mut level = Vec::new();
-    for piece in chunker::split(data) {
-        let (cid, seed) = put(store, seal_with(secret, piece, opts.compression).expect("chunker output fits a chunk"))?;
-        level.push(Entry { cid, seed, span: piece.len() as u64 });
-    }
 
     if opts.pad {
         let real = level.len() as u64;
@@ -339,7 +390,7 @@ fn write_with_fanout(
         }
         if parents.len() == 1 {
             let root = parents[0];
-            return Ok(FileRef { root: root.cid, seed: root.seed, size: data.len() as u64 });
+            return Ok(FileRef { root: root.cid, seed: root.seed, size });
         }
         level = parents;
         kind = KIND_INTERNAL;
@@ -632,6 +683,35 @@ mod tests {
         assert!(rounds <= 4, "one round per tree level: {rounds}");
         assert!(part.chunks.len() * 10 < full.chunks.len(), "fetched {} of {} chunks", part.chunks.len(), full.chunks.len());
         assert!(missing_for_range(&part, &file, 0..data.len() as u64).unwrap().len() > 1, "the rest is still missing");
+    }
+
+
+    /// A file written from a stream is the same file as from a slice (same
+    /// root): dedup works across both, at every size class and with padding.
+    #[test]
+    fn writing_from_a_reader_matches_a_slice() {
+        let secret = ConvergenceSecret::for_record(&[4; 32], b"stream");
+        for len in [0usize, 1, INLINE_MAX, INLINE_MAX + 1, 20_000, 300_000, 2_000_003] {
+            let data = noise(len, len as u64 + 7);
+            for opts in [WriteOpts::default(), WriteOpts { stable_padding: true, ..WriteOpts::default() }] {
+                let mut a = CountingStore::default();
+                let mut b = CountingStore::default();
+                let (fa, _) = write_tracked(&mut a, &secret, &data, opts).unwrap();
+                // A reader that hands out odd-sized pieces, like a pipe would.
+                struct Dribble<'a>(&'a [u8]);
+                impl std::io::Read for Dribble<'_> {
+                    fn read(&mut self, buf: &mut [u8]) -> std::io::Result<usize> {
+                        let n = buf.len().min(self.0.len()).min(7919);
+                        buf[..n].copy_from_slice(&self.0[..n]);
+                        self.0 = &self.0[n..];
+                        Ok(n)
+                    }
+                }
+                let (fb, _) = write_reader(&mut b, &secret, Dribble(&data), opts).unwrap();
+                assert_eq!(fa, fb, "{len} bytes");
+                assert_eq!(read_all(&b, &fb).unwrap(), data);
+            }
+        }
     }
 
 }

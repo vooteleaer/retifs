@@ -28,8 +28,6 @@ const XATTR_PREFIX: &str = "user.retifs.";
 const RESYNC: Duration = Duration::from_secs(30);
 /// `user.retifs.local`: computed, whether a file's content is on this device.
 const LOCAL_XATTR: &str = "local";
-/// Content kept in memory for reads, at most.
-const CACHE_BYTES: usize = 256 << 20;
 
 enum Entry {
     Dir,
@@ -39,8 +37,13 @@ enum Entry {
 
 struct Handle {
     path: String,
-    /// The whole content once read or written; written back on flush if dirty.
-    buf: Option<Vec<u8>>,
+    /// The daemon's write session once this handle writes (or truncates):
+    /// written ranges are spooled there, never held whole here.
+    session: Option<u64>,
+    /// The content's size as written so far (with a session).
+    size: u64,
+    /// Opened with O_TRUNC: the session starts from empty content.
+    truncate: bool,
     dirty: bool,
 }
 
@@ -55,7 +58,6 @@ pub struct RetifsFs {
     paths: Vec<String>,
     handles: HashMap<u64, Handle>,
     next_fh: u64,
-    content: HashMap<String, Vec<u8>>,
     queries: HashMap<String, (Instant, Vec<(String, String)>)>,
     uid: u32,
     gid: u32,
@@ -80,7 +82,6 @@ pub fn mount(store: &Path, ns: &str, mountpoint: &Path, wait: Duration) -> Resul
         paths: vec![String::new(), "/".to_string()],
         handles: HashMap::new(),
         next_fh: 1,
-        content: HashMap::new(),
         queries: HashMap::new(),
         uid: unsafe { libc::getuid() },
         gid: unsafe { libc::getgid() },
@@ -205,8 +206,8 @@ impl RetifsFs {
             return Some(match n {
                 Node::Dir { .. } => Entry::Dir,
                 Node::File { size, mtime_ms, .. } => {
-                    let open = self.handles.values().find(|h| h.path == path && h.buf.is_some());
-                    Entry::File { size: open.map_or(*size, |h| h.buf.as_ref().unwrap().len() as u64), mtime_ms: *mtime_ms }
+                    let open = self.handles.values().find(|h| h.path == path && h.session.is_some());
+                    Entry::File { size: open.map_or(*size, |h| h.size), mtime_ms: *mtime_ms }
                 }
             });
         }
@@ -266,19 +267,22 @@ impl RetifsFs {
         }
     }
 
-    /// A file's whole content (to change it), fetched if it isn't here yet.
-    fn read_content(&mut self, cap: Option<String>) -> Result<Vec<u8>, i32> {
-        let Some(cap) = cap else { return Ok(Vec::new()) };
-        if let Some(c) = self.content.get(&cap) {
-            return Ok(c.clone());
+    /// The handle's write session, started on first need: from the file's
+    /// current content, or empty if it was opened with O_TRUNC.
+    fn session(&mut self, fh: u64) -> Result<u64, i32> {
+        let h = self.handles.get(&fh).ok_or(libc::EBADF)?;
+        if let Some(s) = h.session {
+            return Ok(s);
         }
-        match self.call(Request::ReadRange { cap: cap.clone(), ns: Some(self.ns.clone()), offset: 0, len: u64::MAX, wait_ms: self.wait.as_millis() as u64 })? {
-            Response::Range { data } => {
-                if self.content.values().map(Vec::len).sum::<usize>() + data.len() > CACHE_BYTES {
-                    self.content.clear();
-                }
-                self.content.insert(cap, data.clone());
-                Ok(data)
+        let (path, truncate) = (h.path.clone(), h.truncate);
+        self.refresh(false);
+        let (id, _) = self.file_id(&path).ok_or(libc::ENOENT)?;
+        match self.call(Request::WriteBegin { ns: self.ns.clone(), id, truncate })? {
+            Response::Session { session, size } => {
+                let h = self.handles.get_mut(&fh).ok_or(libc::EBADF)?;
+                h.session = Some(session);
+                h.size = size;
+                Ok(session)
             }
             _ => Err(libc::EIO),
         }
@@ -300,17 +304,23 @@ impl RetifsFs {
         }
     }
 
-    /// Writes a handle's content back as the record's new content.
+    /// Commits a handle's writes as the record's new content (one version).
     fn write_back(&mut self, fh: u64) -> Result<(), i32> {
         let Some(h) = self.handles.get_mut(&fh) else { return Ok(()) };
         if !h.dirty {
             return Ok(());
         }
+        if h.session.is_none() {
+            // Opened with O_TRUNC and never written: commit the empty content.
+            self.session(fh)?;
+        }
+        let h = self.handles.get_mut(&fh).ok_or(libc::EBADF)?;
+        let session = h.session.take().ok_or(libc::EIO)?;
         h.dirty = false;
-        let (path, data) = (h.path.clone(), h.buf.clone().unwrap_or_default());
-        self.refresh(false);
-        let (id, _) = self.file_id(&path).ok_or(libc::ENOENT)?;
-        self.set(&id, vec![("mtime".into(), AttrValue::Int(now_ms()))], Vec::new(), Some(data))
+        h.truncate = false;
+        self.call(Request::WriteCommit { session, attrs: vec![("mtime".into(), AttrValue::Int(now_ms()))] })?;
+        self.refresh(true);
+        Ok(())
     }
 
     fn writable_path(&self, path: &str) -> Result<(), i32> {
@@ -400,17 +410,23 @@ impl Filesystem for RetifsFs {
         let truncate = flags & libc::O_TRUNC != 0 && flags & libc::O_ACCMODE != libc::O_RDONLY;
         let fh = self.next_fh;
         self.next_fh += 1;
-        self.handles.insert(fh, Handle { path, buf: truncate.then(Vec::new), dirty: truncate });
+        self.handles.insert(fh, Handle { path, session: None, size: 0, truncate, dirty: truncate });
+        if truncate && let Err(e) = self.session(fh) {
+            self.handles.remove(&fh);
+            return reply.error(e);
+        }
         reply.opened(fh, 0)
     }
 
     fn read(&mut self, _req: &Req, _ino: u64, fh: u64, offset: i64, size: u32, _flags: i32, _lock: Option<u64>, reply: ReplyData) {
         let Some(h) = self.handles.get(&fh) else { return reply.error(libc::EBADF) };
-        if let Some(b) = &h.buf {
-            // Being written: the buffer is the content.
-            let start = (offset as usize).min(b.len());
-            let end = (start + size as usize).min(b.len());
-            return reply.data(&b[start..end]);
+        if let Some(session) = h.session {
+            // Being written: the content as it would be committed now.
+            return match self.call(Request::WriteRead { session, offset: offset.max(0) as u64, len: size as u64 }) {
+                Ok(Response::Range { data }) => reply.data(&data),
+                Ok(_) => reply.error(libc::EIO),
+                Err(e) => reply.error(e),
+            };
         }
         // Only the range asked for, fetched if it isn't here (a 1 GB file read
         // for its header costs about one chunk).
@@ -424,22 +440,17 @@ impl Filesystem for RetifsFs {
 
     #[allow(clippy::too_many_arguments)]
     fn write(&mut self, _req: &Req, _ino: u64, fh: u64, offset: i64, data: &[u8], _wf: u32, _flags: i32, _lock: Option<u64>, reply: ReplyWrite) {
-        let Some(h) = self.handles.get(&fh) else { return reply.error(libc::EBADF) };
-        if h.buf.is_none() {
-            let path = h.path.clone();
-            let cap = self.file_id(&path).and_then(|(_, c)| c);
-            match self.read_content(cap) {
-                Ok(d) => self.handles.get_mut(&fh).unwrap().buf = Some(d),
-                Err(e) => return reply.error(e),
-            }
+        // Straight to the daemon's spool: nothing of the file is kept here.
+        let session = match self.session(fh) {
+            Ok(s) => s,
+            Err(e) => return reply.error(e),
+        };
+        let offset = offset.max(0) as u64;
+        if let Err(e) = self.call(Request::WriteAt { session, offset, data: data.to_vec() }) {
+            return reply.error(e);
         }
         let h = self.handles.get_mut(&fh).unwrap();
-        let buf = h.buf.as_mut().unwrap();
-        let end = offset as usize + data.len();
-        if buf.len() < end {
-            buf.resize(end, 0);
-        }
-        buf[offset as usize..end].copy_from_slice(data);
+        h.size = h.size.max(offset + data.len() as u64);
         h.dirty = true;
         reply.written(data.len() as u32)
     }
@@ -453,7 +464,9 @@ impl Filesystem for RetifsFs {
 
     fn release(&mut self, _req: &Req, _ino: u64, fh: u64, _flags: i32, _lock: Option<u64>, _flush: bool, reply: ReplyEmpty) {
         let r = self.write_back(fh);
-        self.handles.remove(&fh);
+        if let Some(Handle { session: Some(session), .. }) = self.handles.remove(&fh) {
+            let _ = self.call(Request::WriteAbort { session });
+        }
         match r {
             Ok(()) => reply.ok(),
             Err(e) => reply.error(e),
@@ -489,31 +502,31 @@ impl Filesystem for RetifsFs {
         let Some(path) = self.path(ino) else { return reply.error(libc::ENOENT) };
         self.refresh(false);
         if let Some(size) = size {
-            let Some((id, cap)) = self.file_id(&path) else { return reply.error(libc::EISDIR) };
-            let open = fh.filter(|f| self.handles.contains_key(f));
-            match open {
-                Some(f) => {
-                    if self.handles[&f].buf.is_none() {
-                        match self.read_content(cap) {
-                            Ok(d) => self.handles.get_mut(&f).unwrap().buf = Some(d),
-                            Err(e) => return reply.error(e),
-                        }
-                    }
-                    let h = self.handles.get_mut(&f).unwrap();
-                    h.buf.as_mut().unwrap().resize(size as usize, 0);
-                    h.dirty = true;
-                }
+            if self.file_id(&path).is_none() {
+                return reply.error(libc::EISDIR);
+            }
+            // On the open file's session, or (truncate without an open file) a
+            // session of its own, committed at once as a new version.
+            let (f, own) = match fh.filter(|f| self.handles.contains_key(f)) {
+                Some(f) => (f, false),
                 None => {
-                    // A truncate without an open file: a new version now.
-                    let mut data = match self.read_content(cap) {
-                        Ok(d) => d,
-                        Err(e) => return reply.error(e),
-                    };
-                    data.resize(size as usize, 0);
-                    if let Err(e) = self.set(&id, vec![("mtime".into(), AttrValue::Int(now_ms()))], Vec::new(), Some(data)) {
-                        return reply.error(e);
-                    }
+                    let f = self.next_fh;
+                    self.next_fh += 1;
+                    self.handles.insert(f, Handle { path: path.clone(), session: None, size: 0, truncate: false, dirty: false });
+                    (f, true)
                 }
+            };
+            let result = self.session(f).and_then(|session| self.call(Request::WriteTruncate { session, size }).map(|_| ()));
+            if let Some(h) = self.handles.get_mut(&f) {
+                h.size = size;
+                h.dirty = true;
+            }
+            let result = if own { result.and_then(|()| self.write_back(f)) } else { result };
+            if own {
+                self.handles.remove(&f);
+            }
+            if let Err(e) = result {
+                return reply.error(e);
             }
         } else if let Some(t) = mtime
             && let Some((id, _)) = self.file_id(&path)
@@ -547,7 +560,7 @@ impl Filesystem for RetifsFs {
         }
         let fh = self.next_fh;
         self.next_fh += 1;
-        self.handles.insert(fh, Handle { path: path.clone(), buf: Some(Vec::new()), dirty: false });
+        self.handles.insert(fh, Handle { path: path.clone(), session: None, size: 0, truncate: false, dirty: false });
         match self.entry(&path) {
             Some(e) => {
                 let a = self.attr(&path, &e);
@@ -632,15 +645,16 @@ impl Filesystem for RetifsFs {
             let Some(Node::File { id: source, cap, .. }) = self.tree.get(&from).cloned() else {
                 return reply.error(libc::ENOTDIR);
             };
-            let data = match self.read_content(cap) {
-                Ok(d) => d,
-                Err(e) => return reply.error(e),
-            };
             let mtime = self.records.get(&source).and_then(|r| r.attrs.iter().find(|(k, _)| k == "mtime")).map(|(_, v)| v.clone());
             let attrs = vec![("mtime".into(), mtime.unwrap_or(AttrValue::Int(now_ms())))];
-            // One commit: the target takes the content, the temporary record goes.
+            // One commit: the target takes the content (by reference, nothing
+            // copied), the temporary record goes.
+            let (data, blocks) = match cap {
+                Some(cap) => (None, Some(vec![cap])),
+                None => (Some(Vec::new()), None),
+            };
             let steps = vec![
-                TxStep::Set { id: target, attrs, unset: Vec::new(), data: Some(data) },
+                TxStep::Set { id: target, attrs, unset: Vec::new(), data, blocks },
                 TxStep::Delete { id: source },
             ];
             if let Err(e) = self.call(Request::Transaction { ns: self.ns.clone(), steps }) {
@@ -669,6 +683,7 @@ impl Filesystem for RetifsFs {
                 attrs: vec![("path".into(), AttrValue::Str(format!("{to}{}", &p[from.len()..])))],
                 unset: Vec::new(),
                 data: None,
+                blocks: None,
             })
             .collect();
         if !steps.is_empty()

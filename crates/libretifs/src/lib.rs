@@ -135,6 +135,25 @@ pub enum Request {
     /// count from the previous answer (0 at first: answers at once). The
     /// answer is the current count; equal to `since` means nothing changed.
     Watch { ns: String, since: u64, timeout_ms: u64 },
+    /// Starts writing record `id`'s content in place, without sending it whole:
+    /// a write session (`WriteAt`, `WriteRead`, `WriteTruncate`, then
+    /// `WriteCommit` or `WriteAbort`). The daemon spools written ranges to
+    /// disk; unwritten ranges keep the record's current content (or none, with
+    /// `truncate`). Answers with the session and the content's current size.
+    WriteBegin { ns: String, id: String, truncate: bool },
+    WriteAt {
+        session: u64,
+        offset: u64,
+        #[serde(with = "serde_bytes")]
+        data: Vec<u8>,
+    },
+    /// Reads the session's content as it would be committed now.
+    WriteRead { session: u64, offset: u64, len: u64 },
+    WriteTruncate { session: u64, size: u64 },
+    /// Stores the new content (streamed, never whole in memory) and commits
+    /// it with `attrs` as one version.
+    WriteCommit { session: u64, attrs: Vec<(String, AttrValue)> },
+    WriteAbort { session: u64 },
     /// Several changes as one commit (one version): other members see all of
     /// them or none. Returns the created and changed records, in step order.
     Transaction { ns: String, steps: Vec<TxStep> },
@@ -218,6 +237,10 @@ pub enum TxStep {
         unset: Vec<String>,
         #[serde(default, with = "serde_bytes")]
         data: Option<Vec<u8>>,
+        /// New content by reference (read capabilities of files already
+        /// stored), instead of `data`: e.g. another record's content.
+        #[serde(default)]
+        blocks: Option<Vec<String>>,
     },
     Delete {
         id: String,
@@ -312,6 +335,11 @@ pub enum Response {
         /// The namespace's change count on this node.
         count: u64,
     },
+    Session {
+        session: u64,
+        size: u64,
+    },
+    Done,
     Verified {
         ok: bool,
         detail: String,

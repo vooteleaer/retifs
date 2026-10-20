@@ -8,7 +8,9 @@
 //! (vs 49 % with an unaligned 4/16/60 KiB chunker), and chunk sizes reveal
 //! nothing about the content.
 
-use fastcdc::v2020::FastCDC;
+use std::io::Read;
+
+use fastcdc::v2020::{FastCDC, StreamCDC};
 
 use crate::chunk::{class_for, FRAME_HEADER, OVERHEAD};
 
@@ -25,4 +27,10 @@ pub fn split(data: &[u8]) -> impl Iterator<Item = &[u8]> {
     debug_assert_eq!(class_for(MAX_SIZE as usize), Some(TARGET_CLASS));
     debug_assert_eq!(class_for(MIN_SIZE as usize), Some(TARGET_CLASS));
     FastCDC::new(data, MIN_SIZE, AVG_SIZE, MAX_SIZE).map(move |c| &data[c.offset..c.offset + c.length])
+}
+
+/// The same pieces as [`split`], read from a stream: never more than one
+/// piece in memory.
+pub fn split_reader<R: Read>(source: R) -> impl Iterator<Item = std::io::Result<Vec<u8>>> {
+    StreamCDC::new(source, MIN_SIZE, AVG_SIZE, MAX_SIZE).map(|c| c.map(|c| c.data).map_err(|e| std::io::Error::other(e.to_string())))
 }
