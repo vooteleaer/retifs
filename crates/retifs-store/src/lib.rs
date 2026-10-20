@@ -30,6 +30,7 @@ use std::{
     time::{Duration, Instant, SystemTime, UNIX_EPOCH},
 };
 
+mod apps;
 mod channels;
 mod db;
 mod leases;
@@ -37,6 +38,7 @@ mod namespaces;
 mod placement;
 mod wants;
 pub use leases::{Accept, BlindWants, HeldLease, OwnLease, ProofState, LEASE_CHUNK_ESTIMATE};
+pub use apps::App;
 pub use channels::{Follow, OwnChannel};
 pub use db::{parse_value, Term};
 pub use namespaces::WriterHead;
@@ -238,6 +240,7 @@ impl SlabStore {
         channels::open_tables(&w)?;
         db::open_tables(&w)?;
         namespaces::open_tables(&w)?;
+        apps::open_tables(&w)?;
         w.commit()?;
         Ok(SlabStore {
             root,

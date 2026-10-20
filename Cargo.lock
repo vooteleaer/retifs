@@ -1146,6 +1146,7 @@ dependencies = [
  "retifs-core",
  "retifs-net",
  "retifs-store",
+ "sha2 0.10.9",
  "tokio",
 ]
 

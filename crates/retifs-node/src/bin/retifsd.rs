@@ -39,7 +39,7 @@ use std::{
 };
 
 use libretifs::{
-    read_frame, write_frame, AttrValue, ChannelInfo, Envelope, FollowInfo, GetStats, HistoryEntry, NsView, RecordView,
+    read_frame, write_frame, AppInfo, AttrValue, ChannelInfo, Envelope, FollowInfo, GetStats, HistoryEntry, NsView, RecordView,
     Request, Response, Status, TxStep,
     PROTOCOL_VERSION,
 };
@@ -795,7 +795,8 @@ async fn serve(store: Arc<SlabStore>, identity: node::IdentitySecret, endpoint: 
     }
 
     let daemon_for_nn = daemon.clone();
-    tokio::spawn(local_api(endpoint, daemon.clone()));
+    tokio::spawn(local_api(endpoint, daemon.clone(), false));
+    tokio::spawn(local_api(libretifs::app_endpoint(&args.store), daemon.clone(), true));
     tokio::spawn(lease_puller(daemon.clone(), shared.clone()));
     tokio::spawn(lease_upkeep(daemon.clone()));
     tokio::spawn(follower(daemon.clone()));
@@ -877,7 +878,7 @@ async fn serve(store: Arc<SlabStore>, identity: node::IdentitySecret, endpoint: 
 }
 
 #[cfg(not(windows))]
-async fn local_api(endpoint: String, daemon: Arc<Daemon>) {
+async fn local_api(endpoint: String, daemon: Arc<Daemon>, apps: bool) {
     use std::os::unix::fs::PermissionsExt;
     let _ = std::fs::remove_file(&endpoint); // stale socket from a previous run
     let listener = tokio::net::UnixListener::bind(&endpoint).unwrap_or_else(|e| panic!("bind {endpoint}: {e}"));
@@ -885,7 +886,16 @@ async fn local_api(endpoint: String, daemon: Arc<Daemon>) {
     loop {
         match listener.accept().await {
             Ok((stream, _)) => {
-                tokio::spawn(connection(stream, daemon.clone()));
+                // On the app socket: which program connected (its token is pinned to it).
+                let exe = apps.then(|| {
+                    stream
+                        .peer_cred()
+                        .ok()
+                        .and_then(|c| c.pid())
+                        .and_then(|pid| std::fs::read_link(format!("/proc/{pid}/exe")).ok())
+                        .map(|p| p.to_string_lossy().into_owned())
+                });
+                tokio::spawn(connection(stream, daemon.clone(), exe));
             }
             Err(e) => eprintln!("local API accept: {e}"),
         }
@@ -893,7 +903,7 @@ async fn local_api(endpoint: String, daemon: Arc<Daemon>) {
 }
 
 #[cfg(windows)]
-async fn local_api(endpoint: String, daemon: Arc<Daemon>) {
+async fn local_api(endpoint: String, daemon: Arc<Daemon>, apps: bool) {
     use tokio::net::windows::named_pipe::ServerOptions;
     // first_pipe_instance: fail if another daemon already owns this store's pipe.
     let mut server = ServerOptions::new()
@@ -907,11 +917,22 @@ async fn local_api(endpoint: String, daemon: Arc<Daemon>) {
         }
         let connected = server;
         server = ServerOptions::new().create(&endpoint).expect("next pipe instance");
-        tokio::spawn(connection(connected, daemon.clone()));
+        tokio::spawn(connection(connected, daemon.clone(), apps.then_some(None)));
     }
 }
 
-async fn connection(mut stream: impl AsyncRead + AsyncWrite + Unpin, daemon: Arc<Daemon>) {
+/// What an application may do on the app socket (ADR-0004).
+struct AppScope {
+    name: String,
+    namespaces: Vec<String>,
+    write: bool,
+}
+
+/// A local API connection. `app`: `None` for the owner's socket (everything
+/// allowed); `Some(exe)` for the app socket, where the first message must be
+/// `Hello` with a token, and every request is checked against its scope.
+async fn connection(mut stream: impl AsyncRead + AsyncWrite + Unpin, daemon: Arc<Daemon>, app: Option<Option<String>>) {
+    let mut scope: Option<AppScope> = None;
     loop {
         let req: Envelope<Request> = match read_frame(&mut stream).await {
             Ok(Some(req)) => req,
@@ -921,7 +942,33 @@ async fn connection(mut stream: impl AsyncRead + AsyncWrite + Unpin, daemon: Arc
                 return;
             }
         };
-        let msg = handle(&daemon, req.msg).await.unwrap_or_else(|message| Response::Error { message });
+        let msg = match (&app, &scope) {
+            (None, _) => handle(&daemon, req.msg).await.unwrap_or_else(|message| Response::Error { message }),
+            (Some(exe), None) => match hello(&daemon, req.msg, exe.as_deref()) {
+                Ok(s) => {
+                    scope = Some(s);
+                    Response::Done
+                }
+                Err(message) => {
+                    let _ = write_frame(&mut stream, &Envelope { v: PROTOCOL_VERSION, id: req.id, msg: Response::Error { message } }).await;
+                    return; // no second try on one connection
+                }
+            },
+            (Some(_), Some(s)) => match authorize(&daemon, s, &req.msg) {
+                Ok(()) => {
+                    let names_only = matches!(req.msg, Request::Namespaces);
+                    match handle(&daemon, req.msg).await {
+                        // An app sees only its own namespaces.
+                        Ok(Response::Names { names }) if names_only => {
+                            Response::Names { names: names.into_iter().filter(|n| s.namespaces.contains(n)).collect() }
+                        }
+                        Ok(r) => r,
+                        Err(message) => Response::Error { message },
+                    }
+                }
+                Err(message) => Response::Error { message },
+            },
+        };
         if let Err(e) = write_frame(&mut stream, &Envelope { v: PROTOCOL_VERSION, id: req.id, msg }).await {
             eprintln!("local API write: {e}");
             return;
@@ -929,8 +976,99 @@ async fn connection(mut stream: impl AsyncRead + AsyncWrite + Unpin, daemon: Arc
     }
 }
 
+/// Checks an app's token (the first message on the app socket). On Linux a
+/// token is pinned to the executable that first uses it; another program
+/// presenting it later is refused.
+fn hello(d: &Daemon, req: Request, exe: Option<&str>) -> Result<AppScope, String> {
+    let Request::Hello { token } = req else { return Err("the app socket needs Hello with a token first".into()) };
+    let hash: [u8; 32] = <sha2::Sha256 as sha2::Digest>::digest(token.as_bytes()).into();
+    let mut app = d
+        .store
+        .apps()
+        .map_err(|e| e.to_string())?
+        .into_iter()
+        .find(|a| a.token_hash == hash)
+        .ok_or("unknown app token")?;
+    match (&app.exe, exe) {
+        (Some(pinned), Some(now)) if pinned != now => {
+            return Err(format!("this token belongs to {pinned}, not {now}"));
+        }
+        (None, Some(now)) => {
+            app.exe = Some(now.to_string());
+            d.store.put_app(&app).map_err(|e| e.to_string())?;
+        }
+        _ => {}
+    }
+    Ok(AppScope { name: app.name, namespaces: app.namespaces, write: app.write })
+}
+
+/// Whether an app may make this request: reads in its namespaces, writes
+/// there if it may write, nothing else (no grants, keys, files or placement).
+fn authorize(d: &Daemon, s: &AppScope, req: &Request) -> Result<(), String> {
+    let deny = |what: &str| Err(format!("app {} may not {what}", s.name));
+    let ns_ok = |ns: &str| s.namespaces.iter().any(|n| n == ns);
+    let read = |ns: &str| if ns_ok(ns) { Ok(()) } else { deny(&format!("use namespace {ns}")) };
+    let write = |ns: &str| {
+        if !s.write {
+            deny("write")
+        } else {
+            read(ns)
+        }
+    };
+    let session_ns = |session: u64| d.sessions.lock().unwrap().get(&session).map(|x| x.ns.clone());
+    match req {
+        Request::Ping | Request::Namespaces => Ok(()),
+        Request::RecordGet { ns, .. } | Request::Query { ns, .. } | Request::RecordHistory { ns, .. } | Request::NsInfo { ns } | Request::Watch { ns, .. } => read(ns),
+        Request::ReadRange { ns: Some(ns), .. } => read(ns),
+        Request::RecordCreate { ns, .. } | Request::RecordSet { ns, .. } | Request::RecordDelete { ns, .. } | Request::Transaction { ns, .. } | Request::WriteBegin { ns, .. } => write(ns),
+        Request::WriteAt { session, .. }
+        | Request::WriteRead { session, .. }
+        | Request::WriteTruncate { session, .. }
+        | Request::WriteCommit { session, .. }
+        | Request::WriteAbort { session } => match session_ns(*session) {
+            Some(ns) => write(&ns),
+            None => Err("no such write session".into()),
+        },
+        _ => deny("make this request"),
+    }
+}
+
 async fn handle(d: &Daemon, req: Request) -> Result<Response, String> {
     match req {
+        Request::Hello { .. } => Ok(Response::Done), // the owner needs no token
+
+        Request::AppAdd { name, namespaces, write } => {
+            if name.is_empty() || namespaces.is_empty() {
+                return Err("an app needs a name and at least one namespace".into());
+            }
+            let mut raw = [0u8; 32];
+            getrandom::fill(&mut raw).expect("OS entropy");
+            let token = format!("rta_{}", hex(&raw));
+            let token_hash: [u8; 32] = <sha2::Sha256 as sha2::Digest>::digest(token.as_bytes()).into();
+            d.store
+                .put_app(&retifs_store::App { name, token_hash, namespaces, write, exe: None })
+                .map_err(|e| e.to_string())?;
+            Ok(Response::AppToken { token })
+        }
+
+        Request::AppList => Ok(Response::Apps {
+            apps: d
+                .store
+                .apps()
+                .map_err(|e| e.to_string())?
+                .into_iter()
+                .map(|a| AppInfo { name: a.name, namespaces: a.namespaces, write: a.write, exe: a.exe })
+                .collect(),
+        }),
+
+        Request::AppRemove { name } => {
+            if d.store.remove_app(&name).map_err(|e| e.to_string())? {
+                Ok(Response::Done)
+            } else {
+                Err(format!("no app {name}"))
+            }
+        }
+
         Request::Ping => {
             let u = d.store.usage().map_err(|e| e.to_string())?;
             let l = d.store.limits().map_err(|e| e.to_string())?;

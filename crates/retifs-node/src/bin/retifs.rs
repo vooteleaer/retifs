@@ -55,6 +55,8 @@ fn usage() -> ! {
          retifs [--store DIR] get READ-CAP [--from NODE]... [-o OUT] [--links N] [--batch N]\n\
          retifs [--store DIR] status READ-CAP\n\
          retifs [--store DIR] read READ-CAP [--offset N] [--len N] [--ns NS] [--wait SECONDS]\n\
+         retifs [--store DIR] app add NAME --ns NS[,NS] [--write] | app list | app remove NAME\n\
+         retifs [--store DIR] --app TOKEN ...   (as an application: only what its token allows)\n\
          retifs [--store DIR] want READ-CAP [--from NODE]...
          retifs [--store DIR] replicate READ-CAP --to NODE...\n\
          retifs [--store DIR] forget READ-CAP\n\
@@ -82,10 +84,20 @@ async fn main() {
         store = args.get(i + 1).cloned().unwrap_or_else(|| usage()).into();
         args.drain(i..=i + 1);
     }
+    // As an application (the app socket, limited to what the token allows).
+    let mut app_token = None;
+    if let Some(i) = args.iter().position(|a| a == "--app") {
+        app_token = Some(args.get(i + 1).cloned().unwrap_or_else(|| usage()));
+        args.drain(i..=i + 1);
+    }
     let mut it = args.into_iter();
     let command = it.next().unwrap_or_else(|| usage());
 
-    let mut client = Client::connect(&store).await.unwrap_or_else(|e| fail(e));
+    let mut client = match &app_token {
+        Some(token) => Client::connect_app(&store, token).await,
+        None => Client::connect(&store).await,
+    }
+    .unwrap_or_else(|e| fail(e));
     match command.as_str() {
         "ping" => {
             let (node, chunks, usage) = client.ping().await.unwrap_or_else(|e| fail(e));
@@ -331,6 +343,44 @@ async fn main() {
                         std::process::exit(1);
                     }
                 }
+                libretifs::Response::Error { message } => fail(message),
+                _ => fail("unexpected response"),
+            }
+        }
+        "app" => {
+            let sub = it.next().unwrap_or_else(|| usage());
+            let rest: Vec<String> = it.collect();
+            let req = match sub.as_str() {
+                "add" => libretifs::Request::AppAdd {
+                    name: rest.first().cloned().unwrap_or_else(|| usage()),
+                    namespaces: rest
+                        .windows(2)
+                        .find(|w| w[0] == "--ns")
+                        .map(|w| w[1].split(',').map(|n| n.trim().to_string()).filter(|n| !n.is_empty()).collect())
+                        .unwrap_or_else(|| usage()),
+                    write: rest.iter().any(|a| a == "--write"),
+                },
+                "list" => libretifs::Request::AppList,
+                "remove" => libretifs::Request::AppRemove { name: rest.first().cloned().unwrap_or_else(|| usage()) },
+                _ => usage(),
+            };
+            match client.call(req).await.unwrap_or_else(|e| fail(e)) {
+                libretifs::Response::AppToken { token } => {
+                    println!("{token}");
+                    eprintln!("(shown once: give it to the app; it connects with this token on the app socket)");
+                }
+                libretifs::Response::Apps { apps } => {
+                    for a in apps {
+                        println!(
+                            "{}  {}  {}{}",
+                            a.name,
+                            if a.write { "read+write" } else { "read" },
+                            a.namespaces.join(","),
+                            a.exe.map(|e| format!("  pinned to {e}")).unwrap_or_default()
+                        );
+                    }
+                }
+                libretifs::Response::Done => println!("removed"),
                 libretifs::Response::Error { message } => fail(message),
                 _ => fail("unexpected response"),
             }

@@ -35,6 +35,15 @@ pub struct Envelope<T> {
 pub enum Request {
     /// Daemon identity and store size.
     Ping,
+    /// The first message on the app socket: the app's token. Its requests are
+    /// then limited to what the token allows (ADR-0004).
+    Hello { token: String },
+    /// Owner only: lets an application use the app socket with a new token
+    /// (answered once, never stored), limited to `namespaces`, read-only
+    /// unless `write`.
+    AppAdd { name: String, namespaces: Vec<String>, write: bool },
+    AppList,
+    AppRemove { name: String },
     /// Chunk, encrypt and pin `data`; returns its read-cap.
     Put {
         #[serde(with = "serde_bytes")]
@@ -236,6 +245,16 @@ impl std::fmt::Display for AttrValue {
     }
 }
 
+/// An application allowed on the app socket.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct AppInfo {
+    pub name: String,
+    pub namespaces: Vec<String>,
+    pub write: bool,
+    /// The executable its token is pinned to (Linux), once used.
+    pub exe: Option<String>,
+}
+
 /// One step of a [`Request::Transaction`].
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(tag = "step", rename_all = "snake_case")]
@@ -357,6 +376,12 @@ pub enum Response {
         names: Vec<String>,
     },
     Done,
+    AppToken {
+        token: String,
+    },
+    Apps {
+        apps: Vec<AppInfo>,
+    },
     Verified {
         ok: bool,
         detail: String,
@@ -474,6 +499,19 @@ pub fn default_store_dir() -> PathBuf {
 }
 
 /// The local endpoint for the daemon owning `store`.
+/// The app socket: applications connect here with a token (`Hello`) and get
+/// only what it allows (ADR-0004). The owner's endpoint is [`endpoint`].
+pub fn app_endpoint(store: &Path) -> String {
+    #[cfg(windows)]
+    {
+        endpoint(store).replace(r"\\.\pipe\retifs-", r"\\.\pipe\retifs-apps-")
+    }
+    #[cfg(not(windows))]
+    {
+        store.join("apps.sock").to_string_lossy().into_owned()
+    }
+}
+
 pub fn endpoint(store: &Path) -> String {
     #[cfg(windows)]
     {
@@ -559,6 +597,23 @@ impl Client {
         let stream = tokio::net::UnixStream::connect(&at).await;
         let stream = stream.map_err(|e| ClientError::NotRunning(at, e))?;
         Ok(Client { stream, next_id: 1 })
+    }
+
+    /// Connects to the app socket as an application with `token`: requests
+    /// are limited to what the token allows.
+    pub async fn connect_app(store: &Path, token: &str) -> Result<Self, ClientError> {
+        let at = app_endpoint(store);
+        #[cfg(windows)]
+        let stream = tokio::net::windows::named_pipe::ClientOptions::new().open(&at);
+        #[cfg(not(windows))]
+        let stream = tokio::net::UnixStream::connect(&at).await;
+        let stream = stream.map_err(|e| ClientError::NotRunning(at, e))?;
+        let mut client = Client { stream, next_id: 1 };
+        match client.call(Request::Hello { token: token.to_string() }).await? {
+            Response::Done => Ok(client),
+            Response::Error { message } => Err(ClientError::Daemon(message)),
+            _ => Err(ClientError::Daemon("unexpected answer to Hello".into())),
+        }
     }
 
     pub async fn call(&mut self, msg: Request) -> Result<Response, ClientError> {

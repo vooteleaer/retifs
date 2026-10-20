@@ -68,7 +68,8 @@ Prototypes are throwaway. They're for learning, not for locking in the format. T
 ## Phase 3: identity and permissions
 - [ ] Capability chains, group namespaces, filtered share namespaces, validate-on-read, key rotation on removal.
 - [ ] YubiKey-backed Prns `IdentitySigner` (upstream: fallible `sign()`, X25519 exchange through a trait).
-- [ ] Session capabilities; per-app capabilities on the local socket.
+- [x] Per-app capabilities on the local socket: an app socket with tokens scoped to namespaces and read/write, pinned to the executable on Linux ([ADR-0004](adr/0004-native-record-api.md)).
+- [ ] Session capabilities; app scopes as capability chains (record filters, keys).
 
 ## Phase 4: Linux client
 - [x] Linux: FUSE frontend on `libretifs`: `retifs-mount` (POSIX view of a namespace, `user.retifs.*` xattrs, `.query/` dirs, saves keep the record) ([ADR-0002](adr/0002-os-integration.md)).

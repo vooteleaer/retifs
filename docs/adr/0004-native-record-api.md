@@ -63,3 +63,23 @@ The first slice exists: `crates/libretifs` (client, no Reticulum dependency) and
   - The second daemon fetched it from the first over Reticulum in 2.5 s (4 links, cache writes not fsynced); afterwards `status` showed it complete, and a repeat `get` was fully local.
   - A second daemon on the same store is refused.
 
+## Per-app capabilities (2026-10-20)
+- **Two sockets.** The owner's (`retifs.sock`, or a named pipe on Windows) has full access, for the CLI, the mount and the gateway. The app socket (`apps.sock`, or a `retifs-apps-…` pipe) accepts a connection only if its first message is `Hello { token }`. Both are private to the user (0600). A sandbox is given only the app socket.
+- **Tokens:**
+  - `retifs app add NAME --ns photos[,notes] [--write]` prints a token once; the store keeps only its SHA-256.
+  - `retifs app list` shows each app's scope and pinned executable.
+  - `retifs app remove NAME` revokes the token at once.
+- **Scope:**
+  - Reads (get, query, history, info, watch, range reads naming the namespace) in the app's namespaces.
+  - Writes (record changes, transactions, write sessions, each session tied to its namespace) there, if it may write.
+  - Nothing else: no grants or revokes, keys, loose files, placement, channels or app management. The namespace list shows only the app's own namespaces.
+- **Bound to a program (Linux):** the first use pins a token to the connecting process's executable (`SO_PEERCRED` → `/proc/<pid>/exe`). Another program presenting it is refused, so a leaked token isn't enough on its own.
+- **Live:**
+  - Windows: a read-only token read its namespace, and was refused another namespace and writing. A read-write token wrote its namespace, and was refused another, grants, loose files and adding apps. An unknown token and a removed one were refused.
+  - Linux: an identical copy of the CLI at another path was refused with the original's token, while the original still worked.
+- **Not yet:**
+  - narrower app scopes (record filters, keys) as capability chains, the same as between people;
+  - Flatpak/portal identity;
+  - fd passing for bulk data;
+  - remote use over a Link.
+

@@ -23,6 +23,7 @@ personal-rns = { version = "=0.3.7", features = ["tokio-host", "tcp", "shared-in
 retifs-core = { path = "../retifs-core" }
 retifs-net = { path = "../retifs-net" }
 retifs-store = { path = "../retifs-store" }
+sha2 = "0.10"
 tokio = { version = "1", features = ["full"] }
 
 [target.'cfg(unix)'.dependencies]
