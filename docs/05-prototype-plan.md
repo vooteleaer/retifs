@@ -65,7 +65,8 @@ Prototypes are throwaway. They're for learning, not for locking in the format. T
 - [ ] Multi-writer, open: grants filtered by record content, pruning tombstones.
 - [x] `keep:<device>` tag and query-based keep rules (proactive pull), keep mode per namespace, `user.retifs.local` ([ADR-0005](adr/0005-local-store-offline.md)).
 - [x] Remote queries to own nodes over a Link, full query language: `--via NODE`, devices admitted with app-style scopes ([ADR-0019](adr/0019-remote-query-and-blind-index.md)).
-- [ ] Blind index for search nodes without the read key: declared keys, exact match, vectors against RNS ([ADR-0019](adr/0019-remote-query-and-blind-index.md)); remote live query.
+- [x] Blind index for search nodes without the read key: declared keys, exact match, index channel derived from the read key, `/retifs/query` with proof, `query --search NODE`; vectors verified against RNS ([ADR-0019](adr/0019-remote-query-and-blind-index.md)).
+- [ ] Search, continued: resolving matches from the checkpoint state (members without state), one builder per index channel, remote live query.
 - [x] Per-writer commit chains (one commit per modification), merge, history queries, per-record `versions` ([ADR-0017](adr/0017-multi-writer-namespaces.md)).
 
 ## Phase 3: identity and permissions

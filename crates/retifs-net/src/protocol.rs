@@ -62,6 +62,12 @@ pub const HEAD_ENDPOINT: &str = "/retifs/head";
 /// requester identifies, and the body and answer are a msgpack
 /// `libretifs::Request` and `Response`.
 pub const API_ENDPOINT: &str = "/retifs/api";
+/// Blind index search (ADR-0019): `index channel ns_id (16) ‖ proof (32) ‖
+/// token (16)*`; the answer is empty unless this node holds that index and
+/// the proof of its search secret is good for this link.
+pub const QUERY_ENDPOINT: &str = "/retifs/query";
+/// At most this many tokens per query.
+pub const MAX_QUERY_TOKENS: usize = 16;
 /// 16 chunks of up to 16 KiB: one resource of about 256 KiB.
 pub const MAX_PUT: usize = 16;
 

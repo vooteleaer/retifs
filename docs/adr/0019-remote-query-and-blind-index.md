@@ -84,7 +84,15 @@ A search node, beyond what a holder sees:
 
 **Layer 2, the blind index (core):** `retifs_core::index` derives the keys, computes tokens and entries, builds the index tree and looks tokens up. The Prolly tree takes keys of any fixed length now (state trees keep 16-byte keys; their vectors are byte-identical). A list value is indexed per element. Vectors cover tokens over every value type, a 401-record namespace (416 tree keys, 17 nodes) and lookups.
 
-**Not yet:** building the index at checkpoints, the index channel, search capabilities and `/retifs/query`; remote live queries beyond `Watch`; a cross-machine measurement over slow links.
+**Layer 2 in the daemon:**
+- A namespace declares searchable keys with a record `type=retifs.index keys=album[,…]`. Nothing is indexed until then.
+- Whenever a node's checkpoint changes (and on `retifs ns search NS`, which also prints the capability), it builds the index of the declared keys and publishes a descriptor on the namespace's index channel. The index nodes are pinned and served like any own chunk.
+- A search node is given the capability (the index channel's address) and follows it like any channel (`retifs follow CAPABILITY --from NODE`). It fetches the index tree the latest descriptor names and serves it on.
+- `/retifs/query` takes `index channel ns_id ‖ proof ‖ tokens` and answers the entries per token, the descriptor's time and its sealed checkpoint reference. A node that holds no such index, or gets a bad proof, gives the same empty answer.
+- `retifs query NS KEY=VALUE… --search NODE`: the member sends tokens for the terms on declared keys (all `=` terms if it holds no settings), opens and intersects the entries, then checks every term, the others included, on the records it holds. Matches it doesn't hold are listed by ID.
+- Live, three daemons on one machine (60 records, `album` declared): the member found the 6 matching records through the search node in 19–36 ms. Results were exact-match only. A node without the capability, and a query for another namespace, got "no index here". The search node held no records of the namespace, and its logs named no album or title.
+
+**Not yet:** fetching unresolved matches' records from the state the descriptor names (a member that holds no state; tied to fetching part of a namespace, ADR-0018); several builders publishing to one index channel (their sequence numbers can collide); releasing index nodes of replaced versions on the search node; remote live queries beyond `Watch`; a cross-machine measurement over slow links.
 
 ## Consequences
 - Easier: a phone or LoRa node can query a namespace it doesn't hold; search can be delegated to always-on nodes without giving them the read key.

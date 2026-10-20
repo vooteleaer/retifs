@@ -45,7 +45,8 @@ use libretifs::{
 };
 use personal_rns::prelude::*;
 use retifs_core::{
-    channel::{key_id, ChannelAddr, ChannelKey, Commit, Head},
+    channel::{key_id, ChannelAddr, ChannelKey, Commit, Head, NsId},
+    index,
     lease::{self, node_destination, node_destination_of, Lease, LeaseId, LeaseKey, Receipt, Renewal},
     stamp,
     manifest::{self, decode_node, decode_root, NodeEntry},
@@ -68,7 +69,7 @@ use retifs_net::{
         decode_request, encode_bitmap, encode_lease_request, encode_prove, encode_prove_reply,
         encode_lease_status, encode_response, LeaseRequest, LeaseStatus, ReceiptReply, GET_ENDPOINT, HAVE_ENDPOINT, LEASE_ENDPOINT,
         PROVE_ENDPOINT, RECEIPT_ENDPOINT, decode_bitmap, decode_put, encode_have, encode_put, HAVE_PREFIX, MAX_HAVE,
-        MAX_PUT, PUT_ENDPOINT, HEAD_ENDPOINT, API_ENDPOINT,
+        MAX_PUT, PUT_ENDPOINT, HEAD_ENDPOINT, API_ENDPOINT, MAX_QUERY_TOKENS, QUERY_ENDPOINT,
     },
     seek::{pull_round, seek_round},
     transport::{PrnsTransport, Transport},
@@ -92,6 +93,89 @@ struct Shared {
     stamp_cost: u8,
     /// Requests from own devices over a Link, answered by the daemon (ADR-0019).
     api: mpsc::UnboundedSender<ApiCall>,
+}
+
+/// `/retifs/query`: blind index search (ADR-0019). Answers only for an index
+/// held here, and only to an asker that proves the search secret on this
+/// link; otherwise the same empty answer as "no such index".
+struct QueryEndpoint;
+impl RequestEndpoint<Arc<Shared>> for QueryEndpoint {
+    const ENDPOINT_ID: &'static str = QUERY_ENDPOINT;
+    const POLICY: RequestEndpointPolicy = RequestEndpointPolicy::AllowAll;
+
+    async fn handle(mut context: RequestContext<'_, Arc<Shared>>) -> Result<(), Decline> {
+        let data = context.data;
+        let n = data.len().saturating_sub(48) / 16;
+        if data.len() < 64 || !(data.len() - 48).is_multiple_of(16) || n > MAX_QUERY_TOKENS {
+            return Err(Decline::Ignore);
+        }
+        let id: NsId = data[..16].try_into().unwrap();
+        let proof: [u8; 32] = data[16..48].try_into().unwrap();
+        let tokens: Vec<index::Token> = data[48..].chunks(16).map(|t| t.try_into().unwrap()).collect();
+        let nonce = context.respond_token().link_id.as_bytes().to_vec();
+        let answer = held_index(&context.state.store, &id)
+            .filter(|(_, search)| index::query_proof(search, &nonce) == proof)
+            .and_then(|(desc, _)| search_answer(&context.state.store, &desc, &tokens))
+            .unwrap_or_default();
+        context.respond(answer)
+    }
+}
+
+/// The latest index this node holds for index channel `id` (followed, or
+/// its own), with that channel's search secret.
+fn held_index(store: &SlabStore, id: &NsId) -> Option<(index::Descriptor, ConvergenceSecret)> {
+    let (file, key) = match store.followed(id).ok().flatten() {
+        Some(f) => (f.current?, f.addr.read_key),
+        None => {
+            let c = store
+                .own_channels()
+                .ok()?
+                .into_iter()
+                .find(|c| c.name.starts_with("idx:") && ChannelKey::from_secrets(c.signing_seed, c.read_key).addr().ns_id() == *id)?;
+            let (cid, seed) = c.last?;
+            let addr = ChannelKey::from_secrets(c.signing_seed, c.read_key).addr();
+            let ct = store.fetch(&cid).ok()??;
+            (Commit::decode(&open(&cid, &seed, &ct).ok()?, &addr).ok()?.root, c.read_key)
+        }
+    };
+    let desc = index::Descriptor::decode(&manifest::read_all(store, &file).ok()?).ok()?;
+    Some((desc, ConvergenceSecret::personal(key)))
+}
+
+/// `time (u64) ‖ state len (u16) ‖ state ‖ (count (u32) ‖ entry (16)*)` per token.
+fn search_answer(store: &SlabStore, desc: &index::Descriptor, tokens: &[index::Token]) -> Option<Vec<u8>> {
+    let mut out = Vec::new();
+    out.extend_from_slice(&desc.time_ms.to_be_bytes());
+    out.extend_from_slice(&u16::try_from(desc.state.len()).ok()?.to_be_bytes());
+    out.extend_from_slice(&desc.state);
+    for t in tokens {
+        let entries = match &desc.index {
+            Some(root) => index::lookup(store, root, t).ok()?,
+            None => Vec::new(),
+        };
+        out.extend_from_slice(&(entries.len() as u32).to_be_bytes());
+        for e in entries {
+            out.extend_from_slice(&e);
+        }
+    }
+    Some(out)
+}
+
+/// Splits a search answer: time, sealed state, entries per token.
+fn parse_search_answer(b: &[u8], tokens: usize) -> Option<(u64, Vec<u8>, Vec<Vec<index::Entry>>)> {
+    let time = u64::from_be_bytes(b.get(..8)?.try_into().ok()?);
+    let n = u16::from_be_bytes(b.get(8..10)?.try_into().ok()?) as usize;
+    let state = b.get(10..10 + n)?.to_vec();
+    let mut at = 10 + n;
+    let mut lists = Vec::new();
+    for _ in 0..tokens {
+        let count = u32::from_be_bytes(b.get(at..at + 4)?.try_into().ok()?) as usize;
+        at += 4;
+        let raw = b.get(at..at.checked_add(count.checked_mul(16)?)?)?;
+        lists.push(raw.chunks(16).map(|e| e.try_into().unwrap()).collect());
+        at += count * 16;
+    }
+    (at == b.len()).then_some((time, state, lists))
 }
 
 /// A local API request that arrived over a Link, to answer later.
@@ -524,6 +608,8 @@ struct Daemon {
     node_id: PeerId,
     /// This node's RNS identity hash: what it reveals on links to own nodes.
     identity_hash: [u8; 16],
+    /// The checkpoint each namespace's published blind index describes.
+    indexed: Mutex<HashMap<String, Cid>>,
     /// Links this node has identified itself on.
     identified: Mutex<std::collections::HashSet<LinkId>>,
     /// Derives per-lease signing keys (prototype: one namespace per store).
@@ -768,7 +854,7 @@ async fn serve(store: Arc<SlabStore>, identity: node::IdentitySecret, endpoint: 
         pre_configured_destinations: destinations,
         app_state: shared.clone(),
         storage: GrowableHeap,
-        request_endpoints: request_endpoints![Get, Have, LeaseEndpoint, ReceiptEndpoint, ProveEndpoint, PutEndpoint, HeadEndpoint, ApiEndpoint],
+        request_endpoints: request_endpoints![Get, Have, LeaseEndpoint, ReceiptEndpoint, ProveEndpoint, PutEndpoint, HeadEndpoint, ApiEndpoint, QueryEndpoint],
         on_event: move |event, _state| {
             match event {
                 PrnsEvent::Diagnostic(Diagnostic::AnnounceHeard { destination, hops, .. }) => {
@@ -798,6 +884,7 @@ async fn serve(store: Arc<SlabStore>, identity: node::IdentitySecret, endpoint: 
         node_id: *dest_hash.as_bytes(),
         identity_hash: <sha2::Sha256 as sha2::Digest>::digest(lease::identity_public(&identity_bytes))[..16].try_into().unwrap(),
         identified: Mutex::new(std::collections::HashSet::new()),
+        indexed: Mutex::new(HashMap::new()),
         namespace_key: namespace_key(&store),
         lease_term: args.lease_term,
         upkeep_wake: Notify::new(),
@@ -1055,7 +1142,7 @@ fn authorize(d: &Daemon, s: &AppScope, req: &Request) -> Result<(), String> {
     let session_ns = |session: u64| d.sessions.lock().unwrap().get(&session).map(|x| x.ns.clone());
     match req {
         Request::Ping | Request::Namespaces => Ok(()),
-        Request::RecordGet { ns, .. } | Request::Query { ns, .. } | Request::RecordHistory { ns, .. } | Request::NsInfo { ns } | Request::Watch { ns, .. } => read(ns),
+        Request::RecordGet { ns, .. } | Request::Query { ns, .. } | Request::SearchQuery { ns, .. } | Request::RecordHistory { ns, .. } | Request::NsInfo { ns } | Request::Watch { ns, .. } => read(ns),
         Request::ReadRange { ns: Some(ns), .. } => read(ns),
         Request::RecordCreate { ns, .. } | Request::RecordSet { ns, .. } | Request::RecordDelete { ns, .. } | Request::Transaction { ns, .. } | Request::WriteBegin { ns, .. } => write(ns),
         Request::WriteAt { session, .. }
@@ -1163,6 +1250,19 @@ async fn handle(d: &Daemon, req: Request) -> Result<Response, String> {
                 .map_err(|e| e.to_string())?;
             Ok(if device.is_some() { Response::Done } else { Response::AppToken { token } })
         }
+
+        Request::NsSearch { ns } => {
+            writable(&ns)?;
+            match publish_index(d, &ns, true).await? {
+                Some(address) => Ok(Response::Channel { address }),
+                None => Err(format!(
+                    "{ns} declares no searchable keys: add a record type={} keys=KEY[,KEY] (prefix:* for a family)",
+                    index::SETTINGS_TYPE
+                )),
+            }
+        }
+
+        Request::SearchQuery { ns, node, terms } => search_query(d, &ns, &node, &terms).await,
 
         Request::Remote { node, req } => {
             if matches!(*req, Request::Remote { .. }) {
@@ -1754,6 +1854,9 @@ async fn ns_sync(d: Arc<Daemon>) {
             if let Err(e) = publish_checkpoint(&d, &ns).await {
                 eprintln!("ns {ns}: checkpoint: {e}");
             }
+            if let Err(e) = publish_index(&d, &ns, false).await {
+                eprintln!("ns {ns}: index: {e}");
+            }
             if let Err(e) = sync_ns(&d, &ns).await {
                 eprintln!("ns {ns}: {e}");
             }
@@ -2143,6 +2246,154 @@ async fn install_checkpoint(d: &Daemon, ns: &str, link: LinkId, file: &FileRef) 
     d.store.set_ns_checkpoint(ns, file).map_err(|e| e.to_string())?;
     d.ns_cache.lock().unwrap().remove(ns);
     Ok(())
+}
+
+/// Builds the blind index of `ns`'s declared keys and publishes it on the
+/// namespace's index channel (ADR-0019), when the checkpoint changed since
+/// the last one (or `force`). Returns the search capability, or None if the
+/// namespace declares no searchable keys.
+async fn publish_index(d: &Daemon, ns: &str, force: bool) -> Result<Option<String>, String> {
+    if ns.starts_with("ch-") {
+        return Ok(None);
+    }
+    if force {
+        d.ns_cache.lock().unwrap().entry(ns.to_string()).or_default().since_checkpoint = CHECKPOINT_EVERY;
+        materialize(d, ns)?;
+    }
+    let Some(checkpoint) = d.store.ns_checkpoint(ns).map_err(|e| e.to_string())? else { return Ok(None) };
+    let records = d.store.records(ns).map_err(|e| e.to_string())?;
+    let attrs: Vec<(RecordId, Vec<(String, Value)>)> =
+        records.iter().map(|r| (r.id, r.attrs.iter().map(|(k, v)| (k.clone(), v.clone())).collect())).collect();
+    let declared = index::declared_keys(attrs.iter().map(|(_, a)| a.as_slice()));
+    if declared.is_empty() {
+        return Ok(None);
+    }
+    let read_key = current_addr(d, ns)?.read_key;
+    let key = index::channel_key(&read_key);
+    let capability = key.addr().to_string();
+    let name = format!("idx:{ns}:{}", hex(&key_id(&read_key)[..4]));
+    if !force && d.indexed.lock().unwrap().get(ns) == Some(&checkpoint.root) {
+        return Ok(Some(capability));
+    }
+    let keys = index::IndexKeys::derive(&read_key);
+    let search = index::search_secret(&read_key);
+    let tree_keys = index::index_keys(&keys, attrs.iter().map(|(id, a)| (*id, a.as_slice())), &declared);
+    let entries = tree_keys.len();
+    let store = d.store.clone();
+    let root = tokio::task::spawn_blocking(move || -> Result<Option<prolly::Root>, String> {
+        let root = index::build(&mut retifs_store::PinnedTier(&store), &search, tree_keys).map_err(|e| e.to_string())?;
+        if let Some(r) = &root {
+            let nodes = prolly::nodes(&*store, r).map_err(|e| e.to_string())?;
+            let tokens: Vec<_> = nodes.iter().map(|(c, s)| (*c, ChunkToken::for_seed(s))).collect();
+            store.register_serving(&tokens).map_err(|e| e.to_string())?;
+        }
+        Ok(root)
+    })
+    .await
+    .map_err(|e| e.to_string())??;
+    d.store.create_channel(&name, key.signing_seed(), *index::search_secret(&read_key).as_bytes()).map_err(|e| e.to_string())?;
+    let mut iv = [0u8; 16];
+    getrandom::fill(&mut iv).expect("OS entropy");
+    let desc = index::Descriptor { index: root, state: keys.seal_state(&checkpoint, iv), time_ms: now_ms() };
+    publish_channel(d, &name, desc.encode(), false, 0).await?;
+    d.indexed.lock().unwrap().insert(ns.to_string(), checkpoint.root);
+    println!("ns {ns}: blind index of {} key(s), {entries} entr(ies), published for search nodes", declared.len());
+    Ok(Some(capability))
+}
+
+/// Fetches the index tree a followed index channel's current version names,
+/// from the channel's hints, and serves it on (a search node, ADR-0019).
+async fn fetch_index(d: &Daemon, f: &retifs_store::Follow) -> Result<(), String> {
+    let Some(cur) = f.current else { return Ok(()) };
+    let Ok(bytes) = manifest::read_all(&*d.store, &cur) else { return Ok(()) };
+    let Ok(desc) = index::Descriptor::decode(&bytes) else { return Ok(()) };
+    let Some(root) = desc.index else { return Ok(()) };
+    let mut missing = prolly::missing(&*d.store, &root).map_err(|e| e.to_string())?;
+    if missing.is_empty() {
+        return Ok(());
+    }
+    for hint in &f.hints {
+        let Ok(link) = d.link_to(hint).await else { continue };
+        while !missing.is_empty() {
+            let round = seek_round(&d.transport, link, &missing, false, Duration::from_secs(60)).await?;
+            if round.got.is_empty() {
+                break;
+            }
+            let mut tokens = Vec::new();
+            for (i, ct, _) in round.got {
+                d.store.insert(&missing[i].0, &ct, tier::PINNED).map_err(|e| e.to_string())?;
+                tokens.push((missing[i].0, ChunkToken::for_seed(&missing[i].1)));
+            }
+            d.store.register_serving(&tokens).map_err(|e| e.to_string())?;
+            missing = prolly::missing(&*d.store, &root).map_err(|e| e.to_string())?;
+        }
+        if missing.is_empty() {
+            let n = prolly::nodes(&*d.store, &root).map(|n| n.len()).unwrap_or(0);
+            println!("search: index <{}> complete ({n} node(s)), answering queries", hex(&f.addr.ns_id()));
+            return Ok(());
+        }
+    }
+    Err(format!("index <{}>: {} node(s) still missing", hex(&f.addr.ns_id()), missing.len()))
+}
+
+/// A member's blind index query against search node `node`: tokens for the
+/// `key=value` terms, entries opened and intersected, matches resolved
+/// against the records held here and checked against every term.
+async fn search_query(d: &Daemon, ns: &str, node: &str, terms: &[String]) -> Result<Response, String> {
+    let parsed: Vec<retifs_store::Term> = terms.iter().map(|t| retifs_store::Term::parse(t)).collect::<Result<_, _>>()?;
+    let held: HashMap<RecordId, Record> = d.store.records(ns).map_err(|e| e.to_string())?.into_iter().map(|r| (r.id, r)).collect();
+    // Where the settings are held here, only declared keys go to the search
+    // node; the other terms are checked on the matches here.
+    let attrs: Vec<Vec<(String, Value)>> = held.values().map(|r| r.attrs.iter().map(|(k, v)| (k.clone(), v.clone())).collect()).collect();
+    let declared = index::declared_keys(attrs.iter().map(|a| a.as_slice()));
+    let eq: Vec<(String, Value)> = parsed
+        .iter()
+        .filter_map(|t| match t {
+            retifs_store::Term::Eq(k, v) if declared.is_empty() || index::declared(k, &declared) => Some((k.clone(), v.clone())),
+            _ => None,
+        })
+        .collect();
+    if eq.is_empty() || eq.len() > MAX_QUERY_TOKENS {
+        return Err(format!(
+            "a search needs 1 to {MAX_QUERY_TOKENS} key=value terms on searchable keys{}",
+            if declared.is_empty() { String::new() } else { format!(" ({})", declared.join(", ")) }
+        ));
+    }
+    let read_key = current_addr(d, ns)?.read_key;
+    let keys = index::IndexKeys::derive(&read_key);
+    let search = index::search_secret(&read_key);
+    let tokens: Vec<index::Token> = eq.iter().map(|(k, v)| keys.token(k, v)).collect();
+    let peer = *parse_destination(node).ok_or_else(|| format!("{node} isn't a node address"))?.as_bytes();
+    let link = d.link_to(&peer).await?;
+    let proof = index::query_proof(&search, &d.transport.link_nonce(link));
+    let mut body = index::channel_key(&read_key).ns_id().to_vec();
+    body.extend_from_slice(&proof);
+    for t in &tokens {
+        body.extend_from_slice(t);
+    }
+    let answer = d.ask(link, QUERY_ENDPOINT, body).await?;
+    let (as_of_ms, _state, lists) =
+        parse_search_answer(&answer, tokens.len()).ok_or_else(|| format!("<{node}> doesn't hold this namespace's index"))?;
+    let mut ids: Option<std::collections::BTreeSet<RecordId>> = None;
+    for (t, entries) in tokens.iter().zip(lists) {
+        let these: std::collections::BTreeSet<RecordId> = entries.iter().map(|e| keys.open_entry(t, e)).collect();
+        ids = Some(match ids {
+            None => these,
+            Some(acc) => acc.intersection(&these).copied().collect(),
+        });
+    }
+    let ids = ids.unwrap_or_default();
+    let mut records = Vec::new();
+    let mut unresolved = Vec::new();
+    for id in ids {
+        match held.get(&id) {
+            // Checked against every term: the index may be older than what's here.
+            Some(r) if parsed.iter().all(|t| t.matches(r)) => records.push(view(r)),
+            Some(_) => {}
+            None => unresolved.push(hex(&id)),
+        }
+    }
+    Ok(Response::Searched { records, unresolved, as_of_ms })
 }
 
 /// Names this node's latest checkpoint in its chain, if it holds `grant`
@@ -3053,6 +3304,13 @@ async fn follower(d: Arc<Daemon>) {
 
 async fn follow_pass(d: &Daemon, mut f: retifs_store::Follow) -> Result<(), String> {
     let ns = hex(&f.addr.ns_id());
+    // A followed index channel (a search capability): fetch its index tree.
+    if let Some(cur) = f.current
+        && complete(&d.store, &cur)
+        && let Err(e) = fetch_index(d, &f).await
+    {
+        eprintln!("follow {ns}: {e}");
+    }
     // A snapshot version is rebuilt into a local namespace (queryable), and
     // its records' content blocks are sought too (ADR-0016).
     if let Some(cur) = f.current

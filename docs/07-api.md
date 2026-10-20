@@ -11,16 +11,16 @@ The implemented local API is the `Request`/`Response` enums in `crates/libretifs
 | §4 Namespaces | `Namespaces`, `NsInfo`, `NsAddress`, `NsJoin`, `NsKeep`, `NsCheckpoint`, `NsVerify` | namespaces are created on first write |
 | §5–6 Records, attributes | `RecordCreate`, `RecordSet`, `RecordGet`, `RecordDelete` | |
 | §7 Blocks | `ReadRange` (fetches missing chunks within a wait), `WriteBegin/At/Read/Truncate/Commit/Abort` | content is one `content` block per record; write sessions instead of `put_block` |
-| §8 Queries | `Query` with the CLI's terms, optionally `at` a version | |
+| §8 Queries | `Query` with the CLI's terms, optionally `at` a version; `SearchQuery` through a search node's blind index; `NsSearch` publishes the index | remote queries without the read key are exact matches on declared keys ([ADR-0019](adr/0019-remote-query-and-blind-index.md)) |
 | §9 Live queries | `Watch { ns, since, timeout_ms }`: a long poll per namespace | no per-query events; clients re-query |
 | §10 Transactions, history | `Transaction` (create, set, delete steps, one commit), `RecordHistory`, `Query { at }` | |
 | §11 Availability | `Status`, `Want`, `NsKeep`, keep rules as records | a miss waits up to the client's wait, then fails (`EIO` in the mount), not `Unavailable` at once |
 | §12 Sharing | `NsGrant` (rights, `keys`, `until`), `NsRevoke`, channels (`ChannelCreate`, `Follow`, …) | |
-| §14 Wire protocol | the same requests over an RNS Link (`/retifs/api`) for the user's own devices ([ADR-0019](adr/0019-remote-query-and-blind-index.md)) | own nodes only; remote nodes without the read key will use the blind index |
+| §14 Wire protocol | the same requests over an RNS Link (`/retifs/api`) for the user's own devices; `/retifs/query` for search nodes ([ADR-0019](adr/0019-remote-query-and-blind-index.md)) | own nodes get the full API; search nodes only blind index lookups |
 | §15 C ABI | not yet | |
 | §16 POSIX mapping | `retifs-mount` ([ADR-0002](adr/0002-os-integration.md)) | |
 
-Not yet: fd passing, the blind index, the C ABI, per-query live events.
+Not yet: fd passing, the C ABI, per-query live events.
 
 ## Contents
 1. [Overview](#1-overview)

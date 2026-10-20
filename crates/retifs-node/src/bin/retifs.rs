@@ -21,6 +21,8 @@
 //!     retifs [--store DIR] rec get NS ID | rec rm NS ID
 //!     retifs [--store DIR] rec history NS ID
 //!     retifs [--store DIR] query NS [--at VERSION] [TERM]...
+//!     retifs [--store DIR] query NS KEY=VALUE... --search NODE   (through a search node's blind index)
+//!     retifs [--store DIR] ns search NS   (publish the blind index; prints the search capability)
 //!
 //!     retifs [--store DIR] ns address NS | ns info NS
 //!     retifs [--store DIR] ns join NAME ADDRESS [--from NODE]...
@@ -64,8 +66,8 @@ fn usage() -> ! {
          retifs [--store DIR] channel create NAME | channel publish NAME FILE [--compress] | channel publish-ns NAME NS\n\
          retifs [--store DIR] follow ADDRESS [--from NODE]... | channels\n\
          retifs [--store DIR] rec add NS [KEY=VALUE]... [--file PATH] | rec set NS ID [KEY=VALUE]... [--unset KEY]...\n\
-         retifs [--store DIR] rec get NS ID | rec rm NS ID | rec history NS ID | query NS [--at VERSION] [TERM]...\n\
-         retifs [--store DIR] ns address NS | ns info NS | ns checkpoint NS | ns verify NS | ns keep NS all|rules | ns join NAME ADDRESS [--from NODE]...\n\
+         retifs [--store DIR] rec get NS ID | rec rm NS ID | rec history NS ID | query NS [--at VERSION] [TERM]... [--search NODE]\n\
+         retifs [--store DIR] ns address NS | ns info NS | ns checkpoint NS | ns search NS | ns verify NS | ns keep NS all|rules | ns join NAME ADDRESS [--from NODE]...\n\
          retifs [--store DIR] ns grant NS WRITER [--grant] [--from NODE]... | ns revoke NS WRITER"
     );
     std::process::exit(2);
@@ -311,6 +313,7 @@ async fn main() {
                 "checkpoint" => libretifs::Request::NsCheckpoint { ns },
                 "keep" => libretifs::Request::NsKeep { ns, mode: rest.first().cloned().unwrap_or_else(|| usage()) },
                 "verify" => libretifs::Request::NsVerify { ns },
+                "search" => libretifs::Request::NsSearch { ns },
                 "join" => libretifs::Request::NsJoin {
                     ns,
                     address: rest.first().cloned().unwrap_or_else(|| usage()),
@@ -405,6 +408,26 @@ async fn main() {
                 terms.drain(i..=i + 1);
                 v
             });
+            // Through a search node's blind index (ADR-0019).
+            if let Some(i) = terms.iter().position(|t| t == "--search") {
+                let node = terms.get(i + 1).cloned().unwrap_or_else(|| usage());
+                terms.drain(i..=i + 1);
+                match client.call(libretifs::Request::SearchQuery { ns, node, terms }).await.unwrap_or_else(|e| fail(e)) {
+                    libretifs::Response::Searched { records, unresolved, as_of_ms } => {
+                        for r in &records {
+                            print_record(r);
+                        }
+                        let now = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map_or(0, |d| d.as_millis() as u64);
+                        println!("{} record(s) (index built {} s ago)", records.len(), now.saturating_sub(as_of_ms) / 1000);
+                        if !unresolved.is_empty() {
+                            println!("{} more match(es) not held here yet: {}", unresolved.len(), unresolved.join(" "));
+                        }
+                    }
+                    libretifs::Response::Error { message } => fail(message),
+                    _ => fail("unexpected response"),
+                }
+                return;
+            }
             let found = client.records(libretifs::Request::Query { ns, terms, at }).await.unwrap_or_else(|e| fail(e));
             for r in &found {
                 print_record(r);

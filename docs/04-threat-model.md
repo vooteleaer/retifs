@@ -12,6 +12,7 @@ Every crypto decision is checked against this.
 | **Network observer** | RNS traffic patterns | content, CIDs (the Link is encrypted) |
 | **Malicious co-author** (in a group) | everything they were granted; reading the whole namespace (limits restrict writes, not reads) | un-narrowed rights (limits only narrow on delegation), writes outside its keys or after its expiry, forging others' signatures, rewriting history |
 | **Former member** | what they already received | new content after key rotation |
+| **Search node** (given a namespace's search capability) | the index: how many records share each opaque value of a declared key, which tokens members ask for and when, how posting lists change between versions | attribute names or values, record contents, the checkpoint, tokens it wasn't sent, which entries in different lists are one record ([ADR-0019](adr/0019-remote-query-and-blind-index.md)) |
 | **Sybil / spammer** | cheap identities | unlimited storage, announces, attributes (stamps, quotas) |
 | **Prober / tracker** (knows CIDs: created honeypot chunks, or computed them from a known public file) | whether *it* can fetch a chunk from nodes that serve it | which nodes hold, or read, a given chunk; what any node has in its cache |
 | **Lost/stolen YubiKey, stick or disk** | nothing (the local store is ciphertext; without the key it's noise) | the identity; the device key is revoked by the root |

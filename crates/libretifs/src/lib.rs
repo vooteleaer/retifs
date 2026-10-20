@@ -50,6 +50,12 @@ pub enum Request {
         #[serde(default)]
         device: Option<String>,
     },
+    /// Builds and publishes the namespace's blind index now, if it declares
+    /// searchable keys; answers with the search capability (ADR-0019).
+    NsSearch { ns: String },
+    /// Queries a search node's blind index of `ns` (exact `key=value` terms
+    /// on declared keys); matches are resolved against this node's records.
+    SearchQuery { ns: String, node: String, terms: Vec<String> },
     /// Owner only: sends `req` to the user's own node `node` over a Link and
     /// returns its answer (it must have admitted this node as a device).
     Remote { node: String, req: Box<Request> },
@@ -392,6 +398,13 @@ pub enum Response {
     Done,
     AppToken {
         token: String,
+    },
+    /// A blind index search: matching records held here, the IDs of matches
+    /// not held here yet, and when the index was built.
+    Searched {
+        records: Vec<RecordView>,
+        unresolved: Vec<String>,
+        as_of_ms: u64,
     },
     Apps {
         apps: Vec<AppInfo>,
