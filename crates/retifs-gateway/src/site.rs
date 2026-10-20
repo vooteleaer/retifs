@@ -10,13 +10,25 @@
 /// (with any port). `None` for the bare `localhost` (the index) or a foreign
 /// host (refused: DNS rebinding).
 pub fn site(host: &str) -> Result<Option<String>, ()> {
-    let host = host.rsplit_once(':').map_or(host, |(h, port)| if port.chars().all(|c| c.is_ascii_digit()) { h } else { host });
+    let host = host.rsplit_once(':').map_or(host, |(h, port)| {
+        if port.chars().all(|c| c.is_ascii_digit()) {
+            h
+        } else {
+            host
+        }
+    });
     let host = host.to_ascii_lowercase();
     if host == "localhost" || host == "127.0.0.1" {
         return Ok(None);
     }
-    let Some(name) = host.strip_suffix(".localhost") else { return Err(()) };
-    if name.is_empty() || !name.chars().all(|c| c.is_ascii_alphanumeric() || c == '-' || c == '_') {
+    let Some(name) = host.strip_suffix(".localhost") else {
+        return Err(());
+    };
+    if name.is_empty()
+        || !name
+            .chars()
+            .all(|c| c.is_ascii_alphanumeric() || c == '-' || c == '_')
+    {
         return Err(());
     }
     Ok(Some(name.to_string()))
@@ -25,7 +37,11 @@ pub fn site(host: &str) -> Result<Option<String>, ()> {
 /// The record paths to try for a request path, in order.
 pub fn candidates(url_path: &str) -> Vec<String> {
     let path = percent_decode(url_path.split(['?', '#']).next().unwrap_or("/"));
-    let path = if path.starts_with('/') { path } else { format!("/{path}") };
+    let path = if path.starts_with('/') {
+        path
+    } else {
+        format!("/{path}")
+    };
     if path.split('/').any(|c| c == "..") {
         return Vec::new();
     }
@@ -42,7 +58,9 @@ pub fn percent_decode(s: &str) -> String {
     let mut i = 0;
     while i < b.len() {
         if b[i] == b'%'
-            && let Some(x) = s.get(i + 1..i + 3).and_then(|h| u8::from_str_radix(h, 16).ok())
+            && let Some(x) = s
+                .get(i + 1..i + 3)
+                .and_then(|h| u8::from_str_radix(h, 16).ok())
         {
             out.push(x);
             i += 3;
@@ -58,13 +76,23 @@ pub fn percent_decode(s: &str) -> String {
 /// it's a MIME type).
 pub fn content_type(path: &str, declared: Option<&str>) -> &'static str {
     if let Some(d) = declared {
-        for known in ["text/html", "text/plain", "application/json", "image/png", "image/jpeg", "application/pdf"] {
+        for known in [
+            "text/html",
+            "text/plain",
+            "application/json",
+            "image/png",
+            "image/jpeg",
+            "application/pdf",
+        ] {
             if d == known {
                 return known;
             }
         }
     }
-    let ext = path.rsplit_once('.').map(|(_, e)| e.to_ascii_lowercase()).unwrap_or_default();
+    let ext = path
+        .rsplit_once('.')
+        .map(|(_, e)| e.to_ascii_lowercase())
+        .unwrap_or_default();
     match ext.as_str() {
         "html" | "htm" => "text/html; charset=utf-8",
         "css" => "text/css; charset=utf-8",
@@ -102,7 +130,10 @@ pub fn byte_range(header: &str, size: u64) -> Option<std::ops::Range<u64>> {
             (size.saturating_sub(n), size)
         }
         (a, "") => (a.parse().ok()?, size),
-        (a, b) => (a.parse().ok()?, b.parse::<u64>().ok()?.saturating_add(1).min(size)),
+        (a, b) => (
+            a.parse().ok()?,
+            b.parse::<u64>().ok()?.saturating_add(1).min(size),
+        ),
     };
     (start < end && start < size).then_some(start..end)
 }
@@ -120,7 +151,10 @@ pub const SECURITY_HEADERS: [(&str, &str); 4] = [
 ];
 
 pub fn escape_html(s: &str) -> String {
-    s.replace('&', "&amp;").replace('<', "&lt;").replace('>', "&gt;").replace('"', "&quot;")
+    s.replace('&', "&amp;")
+        .replace('<', "&lt;")
+        .replace('>', "&gt;")
+        .replace('"', "&quot;")
 }
 
 #[cfg(test)]
@@ -141,7 +175,10 @@ mod tests {
     fn paths() {
         assert_eq!(candidates("/"), ["/index.html"]);
         assert_eq!(candidates("/blog"), ["/blog", "/blog/index.html"]);
-        assert_eq!(candidates("/a%20b.txt?x=1"), ["/a b.txt", "/a b.txt/index.html"]);
+        assert_eq!(
+            candidates("/a%20b.txt?x=1"),
+            ["/a b.txt", "/a b.txt/index.html"]
+        );
         assert!(candidates("/../etc/passwd").is_empty());
     }
 

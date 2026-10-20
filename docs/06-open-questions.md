@@ -14,7 +14,6 @@
 - **Store generation in announces:** size and privacy of the counter that tells peers a node has new chunks ([ADR-0010](adr/0010-continuous-seeking.md)).
 - **Spam:** LXMF stamps on announces, pinning requests, attributes.
 - **App identity on Linux:** how to bind a per-app capability to a process reliably without a sandbox. Partly answered: tokens are pinned to the executable path on first use ([ADR-0004](adr/0004-native-record-api.md)). Open: a program replaced at the same path, interpreters (every Python app is `/usr/bin/python3`), Flatpak/portal identity, a user prompt.
-- **Local gateway access:** `retifs-gateway` answers anyone who can reach `127.0.0.1:8740`, including other local users. Per-user port with a token, a Unix socket behind the browser, or namespaces opted in per site?
 - **Removal race:** which of a member's writes count when they were made offline, concurrently with that member's removal? Causal rule needed.
 - **Conflict UX:** how to show two heads to the user.
 - **Range/geo queries with a blind index** over the network.
