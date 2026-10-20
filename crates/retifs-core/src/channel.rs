@@ -334,7 +334,16 @@ fn token_encrypt(key: &[u8; 64], iv: &[u8; 16], pt: &[u8; 32]) -> [u8; SEALED_SE
     [signed.as_slice(), &mac.finalize().into_bytes()].concat().try_into().unwrap()
 }
 
-fn token_decrypt(key: &[u8; 64], token: &[u8]) -> Option<Vec<u8>> {
+/// RNS Token over any plaintext (the index descriptor's state reference, ADR-0019).
+pub(crate) fn token_seal(key: &[u8; 64], iv: &[u8; 16], pt: &[u8]) -> Vec<u8> {
+    let ct = cbc::Encryptor::<Aes256>::new(key[32..].into(), iv.into()).encrypt_padded_vec_mut::<Pkcs7>(pt);
+    let signed = [iv.as_slice(), &ct].concat();
+    let mut mac = Hmac::<Sha256>::new_from_slice(&key[..32]).expect("HMAC takes any key length");
+    mac.update(&signed);
+    [signed.as_slice(), &mac.finalize().into_bytes()].concat()
+}
+
+pub(crate) fn token_decrypt(key: &[u8; 64], token: &[u8]) -> Option<Vec<u8>> {
     let (signed, tag) = token.split_at(token.len().checked_sub(32)?);
     let mut mac = Hmac::<Sha256>::new_from_slice(&key[..32]).expect("HMAC takes any key length");
     mac.update(signed);

@@ -16,8 +16,10 @@ import sys
 from pathlib import Path
 
 import RNS.vendor.umsgpack as umsgpack
-from RNS.Cryptography import HMAC
+from RNS.Cryptography import HMAC, PKCS7
 from RNS.Cryptography.AES import AES_256_CBC
+from RNS.Cryptography.Ed25519 import Ed25519PrivateKey
+from RNS.Cryptography.Token import Token
 from RNS.Cryptography.HKDF import hkdf
 
 from verify_prolly_rns import boundary, put, value
@@ -138,6 +140,29 @@ def main():
             k = hkdf(32, token_key, b"retifs/v1/index-entry", t)
             ids.append(AES_256_CBC.decrypt(e, k, b"\x00" * 16).hex())
         checks.append((f"lookup {l['key']}", t.hex() == l["token"] and [e.hex() for e in entries] == l["entries"] and sorted(ids) == l["records"]))
+
+    # The index channel: writer from the derived seed, read key = search secret.
+    ch = doc["channel"]
+    writer = Ed25519PrivateKey.from_private_bytes(hkdf(32, read_key, b"retifs/v1/index-writer", b"")).public_key().public_bytes()
+    ns_id = hashlib.sha256(b"retifs/v1/ns" + writer).digest()[:16]
+    checks.append(("index channel writer and ns_id", writer.hex() == ch["writer"] and ns_id.hex() == ch["ns_id"]))
+    checks.append(("index channel address (the search capability)", ch["address"] == f"retifs-ch:1:{writer.hex()}:{search.hex()}"))
+
+    # The descriptor: index root, checkpoint sealed to members as an RNS Token, time.
+    dd = doc["descriptor"]
+    state_key = hkdf(64, token_key, b"retifs/v1/index-state", b"")
+    cid_hex, seed_hex, size = dd["checkpoint"]
+    pt = umsgpack.packb([bytes.fromhex(cid_hex), bytes.fromhex(seed_hex), size])
+    iv = bytes.fromhex(dd["iv"])
+    signed = iv + AES_256_CBC.encrypt(PKCS7.pad(pt), state_key[32:], iv)
+    sealed = signed + HMAC.new(state_key[:32], signed, hashlib.sha256).digest()
+    encoded = umsgpack.packb({"index": [cid, seed], "state": sealed, "time": dd["time_ms"]})
+    checks.append(("descriptor encoding", encoded.hex() == dd["encoded"]))
+    checks.append(("descriptor state opens with RNS Token", Token(state_key).decrypt(sealed) == pt))
+
+    qp = doc["query_proof"]
+    proof = HMAC.new(search, b"retifs/v1/index-query" + bytes.fromhex(qp["link_id"]), hashlib.sha256).digest()
+    checks.append(("query proof", proof.hex() == qp["proof"]))
 
     ok = all(c for _, c in checks)
     for name, c in checks:

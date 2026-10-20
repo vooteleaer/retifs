@@ -8,7 +8,21 @@
 //! K_t           = HKDF-SHA256(ikm = token key, salt = "retifs/v1/index-entry", info = token, L = 32)
 //! entry         = AES-256-Encrypt(K_t, record id)                  one block
 //! index         = Prolly tree of token ‖ entry (32-byte keys) → nil, sealed under the search secret
+//!
+//! index channel (ADR-0015): signing seed = HKDF-SHA256(ikm = read key, salt = "retifs/v1/index-writer", L = 32),
+//!                           read key     = the search secret
+//! descriptor    = { "index": nil | [cid (bin 33), seed (bin 32)],      one per channel version,
+//!                   "state": bin Token(state key, [cid, seed, size]),    canonical msgpack
+//!                   "time":  int (unix ms) }
+//! state key     = HKDF-SHA256(ikm = token key, salt = "retifs/v1/index-state", info = "", L = 64)
+//! query proof   = HMAC-SHA256(search secret, "retifs/v1/index-query" ‖ link id)
 //! ```
+//! - Every member derives the index channel from the read key, so a search
+//!   capability is just its address (`retifs-ch:1:…`), and any member can
+//!   find the index without asking. A revoke rotates the read key and so
+//!   moves the index to a new channel.
+//! - The descriptor names the checkpoint the index describes, encrypted to
+//!   members: a search node can't open the state with it.
 //! - Members hold the read key and so both keys. A search node is given the
 //!   search secret only: it opens the index and scans by token, but can't
 //!   compute a token for a guessed value or decrypt an entry.
@@ -24,9 +38,12 @@ use hmac::{Hmac, Mac};
 use sha2::Sha256;
 
 use crate::{
-    manifest::Store,
+    channel::{token_decrypt, token_seal, ChannelKey},
+    chunk::Seed,
+    cid::Cid,
+    manifest::{FileRef, Store},
     prolly::{self, Root, TreeError},
-    record::{write_array_len, write_str, write_value, RecordId, Value},
+    record::{read_block, write_array_len, write_bin, write_block, write_int, write_map_len, write_str, write_value, Reader, RecordError, RecordId, Value},
     secret::ConvergenceSecret,
 };
 
@@ -38,6 +55,9 @@ pub type Entry = [u8; 16];
 const TOKEN_SALT: &[u8] = b"retifs/v1/index-token";
 const SEARCH_SALT: &[u8] = b"retifs/v1/index-search";
 const ENTRY_SALT: &[u8] = b"retifs/v1/index-entry";
+const WRITER_SALT: &[u8] = b"retifs/v1/index-writer";
+const STATE_SALT: &[u8] = b"retifs/v1/index-state";
+const QUERY_LABEL: &[u8] = b"retifs/v1/index-query";
 /// A record with `type` = this declares which keys are searchable.
 pub const SETTINGS_TYPE: &str = "retifs.index";
 /// The settings record's attribute listing the keys (a list of strings;
@@ -47,6 +67,85 @@ pub const SETTINGS_KEYS: &str = "keys";
 /// What a search node is given: opens the index, computes no tokens.
 pub fn search_secret(read_key: &[u8; 32]) -> ConvergenceSecret {
     ConvergenceSecret::personal(hkdf(read_key, SEARCH_SALT, b""))
+}
+
+/// The index channel of the namespace with this read key: every member
+/// derives the same one; its address is the search capability.
+pub fn channel_key(read_key: &[u8; 32]) -> ChannelKey {
+    ChannelKey::from_secrets(hkdf(read_key, WRITER_SALT, b""), *search_secret(read_key).as_bytes())
+}
+
+/// Proves to a search node, bound to the link, that the asker holds the search secret.
+pub fn query_proof(search: &ConvergenceSecret, link_id: &[u8]) -> [u8; 32] {
+    let mut mac = <Hmac<Sha256> as Mac>::new_from_slice(search.as_bytes()).expect("HMAC takes any key length");
+    mac.update(QUERY_LABEL);
+    mac.update(link_id);
+    mac.finalize().into_bytes().into()
+}
+
+/// What one index channel version says: the index and (for members) the checkpoint it describes.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Descriptor {
+    pub index: Option<Root>,
+    pub state: Vec<u8>,
+    pub time_ms: u64,
+}
+
+impl Descriptor {
+    pub fn encode(&self) -> Vec<u8> {
+        let mut out = Vec::new();
+        write_map_len(&mut out, 3);
+        write_str(&mut out, "index");
+        match &self.index {
+            None => out.push(0xc0),
+            Some((cid, seed)) => {
+                write_array_len(&mut out, 2);
+                write_bin(&mut out, cid.as_bytes());
+                write_bin(&mut out, &seed.0);
+            }
+        }
+        write_str(&mut out, "state");
+        write_bin(&mut out, &self.state);
+        write_str(&mut out, "time");
+        write_int(&mut out, self.time_ms as i64);
+        out
+    }
+
+    pub fn decode(bytes: &[u8]) -> Result<Descriptor, RecordError> {
+        let mut r = Reader(bytes);
+        if r.map_len()? != 3 || r.str()? != "index" {
+            return Err(RecordError::Malformed("descriptor fields"));
+        }
+        let index = if r.0.first() == Some(&0xc0) {
+            r.byte()?;
+            None
+        } else {
+            if r.array_len()? != 2 {
+                return Err(RecordError::Malformed("index root"));
+            }
+            let cid = Cid::from_bytes(r.bin()?.try_into().map_err(|_| RecordError::Malformed("index cid"))?)
+                .ok_or(RecordError::Malformed("CID version"))?;
+            let seed = Seed(r.bin()?.try_into().map_err(|_| RecordError::Malformed("index seed"))?);
+            Some((cid, seed))
+        };
+        if r.str()? != "state" {
+            return Err(RecordError::Malformed("descriptor fields"));
+        }
+        let state = r.bin()?;
+        if r.str()? != "time" {
+            return Err(RecordError::Malformed("descriptor fields"));
+        }
+        let time_ms = match r.value(0)? {
+            Value::Int(t) if t >= 0 => t as u64,
+            _ => return Err(RecordError::Malformed("descriptor time")),
+        };
+        if !r.0.is_empty() {
+            return Err(RecordError::Malformed("trailing bytes"));
+        }
+        let d = Descriptor { index, state, time_ms };
+        crate::record::canonical(bytes, d.encode())?;
+        Ok(d)
+    }
 }
 
 fn hkdf(ikm: &[u8], salt: &[u8], info: &[u8]) -> [u8; 32] {
@@ -85,6 +184,26 @@ impl IndexKeys {
         let mut block = GenericArray::from(*id);
         self.cipher(token).encrypt_block(&mut block);
         block.into()
+    }
+
+    fn state_key(&self) -> [u8; 64] {
+        let mut out = [0u8; 64];
+        Hkdf::<Sha256>::new(Some(STATE_SALT), &self.token_key).expand(b"", &mut out).expect("64 bytes is a valid HKDF output length");
+        out
+    }
+
+    /// The checkpoint reference as a descriptor carries it (members only).
+    pub fn seal_state(&self, checkpoint: &FileRef, iv: [u8; 16]) -> Vec<u8> {
+        let mut pt = Vec::new();
+        write_block(&mut pt, checkpoint);
+        token_seal(&self.state_key(), &iv, &pt)
+    }
+
+    pub fn open_state(&self, sealed: &[u8]) -> Option<FileRef> {
+        let pt = token_decrypt(&self.state_key(), sealed)?;
+        let mut r = Reader(&pt);
+        let f = read_block(&mut r).ok()?;
+        r.0.is_empty().then_some(f)
     }
 
     pub fn open_entry(&self, token: &Token, entry: &Entry) -> RecordId {
@@ -217,6 +336,22 @@ mod tests {
         assert_ne!(k.token("n", &Value::Int(5)), k.token("n", &s("5")));
         // Another namespace (read key) gives other tokens.
         assert_ne!(IndexKeys::derive(&[8; 32]).token("album", &s("Prangli")), a);
+    }
+
+    #[test]
+    fn descriptor_channel_and_state() {
+        let keys = IndexKeys::derive(&[1; 32]);
+        let cp = FileRef { root: Cid::of(b"checkpoint"), seed: Seed([4; 32]), size: 1234 };
+        let d = Descriptor { index: Some((Cid::of(b"index"), Seed([5; 32]))), state: keys.seal_state(&cp, [6; 16]), time_ms: 1_700_000_000_000 };
+        assert_eq!(Descriptor::decode(&d.encode()).unwrap(), d);
+        let empty = Descriptor { index: None, ..d.clone() };
+        assert_eq!(Descriptor::decode(&empty.encode()).unwrap(), empty);
+        assert_eq!(keys.open_state(&d.state), Some(cp));
+        assert_eq!(IndexKeys::derive(&[2; 32]).open_state(&d.state), None, "other members' keys don't open it");
+        // Every member derives the same channel; its read key is the search secret.
+        assert_eq!(channel_key(&[1; 32]).addr().to_string(), channel_key(&[1; 32]).addr().to_string());
+        assert!(channel_key(&[1; 32]).addr().to_string().ends_with(&hex::encode(search_secret(&[1; 32]).as_bytes())));
+        assert_ne!(channel_key(&[1; 32]).ns_id(), channel_key(&[2; 32]).ns_id());
     }
 
     #[test]

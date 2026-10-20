@@ -108,6 +108,12 @@ fn main() {
         })
         .collect();
 
+    // The index channel, a descriptor (fixed IV) and a query proof.
+    let ch = index::channel_key(&read_key);
+    let checkpoint = retifs_core::FileRef { root: Cid::of(b"checkpoint"), seed: retifs_core::Seed([0x44; 32]), size: 4321 };
+    let desc = index::Descriptor { index: Some((cid, seed)), state: keys.seal_state(&checkpoint, [0x66; 16]), time_ms: 1_760_000_000_000 };
+    let link_id = [0x77u8; 16];
+
     let doc = json!({
         "version": 1,
         "fanout": prolly::FANOUT,
@@ -125,6 +131,18 @@ fn main() {
             "nodes": nodes,
         },
         "lookups": lookups,
+        "channel": {
+            "address": ch.addr().to_string(),
+            "writer": hex::encode(ch.writer()),
+            "ns_id": hex::encode(ch.ns_id()),
+        },
+        "descriptor": {
+            "checkpoint": [checkpoint.root.to_string(), hex::encode(checkpoint.seed.0), checkpoint.size],
+            "iv": hex::encode([0x66u8; 16]),
+            "time_ms": desc.time_ms,
+            "encoded": hex::encode(desc.encode()),
+        },
+        "query_proof": {"link_id": hex::encode(link_id), "proof": hex::encode(index::query_proof(&search, &link_id))},
     });
     println!("{}", serde_json::to_string_pretty(&doc).unwrap());
 }
