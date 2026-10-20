@@ -3156,15 +3156,9 @@ fn apply_view(d: &Daemon, ns: &str, records: &[Record]) -> Result<(), String> {
     let entry = cache.entry(ns.to_string()).or_default();
     let mut changed = false;
     let dirty = entry.state.as_mut().map(|s| s.take_dirty()).unwrap_or_default();
-    if !entry.view_built || entry.state.is_none() {
-        // First time (or after a rebuild): the view is rewritten from the state.
-        d.store.replace_namespace(ns, records).map_err(|e| e.to_string())?;
-        entry.view_built = entry.state.is_some();
-        changed = true;
-    } else {
+    if let (true, Some(st)) = (entry.view_built, entry.state.as_ref()) {
         // Only the records the state says changed: no copy of every record,
         // no comparison of everything on each write.
-        let st = entry.state.as_ref().expect("checked");
         for id in dirty {
             let now = st.record(&id);
             let before = d.store.get_record(ns, &id).map_err(|e| e.to_string())?;
@@ -3178,6 +3172,11 @@ fn apply_view(d: &Daemon, ns: &str, records: &[Record]) -> Result<(), String> {
                 changed = true;
             }
         }
+    } else {
+        // First time (or after a rebuild): the view is rewritten from the state.
+        d.store.replace_namespace(ns, records).map_err(|e| e.to_string())?;
+        entry.view_built = entry.state.is_some();
+        changed = true;
     }
     drop(cache);
     if changed {

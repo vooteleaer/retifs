@@ -151,6 +151,9 @@ fn index_keys(ns: &str, r: &Record) -> Vec<Vec<u8>> {
 }
 
 /// Keys starting with `prefix`: `prefix ..` its successor.
+/// Which value parts of index keys a term keeps.
+type ValueFilter = Box<dyn Fn(&[u8]) -> bool>;
+
 fn after(prefix: &[u8]) -> Vec<u8> {
     let mut end = prefix.to_vec();
     while let Some(last) = end.pop() {
@@ -283,7 +286,7 @@ impl SlabStore {
         };
         let at = |v: &[u8]| [base.as_slice(), v].concat();
         // Which value parts count, and the (inclusive) byte range holding them.
-        let (lo, hi, keep): (Vec<u8>, Vec<u8>, Box<dyn Fn(&[u8]) -> bool>) = match t {
+        let (lo, hi, keep): (Vec<u8>, Vec<u8>, ValueFilter) = match t {
             Term::Has(_) => (base.clone(), after(&base), Box::new(|_| true)),
             Term::Eq(_, v) => {
                 let Some(sk) = sort_key(v) else { return Ok(BTreeSet::new()) };
