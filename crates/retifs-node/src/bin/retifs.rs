@@ -158,7 +158,7 @@ async fn main() {
         }
         "get" => {
             let cap = it.next().unwrap_or_else(|| usage());
-            let (mut from, mut out, mut links, mut batch) = (Vec::new(), PathBuf::from("retifs.out"), 1usize, 0usize);
+            let (mut from, mut out, mut links, mut batch) = (Vec::new(), PathBuf::from("retifs.out"), 4usize, 0usize);
             while let Some(arg) = it.next() {
                 let mut value = || it.next().unwrap_or_else(|| usage());
                 match arg.as_str() {
