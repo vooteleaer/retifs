@@ -1,8 +1,8 @@
 # ADR-0019: Remote queries and the blind index
 
-- **Status:** proposed (draft: open points below need decisions before vectors)
+- **Status:** proposed (core and vectors done; open points below)
 - **Date:** 2026-10-20
-- **Irreversible:** partly. Remote queries to one's own nodes are protocol only. The blind index is [irreversible decision 10](../02-irreversible-decisions.md): its key derivation, token and entry formats end up in stored chunks and in capabilities handed to other nodes, so it needs vectors verified against RNS before any real index is built.
+- **Irreversible:** partly. Remote queries to one's own nodes are protocol only. The blind index is [irreversible decision 10](../02-irreversible-decisions.md): its key derivation, token and entry formats end up in stored chunks and in capabilities handed to other nodes, Vectors in `crates/retifs-core/test-vectors/index-v1.json`, verified with RNS's HKDF, HMAC, AES and umsgpack (`verify_index_rns.py`).
 
 ## Context
 Queries run only against a node's own copy of a namespace ([ADR-0016](0016-records-and-snapshots.md), [ADR-0018](0018-state-trees.md)). A device that hasn't synced a namespace (a phone, a thin client, a node behind LoRa) can't ask "photos in album Prangli" without first fetching the whole state.
@@ -82,7 +82,9 @@ A search node, beyond what a holder sees:
 - The local API gained `Remote { node, req }` (owner only, one hop), and the CLI `--via NODE`: any command runs against the other node, carried by the local daemon, which identifies once per link.
 - Live, two daemons on one machine: B queried A's namespace in 17–19 ms per request with nothing synced, read a record's history, and wrote with a read-write scope. A node that wasn't admitted, a removed device, another namespace, writing with a read-only scope and granting were all refused.
 
-**Not yet:** the blind index (layer 2) and its vectors; remote live queries beyond `Watch`; a cross-machine measurement over slow links.
+**Layer 2, the blind index (core):** `retifs_core::index` derives the keys, computes tokens and entries, builds the index tree and looks tokens up. The Prolly tree takes keys of any fixed length now (state trees keep 16-byte keys; their vectors are byte-identical). A list value is indexed per element. Vectors cover tokens over every value type, a 401-record namespace (416 tree keys, 17 nodes) and lookups.
+
+**Not yet:** building the index at checkpoints, the index channel, search capabilities and `/retifs/query`; remote live queries beyond `Watch`; a cross-machine measurement over slow links.
 
 ## Consequences
 - Easier: a phone or LoRa node can query a namespace it doesn't hold; search can be delegated to always-on nodes without giving them the read key.

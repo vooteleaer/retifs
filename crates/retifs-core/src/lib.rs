@@ -9,6 +9,7 @@ pub mod checkpoint;
 pub mod chunk;
 pub mod chunker;
 pub mod cid;
+pub mod index;
 pub mod keywrap;
 pub mod lease;
 pub mod ops;

@@ -1,9 +1,10 @@
-//! Prolly trees (ADR-0018): a sorted map from record ID to canonical bytes,
-//! stored as sealed chunks, whose shape depends only on the keys.
+//! Prolly trees (ADR-0018): a sorted map from fixed-length keys (record IDs
+//! for namespace state; token ‖ entry for the blind index, ADR-0019) to
+//! canonical bytes, stored as sealed chunks, whose shape depends only on the keys.
 //!
 //! ```text
-//! leaf     = { "entries": [ [ id (bin 16), value (canonical msgpack, embedded) ], … ], "level": 0 }
-//! internal = { "children": [ [ first id (bin 16), cid (bin 33), seed (bin 32) ], … ], "level": n }
+//! leaf     = { "entries": [ [ key (bin K), value (canonical msgpack, embedded) ], … ], "level": 0 }
+//! internal = { "children": [ [ first key (bin K), cid (bin 33), seed (bin 32) ], … ], "level": n }
 //! a node ends after the entry (child) with key k at level L if
 //!     u32_be(SHA-256("retifs/v1/prolly" ‖ L ‖ k)[0..4]) < 2^32 / FANOUT,
 //! or once it holds MAX_NODE bytes of entries
@@ -33,6 +34,8 @@ const LABEL: &[u8] = b"retifs/v1/prolly";
 pub type Root = (Cid, Seed);
 /// Entries by key: record ID and its canonical msgpack value.
 pub type Entries = Vec<(RecordId, Vec<u8>)>;
+/// The longest key a node may carry.
+const MAX_KEY: usize = 64;
 
 #[derive(Debug)]
 pub enum TreeError<E> {
@@ -51,18 +54,18 @@ impl<E: std::fmt::Display> std::fmt::Display for TreeError<E> {
     }
 }
 
-fn boundary(level: u8, key: &RecordId) -> bool {
+fn boundary(level: u8, key: &[u8]) -> bool {
     let h = Sha256::digest([LABEL, &[level], key].concat());
     (u32::from_be_bytes(h[..4].try_into().unwrap()) as u64) < (1u64 << 32) / FANOUT as u64
 }
 
 /// Splits items into nodes by the boundary rule.
-fn chunk<T>(level: u8, items: Vec<(RecordId, T)>, size: impl Fn(&T) -> usize) -> Vec<Vec<(RecordId, T)>> {
+fn chunk<T, const K: usize>(level: u8, items: Vec<([u8; K], T)>, size: impl Fn(&T) -> usize) -> Vec<Vec<([u8; K], T)>> {
     let mut nodes = Vec::new();
     let mut cur = Vec::new();
     let mut bytes = 0;
     for (k, v) in items {
-        bytes += size(&v) + 16;
+        bytes += size(&v) + K;
         cur.push((k, v));
         if boundary(level, &k) || bytes >= MAX_NODE {
             nodes.push(std::mem::take(&mut cur));
@@ -75,7 +78,7 @@ fn chunk<T>(level: u8, items: Vec<(RecordId, T)>, size: impl Fn(&T) -> usize) ->
     nodes
 }
 
-fn encode_leaf(entries: &[(RecordId, Vec<u8>)]) -> Vec<u8> {
+fn encode_leaf<const K: usize>(entries: &[([u8; K], Vec<u8>)]) -> Vec<u8> {
     let mut out = Vec::new();
     write_map_len(&mut out, 2);
     write_str(&mut out, "entries");
@@ -90,7 +93,7 @@ fn encode_leaf(entries: &[(RecordId, Vec<u8>)]) -> Vec<u8> {
     out
 }
 
-fn encode_internal(level: u8, children: &[(RecordId, Root)]) -> Vec<u8> {
+fn encode_internal<const K: usize>(level: u8, children: &[([u8; K], Root)]) -> Vec<u8> {
     let mut out = Vec::new();
     write_map_len(&mut out, 2);
     write_str(&mut out, "children");
@@ -106,9 +109,13 @@ fn encode_internal(level: u8, children: &[(RecordId, Root)]) -> Vec<u8> {
     out
 }
 
-/// Builds the tree of `entries` (sorted by ID, unique). Returns its root, or
+/// Builds the tree of `entries` (sorted by key, unique). Returns its root, or
 /// None for an empty map. Values must be canonical msgpack.
-pub fn build<S: Store>(store: &mut S, secret: &ConvergenceSecret, entries: Entries) -> Result<Option<Root>, TreeError<S::Error>> {
+pub fn build<S: Store, const K: usize>(
+    store: &mut S,
+    secret: &ConvergenceSecret,
+    entries: Vec<([u8; K], Vec<u8>)>,
+) -> Result<Option<Root>, TreeError<S::Error>> {
     if entries.is_empty() {
         return Ok(None);
     }
@@ -117,7 +124,7 @@ pub fn build<S: Store>(store: &mut S, secret: &ConvergenceSecret, entries: Entri
         store.put(sealed.cid, sealed.ciphertext).map_err(TreeError::Store)?;
         Ok((sealed.cid, sealed.seed))
     };
-    let mut level: Vec<(RecordId, Root)> = Vec::new();
+    let mut level: Vec<([u8; K], Root)> = Vec::new();
     for node in chunk(0, entries, |v| v.len()) {
         let first = node[0].0;
         level.push((first, put(encode_leaf(&node))?));
@@ -126,7 +133,7 @@ pub fn build<S: Store>(store: &mut S, secret: &ConvergenceSecret, entries: Entri
     while level.len() > 1 {
         height += 1;
         let mut next = Vec::new();
-        for node in chunk(height, level, |_| 81) {
+        for node in chunk(height, level, |_| K + 65) {
             let first = node[0].0;
             next.push((first, put(encode_internal(height, &node))?));
         }
@@ -135,9 +142,10 @@ pub fn build<S: Store>(store: &mut S, secret: &ConvergenceSecret, entries: Entri
     Ok(Some(level[0].1))
 }
 
+/// A decoded node; keys of any length up to `MAX_KEY` (the typed API checks K).
 enum Node {
-    Leaf(Vec<(RecordId, Vec<u8>)>),
-    Internal(Vec<(RecordId, Root)>),
+    Leaf(Vec<(Vec<u8>, Vec<u8>)>),
+    Internal(Vec<(Vec<u8>, Root)>),
 }
 
 fn read_node<S: Store>(store: &S, root: &Root) -> Result<Node, TreeError<S::Error>> {
@@ -160,7 +168,7 @@ fn decode_node(bytes: &[u8]) -> Result<Node, RecordError> {
                 if r.array_len()? != 2 {
                     return Err(RecordError::Malformed("entry"));
                 }
-                let k: RecordId = r.bin()?.try_into().map_err(|_| RecordError::Malformed("key"))?;
+                let k = key(&r.bin()?)?;
                 entries.push((k, any_value(&mut r)?.to_vec()));
             }
             Node::Leaf(entries)
@@ -172,7 +180,7 @@ fn decode_node(bytes: &[u8]) -> Result<Node, RecordError> {
                 if r.array_len()? != 3 {
                     return Err(RecordError::Malformed("child"));
                 }
-                let k: RecordId = r.bin()?.try_into().map_err(|_| RecordError::Malformed("key"))?;
+                let k = key(&r.bin()?)?;
                 let cid = Cid::from_bytes(r.bin()?.try_into().map_err(|_| RecordError::Malformed("cid"))?)
                     .ok_or(RecordError::Malformed("CID version"))?;
                 let seed = Seed(r.bin()?.try_into().map_err(|_| RecordError::Malformed("seed"))?);
@@ -195,6 +203,13 @@ fn decode_node(bytes: &[u8]) -> Result<Node, RecordError> {
         return Err(RecordError::Malformed("trailing bytes"));
     }
     Ok(node)
+}
+
+fn key(b: &[u8]) -> Result<Vec<u8>, RecordError> {
+    if b.is_empty() || b.len() > MAX_KEY {
+        return Err(RecordError::Malformed("key"));
+    }
+    Ok(b.to_vec())
 }
 
 /// Reads one msgpack value of any kind, maps included (stamped records are
@@ -232,13 +247,13 @@ fn skip_any(r: &mut Reader, depth: usize) -> Result<(), RecordError> {
 }
 
 /// The value stored under `key`, if any.
-pub fn get<S: Store>(store: &S, root: &Root, key: &RecordId) -> Result<Option<Vec<u8>>, TreeError<S::Error>> {
+pub fn get<S: Store, const K: usize>(store: &S, root: &Root, key: &[u8; K]) -> Result<Option<Vec<u8>>, TreeError<S::Error>> {
     let mut node = read_node(store, root)?;
     loop {
         match node {
-            Node::Leaf(entries) => return Ok(entries.into_iter().find(|(k, _)| k == key).map(|(_, v)| v)),
+            Node::Leaf(entries) => return Ok(entries.into_iter().find(|(k, _)| k.as_slice() == key.as_slice()).map(|(_, v)| v)),
             Node::Internal(children) => {
-                let Some((_, child)) = children.iter().rev().find(|(first, _)| first <= key) else { return Ok(None) };
+                let Some((_, child)) = children.iter().rev().find(|(first, _)| first.as_slice() <= key.as_slice()) else { return Ok(None) };
                 node = read_node(store, child)?;
             }
         }
@@ -246,11 +261,38 @@ pub fn get<S: Store>(store: &S, root: &Root, key: &RecordId) -> Result<Option<Ve
 }
 
 /// Every entry, by key.
-pub fn read_all<S: Store>(store: &S, root: &Root) -> Result<Entries, TreeError<S::Error>> {
+pub fn read_all<S: Store, const K: usize>(store: &S, root: &Root) -> Result<Vec<([u8; K], Vec<u8>)>, TreeError<S::Error>> {
     let mut out = Vec::new();
     for leaf in leaves(store, root)? {
         if let Node::Leaf(entries) = read_node(store, &leaf)? {
-            out.extend(entries);
+            for (k, v) in entries {
+                out.push((k.as_slice().try_into().map_err(|_| TreeError::Corrupt("key length"))?, v));
+            }
+        }
+    }
+    Ok(out)
+}
+
+/// Every entry whose key starts with `prefix`, by key, reading only the
+/// nodes that can hold such keys (a blind index lookup, ADR-0019).
+pub fn scan_prefix<S: Store>(store: &S, root: &Root, prefix: &[u8]) -> Result<Vec<(Vec<u8>, Vec<u8>)>, TreeError<S::Error>> {
+    let mut out = Vec::new();
+    let mut stack = vec![*root];
+    while let Some(n) = stack.pop() {
+        match read_node(store, &n)? {
+            Node::Leaf(entries) => out.extend(entries.into_iter().filter(|(k, _)| k.starts_with(prefix))),
+            Node::Internal(children) => {
+                // Child i holds keys from its first key up to the next child's.
+                let mut take = Vec::new();
+                for (i, (first, child)) in children.iter().enumerate() {
+                    let starts_before_end = first.starts_with(prefix) || first.as_slice() < prefix;
+                    let ends_after_start = children.get(i + 1).is_none_or(|(next, _)| next.as_slice() > prefix);
+                    if starts_before_end && ends_after_start {
+                        take.push(*child);
+                    }
+                }
+                stack.extend(take.into_iter().rev());
+            }
         }
     }
     Ok(out)
@@ -317,10 +359,13 @@ pub fn diff<S: Store>(store: &S, a: Option<&Root>, b: Option<&Root>) -> Result<V
             eb.extend(entries);
         }
     }
-    let mut keys: Vec<RecordId> = ea.keys().chain(eb.keys()).copied().collect();
+    let mut keys: Vec<Vec<u8>> = ea.keys().chain(eb.keys()).cloned().collect();
     keys.sort();
     keys.dedup();
-    Ok(keys.into_iter().filter(|k| ea.get(k) != eb.get(k)).collect())
+    keys.into_iter()
+        .filter(|k| ea.get(k) != eb.get(k))
+        .map(|k| k.as_slice().try_into().map_err(|_| TreeError::Corrupt("key length")))
+        .collect()
 }
 
 #[cfg(test)]
@@ -385,6 +430,6 @@ mod tests {
         let gone = c.remove(10).0;
         let root_c = build(&mut st, &secret, c).unwrap().unwrap();
         assert_eq!(diff(&st, Some(&root), Some(&root_c)).unwrap(), vec![gone]);
-        assert_eq!(build(&mut st, &secret, Vec::new()).unwrap(), None);
+        assert_eq!(build(&mut st, &secret, Entries::new()).unwrap(), None);
     }
 }
