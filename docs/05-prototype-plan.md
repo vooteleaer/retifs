@@ -50,7 +50,8 @@ Prototypes are throwaway. They're for learning, not for locking in the format. T
 - [ ] Volunteer storage offers (`retifs.store`).
 - [ ] Diffuse mode: anonymous push seeding, epidemic re-replication with jitter, cover holdings ([ADR-0011](adr/0011-redundancy-by-default.md)).
 - [x] Format additions: compression flag in the chunk frame (opt-in zstd) and inline tiny files in manifests (node kind 2); vectors regenerated and verified against RNS.
-- [ ] Decide before accepting ADR-0008/0009: full replicas vs erasure coding.
+- [x] Decide before accepting ADR-0008/0009: full replicas now, erasure coding later below chunks; a 512 B smallest class ([format decisions](08-open-format-decisions.md)).
+- [ ] External review of ADR-0008/0009 (construction, KDF labels), then accept them.
 - [ ] Slow links: per-interface priority and airtime budget; no bulk/spare/diffusion over LoRa ([ADR-0013](adr/0013-slow-links.md)); LoRa measurements once a second RNode is available.
 
 ## Phase 2: database

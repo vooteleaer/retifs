@@ -1,6 +1,8 @@
-# Open format decisions (blocking ADR-0008/0009)
+# Format decisions before ADR-0008/0009
 
-Two choices are left before [ADR-0008](adr/0008-chunk-encryption-and-cid.md) (chunk encryption, CIDs) and [ADR-0009](adr/0009-manifest-format.md) (manifests) can be accepted. Both are fixed for good once real data is stored. The rest of their earlier open points are decided: PADMÉ over the chunk count (final-chunk padding) and one secret per record (personal scheme). Separately, an external review of the construction and its KDF labels is still needed. That is an action, not a choice.
+**Both decided on 2026-10-20: option A each** (replicas now, erasure coding later below chunks; a 512 B class). The options are kept here as the record.
+
+Two choices were left before [ADR-0008](adr/0008-chunk-encryption-and-cid.md) (chunk encryption, CIDs) and [ADR-0009](adr/0009-manifest-format.md) (manifests) can be accepted. Both are fixed for good once real data is stored. The rest of their earlier open points are decided: PADMÉ over the chunk count (final-chunk padding) and one secret per record (personal scheme). Separately, an external review of the construction and its KDF labels is still needed. That is an action, not a choice.
 
 ## 1. Full replicas vs erasure coding
 

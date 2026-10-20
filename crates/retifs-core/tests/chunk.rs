@@ -33,16 +33,19 @@ fn roundtrip_at_every_class_boundary() {
             assert_eq!(open(&s.cid, &s.seed, &s.ciphertext).unwrap(), data);
         }
     }
-    assert_eq!(class_for(MAX_DATA), Some(CLASSES[8]));
+    assert_eq!(class_for(MAX_DATA), Some(CLASSES[9]));
+    assert_eq!(class_for(0), Some(512));
+    assert_eq!(class_for(512 - 64 - 5), Some(512));
+    assert_eq!(class_for(512 - 64 - 4), Some(1024));
     assert_eq!(seal(&secret, &vec![0; MAX_DATA + 1]).unwrap_err(), ChunkError::TooLarge);
 }
 
 #[test]
 fn ciphertext_size_hides_exact_length() {
     let secret = ConvergenceSecret::public();
-    let a = seal(&secret, &pattern(10, 0)).unwrap();
-    let b = seal(&secret, &pattern(900, 0)).unwrap();
-    assert_eq!(a.ciphertext.len(), b.ciphertext.len());
+    let len = |n| seal(&secret, &pattern(n, 0)).unwrap().ciphertext.len();
+    assert_eq!(len(10), len(400));
+    assert_eq!(len(500), len(900));
 }
 
 #[test]

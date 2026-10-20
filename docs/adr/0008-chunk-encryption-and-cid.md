@@ -21,7 +21,7 @@ Supports 1 (always encrypted), 3 (only RNS primitives) and 7 (blind storage node
 Option 3. Version 1 of the construction:
 
 ### Size classes and framing
-- The **ciphertext size** is one of `2^k` bytes, `k = 10..18` (1 KiB … 256 KiB). These are also the slab sizes of the local store ([ADR-0007](0007-local-store-layout.md)).
+- The **ciphertext size** is one of `2^k` bytes, `k = 9..18` (512 B … 256 KiB; 512 B added 2026-10-20, see below). These are also the slab sizes of the local store ([ADR-0007](0007-local-store-layout.md)).
 - `frame = encoding (u8) ‖ u32_be(len(payload)) ‖ payload ‖ 0x00 …` with zero fill to `class − 64` bytes, using the smallest class that fits. Encoding 0 = raw (payload is the data), 1 = zstd (payload is the compressed data; [ADR-0013](0013-slow-links.md)). The maximum payload per chunk is 262 075 bytes.
 - The Token then adds IV (16), a full PKCS7 block (16, since `class − 64` is a multiple of 16) and the HMAC (32), so `len(ciphertext) = class` exactly.
 
@@ -96,10 +96,10 @@ Key and IV are both derived from `seed`, which is a PRF (HMAC) of the full frame
   FastCDC resynchronises at the next natural cut, so even with many forced cuts, dedup after edits stays close to the current config.
 
 - **Compression flag: added (2026-10-14).** The frame carries an encoding byte; compression is opt-in per write (`Compression::Zstd`, level 3) because a compressed chunk's size class reveals compressibility. zstd output can differ between zstd versions, so compressed public content converges only between writers with the same output. Vectors include a zstd case, which Python's stdlib zstd decompresses.
-- **Also blocking (from [ADR-0011](0011-redundancy-by-default.md)):** full replicas vs erasure coding.
+- ~~Also blocking (from [ADR-0011](0011-redundancy-by-default.md)): full replicas vs erasure coding~~: **decided (2026-10-20):** full replicas now; erasure coding later as a separate layer below chunks (share maps: a chunk group = n shares, any k rebuild it, each chunk still checked against its CID), with its own ADR. Chunks and manifests don't change for it, so nothing has to be reserved in ADR-0008/0009 ([options](../08-open-format-decisions.md)).
 - **Before acceptance:**
   - an external review of the construction and the KDF labels;
-  - a decision on whether 1 KiB as the smallest class is right for LoRa;
+  - ~~a decision on whether 1 KiB as the smallest class is right for LoRa~~: **decided (2026-10-20): a 512 B class.** Every modification is a commit (268 B) and an operations file (48–389 B); at 1 KiB each, a write cost 2 KiB on the wire, now usually 1 KiB. One more class tells small objects apart a little better. Vectors regenerated and verified with RNS. To be measured on LoRa when the radio link works again;
   - ~~a decision on padding the final chunk~~: **decided (2026-10-15): PADMÉ over the chunk count** ([ADR-0009](0009-manifest-format.md)). Padding only the final chunk would still reveal the size to 16 KiB through the chunk count. PADMÉ pads the count of data chunks to the next PADMÉ value (≤ 12 % overhead, typically a few percent), so counts reveal only a bucket (O(log log n) bits instead of O(log n)). Readers fetch padding chunks like real ones, so request volume matches too;
   - ~~fixing the personal scheme~~: **decided: per record** (see above);
   - ~~reducing the padding overhead~~: **resolved** by aligning the chunker to the 16 KiB class (8/12/16 KiB−68). Measured 10 % overhead, with 100 % of non-final chunks in the 16 KiB class.

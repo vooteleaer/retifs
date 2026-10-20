@@ -1,7 +1,7 @@
 //! Local slab store (ADR-0007) with a disk budget (ADR-0012), prototype.
 //!
 //! ```text
-//! <root>/slabs/c<N>k/seg-000000 …   fixed-size slots, one directory per size class
+//! <root>/slabs/c<N>k|c512b/seg-…   fixed-size slots, one directory per size class
 //! <root>/index.redb                 CID → (class, segment, slot, tier); free slots; counters;
 //!                                   per-tier usage; serving index; last access
 //! ```
@@ -46,7 +46,11 @@ pub use placement::{surplus_holder, HolderStats, HolderView, LinkQuality, Storag
 pub use wants::{Hint, PeerId, Want};
 
 use redb::{Database, ReadableTable, ReadableTableMetadata, TableDefinition};
-use retifs_core::{chunk::CLASSES, ChunkToken, Cid, Store};
+use retifs_core::{ChunkToken, Cid, Store};
+
+/// Slot sizes by the class number stored in the index. The order is fixed
+/// for good (stored numbers keep their meaning); new classes are appended.
+const SLOT_SIZES: [usize; 10] = [1 << 10, 1 << 11, 1 << 12, 1 << 13, 1 << 14, 1 << 15, 1 << 16, 1 << 17, 1 << 18, 1 << 9];
 
 /// CID → (class index, segment, slot, tier flags)
 const INDEX: TableDefinition<&[u8], (u8, u32, u32, u8)> = TableDefinition::new("index");
@@ -284,7 +288,7 @@ impl SlabStore {
                 let w = self.db.begin_write()?;
                 {
                     w.open_table(INDEX)?.insert(key, (c, seg, slot, flags | tier))?;
-                    move_usage(&w, Tier::of(flags), Tier::of(flags | tier), CLASSES[c as usize] as u64)?;
+                    move_usage(&w, Tier::of(flags), Tier::of(flags | tier), SLOT_SIZES[c as usize] as u64)?;
                 }
                 w.commit()?;
             }
@@ -321,7 +325,7 @@ impl SlabStore {
         let Some((class, seg, slot, flags)) = self.lookup(cid)? else {
             return Ok(None);
         };
-        let size = CLASSES[class as usize];
+        let size = SLOT_SIZES[class as usize];
         let mut f = File::open(self.segment_path(class, seg))?;
         f.seek(SeekFrom::Start(slot as u64 * size as u64))?;
         let mut buf = vec![0u8; size];
@@ -355,7 +359,7 @@ impl SlabStore {
             if let Some((c, seg, slot, flags)) = old {
                 index.insert(key, (c, seg, slot, tier))?;
                 drop(index);
-                move_usage(&w, Tier::of(flags), Tier::of(tier), CLASSES[c as usize] as u64)?;
+                move_usage(&w, Tier::of(flags), Tier::of(tier), SLOT_SIZES[c as usize] as u64)?;
             }
             old.is_some()
         };
@@ -563,7 +567,7 @@ impl SlabStore {
                 let Some(rank) = order.iter().position(|&o| o == Tier::of(flags)) else { continue };
                 let cid = Cid::from_bytes(k.value().try_into().expect("index keys are CIDs")).expect("CID version");
                 let at = access.get(k.value())?.map(|g| g.value()).unwrap_or(0);
-                candidates.push((rank, prefer_class.is_some_and(|p| p != class), at, cid, CLASSES[class as usize] as u64));
+                candidates.push((rank, prefer_class.is_some_and(|p| p != class), at, cid, SLOT_SIZES[class as usize] as u64));
             }
         }
         candidates.sort_by_key(|c| (c.0, c.1, c.2));
@@ -600,7 +604,7 @@ impl SlabStore {
             }
         }
         for &(class, _, _, t) in &holes {
-            add_usage(&w, t, -(CLASSES[class as usize] as i64))?;
+            add_usage(&w, t, -(SLOT_SIZES[class as usize] as i64))?;
         }
         w.commit()?;
         let mut touched = self.touched.lock().unwrap();
@@ -609,7 +613,7 @@ impl SlabStore {
         }
         drop(touched);
         for (class, seg, slot, _) in &holes {
-            let size = CLASSES[*class as usize] as u64;
+            let size = SLOT_SIZES[*class as usize] as u64;
             // Best effort: a failed punch only means the OS keeps the bytes until reuse.
             let _ = punch_hole(&self.segment_path(*class, *seg), *slot as u64 * size, size);
         }
@@ -636,7 +640,10 @@ impl SlabStore {
     fn segment_path(&self, class: u8, seg: u32) -> PathBuf {
         self.root
             .join("slabs")
-            .join(format!("c{}k", CLASSES[class as usize] / 1024))
+            .join(match SLOT_SIZES[class as usize] {
+                s if s >= 1024 => format!("c{}k", s / 1024),
+                s => format!("c{s}b"),
+            })
             .join(format!("seg-{seg:06}"))
     }
 
@@ -682,7 +689,7 @@ fn move_usage(w: &redb::WriteTransaction, from: Tier, to: Tier, bytes: u64) -> R
 }
 
 fn class_index(len: usize) -> Result<u8, StoreError> {
-    CLASSES.iter().position(|&c| c == len).map(|i| i as u8).ok_or(StoreError::NotAClassSize(len))
+    SLOT_SIZES.iter().position(|&c| c == len).map(|i| i as u8).ok_or(StoreError::NotAClassSize(len))
 }
 
 /// Takes a free slot of this class, or the next never-used one.
@@ -823,5 +830,16 @@ impl Store for TrackedPinned<'_> {
 
     fn get(&self, cid: &Cid) -> Result<Option<Vec<u8>>, StoreError> {
         self.store.fetch(cid)
+    }
+}
+
+#[cfg(test)]
+mod slot_size_tests {
+    #[test]
+    fn every_chunk_class_has_a_slot_size() {
+        for c in retifs_core::chunk::CLASSES {
+            assert!(super::SLOT_SIZES.contains(&c), "{c}");
+        }
+        assert_eq!(super::SLOT_SIZES.len(), retifs_core::chunk::CLASSES.len());
     }
 }

@@ -59,7 +59,7 @@ Data someone needs beyond a slow link has to cross it, once, and then stays on t
 
 ## Open
 - **Failure domains:** the nearest nodes are usually in the same building, on the same power and uplink. Whether data only one site needs should also keep one copy further away is open.
-- **Erasure coding** with the owner's local full copy (cheap repair, half the upload of full replicas; Rodrigues & Liskov 2005) is the leading candidate for the replicas-vs-erasure-coding decision that blocks ADR-0008/0009. It needs its own ADR.
+- **Erasure coding** with the owner's local full copy (cheap repair, half the upload of full replicas; Rodrigues & Liskov 2005) is the leading candidate for the erasure-coding layer that comes after full replicas (decided 2026-10-20, [ADR-0011](0011-redundancy-by-default.md)). It needs its own ADR.
 - **Stamps** (proof of work, as in LXMF) against lease spam; per-signer quotas don't work with per-lease keys.
 
 ## Impact on the threat model

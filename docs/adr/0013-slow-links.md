@@ -27,7 +27,7 @@ Priority order:
 Respect RNS airtime limits and announce-rate targets, and never saturate a shared channel.
 
 ### Inline tiny files (format: added)
-Files of at most 951 bytes are stored inside the root manifest node (node kind 2, [ADR-0009](0009-manifest-format.md)), so reading one is one fetch of one 1 KiB blob instead of two (root node, then chunk). A 1 KiB blob still needs a small Resource on LoRa (about 3 packets), since 1 KiB plus Token overhead exceeds one link packet.
+Files of at most 951 bytes are stored inside the root manifest node (node kind 2, [ADR-0009](0009-manifest-format.md)), so reading one is one fetch of one blob of at most 1 KiB instead of two (root node, then chunk). A 1 KiB blob still needs a small Resource on LoRa (about 3 packets), since 1 KiB plus Token overhead exceeds one link packet.
 
 ### Compression before encryption (format: added)
 - **Why:** ciphertext doesn't compress, so RNS Resource compression gains nothing for retifs chunks. Text and metadata compress 3–5×.

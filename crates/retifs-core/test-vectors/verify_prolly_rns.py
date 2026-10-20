@@ -21,7 +21,7 @@ from RNS.Cryptography.HKDF import hkdf
 from verify_ops_rns import allows, holds, limits_of, narrowed, op as ops_op
 from verify_rns import seal
 
-CLASSES = [1 << k for k in range(10, 19)]
+CLASSES = [1 << k for k in range(9, 19)]
 LABEL = b"retifs/v1/prolly"
 
 

@@ -30,8 +30,9 @@ type Dec = cbc::Decryptor<Aes256>;
 
 const CHUNK_SALT: &[u8] = b"retifs/v1/chunk";
 
-/// Ciphertext sizes: 1 KiB … 256 KiB.
-pub const CLASSES: [usize; 9] = [1 << 10, 1 << 11, 1 << 12, 1 << 13, 1 << 14, 1 << 15, 1 << 16, 1 << 17, 1 << 18];
+/// Ciphertext sizes: 512 B … 256 KiB. 512 B carries a commit or a small
+/// operations file in one chunk, halving small writes on slow links (decided 2026-10-20).
+pub const CLASSES: [usize; 10] = [1 << 9, 1 << 10, 1 << 11, 1 << 12, 1 << 13, 1 << 14, 1 << 15, 1 << 16, 1 << 17, 1 << 18];
 /// IV (16) + one full PKCS7 block (16) + HMAC (32).
 pub const OVERHEAD: usize = 64;
 /// Frame header: encoding byte + u32 payload length.

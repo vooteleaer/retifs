@@ -2,7 +2,7 @@
 
 - **Status:** proposed
 - **Date:** 2026-10-14
-- **Irreversible:** partly. The choice between full replicas and erasure-coded shares affects the content format and **blocks acceptance of [ADR-0008](0008-chunk-encryption-and-cid.md) and [ADR-0009](0009-manifest-format.md)**.
+- **Irreversible:** partly. Erasure-coded shares would be a format of their own; decided (2026-10-20) to start with full replicas and add shares later as a layer below chunks, so this no longer blocks [ADR-0008](0008-chunk-encryption-and-cid.md) and [ADR-0009](0009-manifest-format.md).
 
 > **Refined by [ADR-0014](0014-placement-follows-need.md):** every node holds for others by default; whoever needs the data (not only the owner) issues leases to the nearest storage nodes; the copy count follows need and holder reliability instead of a fixed target.
 
@@ -82,10 +82,10 @@ A receipt is a promise. Before handing out a lease, the owner precomputes a few 
 - **Link-aware:** bulk replication uses fast links. LoRa-only nodes aren't recruited as bulk holders; LoRa carries wants, leases, receipts and small repairs.
 - **Opt-out:** small devices (Pi, phone) may opt out of holding others' data and are still protected themselves.
 
-### Full replicas vs erasure coding (open, blocks ADR-0008/0009)
+### Full replicas vs erasure coding (decided 2026-10-20)
 - **Full replicas** are simple and fit the current format. 3 copies cost 3× and survive 2 losses.
 - **Erasure coding** (Tahoe-LAFS style, k-of-n) costs less per unit of protection: 4-of-6 costs 1.5× and survives 2 losses; 3-of-10 costs 3.3× and survives 7.
-- Shares would be new CIDs derived from chunk groups, so this is a format decision. It must be settled before ADR-0008/0009 are accepted. A likely outcome is full replicas first, with erasure-coded share groups as a later, versioned layer, which would still need room in the format now.
+- **Decided:** full replicas now; erasure coding later as a separate layer below chunks (share maps: a chunk group = n shares, any k rebuild it, each chunk still checked against its CID), with its own ADR. Chunks and manifests don't change for it, so nothing has to be reserved in ADR-0008/0009. Replicas suit slow links: one holder is enough to read, where shares need k ([options](../08-open-format-decisions.md)).
 
 ## Impact on the threat model
 See the [threat model](../04-threat-model.md).

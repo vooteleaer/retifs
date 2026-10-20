@@ -92,7 +92,7 @@ fn storage_sees_only_class_sized_blobs() {
     let mut store = MemStore::default();
     write(&mut store, &ConvergenceSecret::public(), &data).unwrap();
     for ct in store.0.values() {
-        assert!(ct.len().is_power_of_two() && (1024..=262_144).contains(&ct.len()));
+        assert!(ct.len().is_power_of_two() && (512..=262_144).contains(&ct.len()));
     }
 }
 
@@ -115,7 +115,7 @@ fn tiny_files_are_inline_in_one_blob() {
         let mut store = MemStore::default();
         let f = write(&mut store, &secret, &data).unwrap();
         assert_eq!(store.0.len(), 1, "len {len}: exactly one blob");
-        assert_eq!(store.0[&f.root].len(), 1024, "len {len}: 1 KiB class");
+        assert!(store.0[&f.root].len() <= 1024, "len {len}: a 512 B or 1 KiB chunk");
         assert_eq!(read_all(&store, &f).unwrap(), data);
         if len > 10 {
             assert_eq!(read_range(&store, &f, 3..10).unwrap(), &data[3..10]);

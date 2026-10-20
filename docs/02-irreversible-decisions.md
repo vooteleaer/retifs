@@ -18,4 +18,4 @@ These stay forever in every stored chunk and signature. Everything else can be f
 
 Each decision needs an ADR (`adr/`) and test vectors before any real data is stored with it. The crypto parts get an external review.
 
-What still blocks ADR-0008/0009 (replicas vs erasure coding, the smallest size class) is laid out with options in [open format decisions](08-open-format-decisions.md).
+The last format choices before ADR-0008/0009 (replicas vs erasure coding, the smallest size class) were decided on 2026-10-20 ([format decisions](08-open-format-decisions.md)); what remains is the external review.

@@ -6,7 +6,6 @@
 - **Scaling:** regional limiting of announces, hierarchy, path requests on demand.
 - **Relationship with Prns:** upstream contributions vs fork policy, given one dominant maintainer.
 - **Pinning economics:** reciprocity vs an exchange mechanism, for volunteer storage ([ADR-0011](adr/0011-redundancy-by-default.md)).
-- **Full replicas vs erasure coding:** k-of-n shares cost less per unit of protection but are a format decision; blocks accepting ADR-0008/0009.
 - **Default disk budget:** 50 % of the volume and a reserve of max(10 %, 5 GiB) are guesses; tune on real devices ([ADR-0012](adr/0012-disk-budget.md)).
 - **Compression before encryption:** which algorithm (zstd?), and the default per content type; CRIME-style size leaks for mixed-content chunks ([ADR-0013](adr/0013-slow-links.md)).
 - **Spread defaults:** generation ranges and the probabilistic decrement rule, and default radius per class ([ADR-0011](adr/0011-redundancy-by-default.md)).

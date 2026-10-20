@@ -26,7 +26,7 @@ Option 3.
 ```
 ~/.local/share/retifs/store/        (or /var/lib/retifs/store, system-wide)
   slabs/
-    c16k/  seg-000001 …             one directory per size class
+    c16k/  seg-000001 …             one directory per size class (c512b for 512 B)
     c32k/  …                        each segment = N fixed-size slots
     c256k/ …
   index.redb                        CID → (class, segment, slot), tier, refs, leases
