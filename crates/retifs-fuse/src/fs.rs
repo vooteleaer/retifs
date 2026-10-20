@@ -20,6 +20,8 @@ use crate::tree::{self, Node, Tree, QUERY_DIR};
 /// tree is re-read from the daemon (other members' writes show up after this).
 const TTL: Duration = Duration::from_secs(1);
 const XATTR_PREFIX: &str = "user.retifs.";
+/// `user.retifs.local`: computed, whether a file's content is on this device.
+const LOCAL_XATTR: &str = "local";
 /// Content kept in memory for reads, at most.
 const CACHE_BYTES: usize = 256 << 20;
 
@@ -659,6 +661,24 @@ impl Filesystem for RetifsFs {
         let (Some(path), Ok(name)) = (self.path(ino), os(name)) else { return reply.error(libc::ENOENT) };
         self.refresh(false);
         let Some(key) = name.strip_prefix(XATTR_PREFIX) else { return reply.error(libc::ENODATA) };
+        // Computed, not stored: whether the content is on this device (ADR-0005).
+        if key == LOCAL_XATTR
+            && let Some((_, cap)) = self.file_id(&path)
+        {
+            let v = match cap {
+                None => "yes".to_string(),
+                Some(cap) => match self.call(Request::Status { cap }) {
+                    Ok(Response::Status(st)) => match st.total_chunks {
+                        Some(t) if st.local_chunks >= t && st.missing_nodes == 0 => "yes".into(),
+                        _ if st.local_chunks == 0 => "no".into(),
+                        Some(t) => format!("partial ({}/{} chunks)", st.local_chunks, t),
+                        None => format!("partial ({} chunks)", st.local_chunks),
+                    },
+                    _ => return reply.error(libc::EIO),
+                },
+            };
+            return xattr_reply(reply, v.as_bytes(), size);
+        }
         let Some(id) = self.tree.get(&path).and_then(|n| n.id()).map(str::to_string) else { return reply.error(libc::ENODATA) };
         let Some(v) = self.records.get(&id).and_then(|r| r.attrs.iter().find(|(k, _)| k == key)).map(|(_, v)| tree::format_value(v))
         else {
@@ -671,6 +691,10 @@ impl Filesystem for RetifsFs {
         let Some(path) = self.path(ino) else { return reply.error(libc::ENOENT) };
         self.refresh(false);
         let mut out = Vec::new();
+        if self.file_id(&path).is_some() {
+            out.extend_from_slice(format!("{XATTR_PREFIX}{LOCAL_XATTR}").as_bytes());
+            out.push(0);
+        }
         if let Some(r) = self.tree.get(&path).and_then(|n| n.id()).and_then(|id| self.records.get(id)) {
             for (k, _) in &r.attrs {
                 out.extend_from_slice(XATTR_PREFIX.as_bytes());

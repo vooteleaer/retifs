@@ -43,3 +43,28 @@ Ciphertext at rest means a stolen device without its key reveals only chunk coun
 ## Consequences
 - Easier: offline behaviour is predictable and user-controlled. Queries never block on the network. One store format for own data and served data.
 - Harder: full metadata sync costs space on small devices (a later option: partial namespaces). Every read pays one decryption pass. Pinned sets can exceed disk space, so the daemon must report this rather than silently dropping pins.
+
+## Implementation status (2026-10-20)
+- **Device name:** `retifsd --device NAME`, by default the host name in lower case.
+- **Keep tags:** a record is kept on this device if its `keep` or `keep:<device>` attribute is `true`.
+- **Keep rules:** records with `type = "keep-rule"`, a `query` of comma-separated terms (the syntax `retifs query` takes, e.g. `album=Prangli 2026, type=photo`), and an optional `device`. Without `device` the rule applies to every device. A rule that doesn't parse is ignored.
+- **Keep mode per namespace on each node:** `retifs ns keep NS all|rules`.
+  - `all` is the default and today's behaviour: a member pulls all content.
+  - `rules` pulls only tagged and matching records, for devices that can't hold everything.
+  - `ns info` shows the mode, the device name and how many files were pulled because they're kept.
+- **After every sync and every local write:**
+  - Content of kept records that isn't here is sought in the background.
+  - Content that is here, for example read on demand into the cache tier, is pinned.
+  - Files pulled because they were kept, and kept no longer (the tag removed, the rule deleted, or replaced by a new version), are released: their leases end, and their chunks become evictable unless another needed file shares them.
+  - Content this node wrote is never released by keep.
+- **FUSE:** the computed xattr `user.retifs.local` is `yes`, `no` or `partial (n/m chunks)`.
+- **Misses:** reads of content that isn't kept are fetched on demand (ADR-0002, offline semantics).
+- **Live test**, two daemons; B is device `laptop` in `rules` mode. A wrote four photos (two in album Prangli), a rule for `laptop` (album Prangli) and a rule for `phone`.
+  - B pulled exactly the two Prangli photos, and ignored the `phone` rule.
+  - Tagging a third photo `keep:laptop` pulled it, complete and readable offline.
+  - Deleting the `laptop` rule released the two Prangli photos and kept the tagged one.
+- **Not yet:**
+  - Relative dates in rules (`modified > -30d`).
+  - Reporting pinned sets that don't fit the disk budget.
+  - Content pulled before this change (by the old "fetch everything" sync) isn't tracked as kept, so switching such a namespace to `rules` doesn't release it.
+

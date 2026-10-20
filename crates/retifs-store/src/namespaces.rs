@@ -27,6 +27,11 @@ const KEY_HEADS: TableDefinition<&[u8], &[u8]> = TableDefinition::new("key_heads
 const NS_CHECKPOINT: TableDefinition<&str, &[u8]> = TableDefinition::new("ns_checkpoint");
 /// Namespace name → root CID of the checkpoint this node last committed to its chain.
 const NS_CHECKPOINT_PUBLISHED: TableDefinition<&str, &[u8]> = TableDefinition::new("ns_checkpoint_published");
+/// Namespace name → how this node keeps its content: 0 everything, 1 by keep tags and rules (ADR-0005).
+const NS_KEEP_MODE: TableDefinition<&str, u8> = TableDefinition::new("ns_keep_mode");
+/// (namespace ‖ 0 ‖ root CID) → file: content this node pulled because it's kept,
+/// and may release when it no longer is.
+const NS_KEPT: TableDefinition<&[u8], &[u8]> = TableDefinition::new("ns_kept");
 
 pub(crate) fn open_tables(w: &redb::WriteTransaction) -> Result<(), StoreError> {
     w.open_table(NS_INFO)?;
@@ -38,6 +43,8 @@ pub(crate) fn open_tables(w: &redb::WriteTransaction) -> Result<(), StoreError> 
     w.open_table(KEY_HEADS)?;
     w.open_table(NS_CHECKPOINT)?;
     w.open_table(NS_CHECKPOINT_PUBLISHED)?;
+    w.open_table(NS_KEEP_MODE)?;
+    w.open_table(NS_KEPT)?;
     Ok(())
 }
 
@@ -102,6 +109,59 @@ impl SlabStore {
         let v = [file.root.as_bytes().as_slice(), &file.seed.0, &file.size.to_be_bytes()].concat();
         let w = self.db.begin_write()?;
         w.open_table(NS_CHECKPOINT)?.insert(name, v.as_slice())?;
+        w.commit()?;
+        Ok(())
+    }
+
+    /// Whether this node keeps only tagged and matching records of `name`
+    /// (true), or all of its content (false, the default).
+    pub fn ns_keep_by_rules(&self, name: &str) -> Result<bool, StoreError> {
+        let r = self.db.begin_read()?;
+        Ok(r.open_table(NS_KEEP_MODE)?.get(name)?.is_some_and(|v| v.value() == 1))
+    }
+
+    pub fn set_ns_keep_by_rules(&self, name: &str, by_rules: bool) -> Result<(), StoreError> {
+        let w = self.db.begin_write()?;
+        w.open_table(NS_KEEP_MODE)?.insert(name, by_rules as u8)?;
+        w.commit()?;
+        Ok(())
+    }
+
+    /// Files of `name` this node pulled because they're kept.
+    pub fn ns_kept(&self, name: &str) -> Result<Vec<retifs_core::FileRef>, StoreError> {
+        let prefix = [name.as_bytes(), &[0]].concat();
+        let r = self.db.begin_read()?;
+        let t = r.open_table(NS_KEPT)?;
+        let mut out = Vec::new();
+        for e in t.range(prefix.as_slice()..)? {
+            let (k, v) = e?;
+            if !k.value().starts_with(&prefix) {
+                break;
+            }
+            let v = v.value();
+            if v.len() == 73 {
+                out.push(retifs_core::FileRef {
+                    root: Cid::from_bytes(v[..33].try_into().unwrap()).expect("CID version"),
+                    seed: Seed(v[33..65].try_into().unwrap()),
+                    size: u64::from_be_bytes(v[65..73].try_into().unwrap()),
+                });
+            }
+        }
+        Ok(out)
+    }
+
+    pub fn set_ns_kept(&self, name: &str, file: &retifs_core::FileRef, kept: bool) -> Result<(), StoreError> {
+        let key = [name.as_bytes(), &[0], file.root.as_bytes().as_slice()].concat();
+        let w = self.db.begin_write()?;
+        {
+            let mut t = w.open_table(NS_KEPT)?;
+            if kept {
+                let v = [file.root.as_bytes().as_slice(), &file.seed.0, &file.size.to_be_bytes()].concat();
+                t.insert(key.as_slice(), v.as_slice())?;
+            } else {
+                t.remove(key.as_slice())?;
+            }
+        }
         w.commit()?;
         Ok(())
     }

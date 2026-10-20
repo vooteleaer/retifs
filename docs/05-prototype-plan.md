@@ -60,7 +60,7 @@ Prototypes are throwaway. They're for learning, not for locking in the format. T
 - [x] Read-key rotation on revoke: identities, rekey wrapped with RNS Identity.encrypt, crossing rotations via per-key heads ([ADR-0017](adr/0017-multi-writer-namespaces.md)).
 - [x] Namespace state as a Prolly tree; checkpoints: local resume, named in chains, new members start from a grant holder's checkpoint, history fetched on demand, `ns verify` ([ADR-0018](adr/0018-state-trees.md)).
 - [ ] Multi-writer, continued: filtered grants, pruning tombstones (hybrid logical clock for commit times: done, ADR-0017); `watch` / `transaction` / `at` in the API.
-- [ ] `keep:<device>` tag and query-based keep rules (proactive pull).
+- [x] `keep:<device>` tag and query-based keep rules (proactive pull), keep mode per namespace, `user.retifs.local` ([ADR-0005](adr/0005-local-store-offline.md)).
 - [ ] Blind index, remote `/query`, live query.
 - [ ] Per-writer commit chains (one commit per modification), merge, history queries, per-record `versions`.
 

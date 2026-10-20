@@ -332,6 +332,19 @@ struct Args {
     max_stamp_cost: u8,
     nomadnet: Option<String>,
     nomadnet_name: String,
+    /// This device's name for keep tags and rules (ADR-0005).
+    device: String,
+}
+
+/// The machine's name, lower case: the default device name for keep tags.
+fn hostname() -> String {
+    std::env::var("COMPUTERNAME")
+        .or_else(|_| std::env::var("HOSTNAME"))
+        .ok()
+        .or_else(|| std::fs::read_to_string("/etc/hostname").ok())
+        .map(|h| h.trim().to_lowercase())
+        .filter(|h| !h.is_empty())
+        .unwrap_or_else(|| "this-device".into())
 }
 
 fn duration_secs(s: &str) -> u64 {
@@ -375,6 +388,7 @@ fn args() -> Args {
         max_stamp_cost: 24,
         nomadnet: None,
         nomadnet_name: "retifs site".into(),
+        device: hostname(),
     };
     let mut it = std::env::args().skip(1);
     while let Some(arg) = it.next() {
@@ -395,12 +409,13 @@ fn args() -> Args {
             "--nomadnet-name" => a.nomadnet_name = it.next().expect("--nomadnet-name NAME"),
             "--loss-target" => a.loss_target = it.next().and_then(|v| v.parse().ok()).expect("--loss-target P (e.g. 0.001)"),
             "--lease-term" => a.lease_term = duration_secs(&it.next().expect("--lease-term DURATION")).max(60),
+            "--device" => a.device = it.next().expect("--device NAME").to_lowercase(),
             "-h" | "--help" => {
                 println!(
                     "retifsd [--store DIR] [--max-store SIZE] [--min-free SIZE] [--cache-max SIZE] [--private-requests]
                              [--hold-for-others SIZE] [--lease-term DURATION] [--loss-target P] [--slow-link-budget DURATION]\n        \
                      [--stamp-cost BITS] [--max-stamp-cost BITS]\n        \
-                     [--nomadnet NAMESPACE [--nomadnet-name NAME]] [--public] [--put FILE]..."
+                     [--nomadnet NAMESPACE [--nomadnet-name NAME]] [--device NAME] [--public] [--put FILE]..."
                 );
                 std::process::exit(0);
             }
@@ -502,6 +517,8 @@ struct Daemon {
     /// Peers announced since the seeker last looked (a set: each at most once).
     announced: Mutex<std::collections::HashSet<PeerId>>,
     announced_wake: Notify,
+    /// This device's name for keep tags and rules (ADR-0005).
+    device: String,
 }
 
 impl Daemon {
@@ -632,10 +649,12 @@ async fn serve(store: Arc<SlabStore>, identity: node::IdentitySecret, endpoint: 
         ns_seeking: Mutex::new(std::collections::HashSet::new()),
         announced: Mutex::new(std::collections::HashSet::new()),
         announced_wake: Notify::new(),
+        device: args.device.clone(),
     });
     println!("attached to shared instance {of}");
     println!("serving {} chunks as retifs.node <{}>", store.len().unwrap_or(0), daemon.node_hex);
     println!("local API at {endpoint}");
+    println!("device name for keep tags and rules: {}", args.device);
 
     match args.hold_limit {
         Some(0) => println!("not holding data for others"),
@@ -1087,6 +1106,18 @@ async fn handle(d: &Daemon, req: Request) -> Result<Response, String> {
             Ok(Response::Verified { ok, detail })
         }
 
+        Request::NsKeep { ns, mode } => {
+            let by_rules = match mode.as_str() {
+                "all" => false,
+                "rules" => true,
+                _ => return Err("keep mode is all or rules".into()),
+            };
+            d.store.set_ns_keep_by_rules(&ns, by_rules).map_err(|e| e.to_string())?;
+            let merged = materialize(d, &ns)?;
+            apply_keep(d, &ns, &merged.records)?;
+            Ok(Response::Namespace(ns_view(d, &ns)?))
+        }
+
         Request::NsCheckpoint { ns } => {
             writable(&ns)?;
             d.ns_cache.lock().unwrap().entry(ns.clone()).or_default().since_checkpoint = CHECKPOINT_EVERY;
@@ -1270,6 +1301,9 @@ fn ns_view(d: &Daemon, ns: &str) -> Result<NsView, String> {
         records: merged.records.len(),
         peers: d.store.ns_peers(ns).map_err(|e| e.to_string())?.len(),
         checkpoint: d.store.ns_checkpoint(ns).map_err(|e| e.to_string())?.map(|f| f.to_string()),
+        device: d.device.clone(),
+        keep: if d.store.ns_keep_by_rules(ns).map_err(|e| e.to_string())? { "rules" } else { "all" }.into(),
+        kept: d.store.ns_kept(ns).map_err(|e| e.to_string())?.len(),
     })
 }
 
@@ -1465,14 +1499,8 @@ async fn sync_ns(d: &Daemon, ns: &str) -> Result<(), String> {
         if d.store.ns_keys(ns).map_err(|e| e.to_string())?.len() > keys_before {
             d.ns_wake.notify_one(); // a new read key: newer versions may be readable now
         }
-        // Content of records this node doesn't hold yet.
-        let peers = d.store.ns_peers(ns).map_err(|e| e.to_string())?;
-        for b in merged.records.iter().flat_map(|r| r.blocks.iter()) {
-            if !complete(&d.store, b) && !d.store.is_wanted(&b.root).unwrap_or(false) {
-                d.store.want_file(b, &peers).map_err(|e| e.to_string())?;
-                d.wake.notify_one();
-            }
-        }
+        // Content kept on this device: pulled now, released when no longer kept.
+        apply_keep(d, ns, &merged.records)?;
         println!("ns {ns}: merged, {} record(s), {} writer(s)", merged.records.len(), merged.writers.len());
     }
     Ok(())
@@ -1867,8 +1895,91 @@ async fn write_ops(d: &Daemon, ns: &str, mut ops: Vec<Op>) -> Result<u64, String
         d.ns_cache.lock().unwrap().get(ns).and_then(|e| e.applied.values().map(|(_, t, _)| t + 1).max()).unwrap_or(0)
     };
     let (seq, _) = publish_channel(d, &ns_channel(ns), OpsFile { ops }.encode(), false, not_before).await?;
-    materialize(d, ns)?;
+    let merged = materialize(d, ns)?;
+    // A new tag or rule (or a changed record) may change what's kept here.
+    apply_keep(d, ns, &merged.records)?;
     Ok(seq)
+}
+
+/// Whether this device keeps `r`'s content (ADR-0005): its `keep` or
+/// `keep:<device>` attribute is true, or a keep rule for this device (or for
+/// every device) matches it; in `all` mode, every record.
+fn kept(r: &Record, device: &str, all: bool, rules: &[Vec<retifs_store::Term>]) -> bool {
+    let tagged = |k: &str| matches!(r.attrs.get(k), Some(Value::Bool(true)));
+    all || tagged("keep") || tagged(&format!("keep:{device}")) || rules.iter().any(|terms| terms.iter().all(|t| t.matches(r)))
+}
+
+/// The keep rules of a namespace that apply to this device: records with
+/// `type = "keep-rule"`, a `query` of comma-separated terms (as `retifs query`
+/// takes them) and an optional `device`.
+fn keep_rules(records: &[Record], device: &str) -> Vec<Vec<retifs_store::Term>> {
+    let s = |r: &Record, k: &str| match r.attrs.get(k) {
+        Some(Value::Str(v)) => Some(v.clone()),
+        _ => None,
+    };
+    records
+        .iter()
+        .filter(|r| s(r, "type").as_deref() == Some("keep-rule"))
+        .filter(|r| s(r, "device").is_none_or(|d| d.eq_ignore_ascii_case(device)))
+        .filter_map(|r| {
+            let q = s(r, "query")?;
+            let terms: Vec<_> = q.split(',').map(str::trim).filter(|t| !t.is_empty()).map(retifs_store::Term::parse).collect::<Result<_, _>>().ok()?;
+            (!terms.is_empty()).then_some(terms)
+        })
+        .collect()
+}
+
+/// Pulls the content of the records this device keeps and pins it; content it
+/// pulled for records no longer kept (or for replaced versions) becomes
+/// evictable again. Content this node wrote is never released here.
+fn apply_keep(d: &Daemon, ns: &str, records: &[Record]) -> Result<(), String> {
+    if ns.starts_with("ch-") {
+        return Ok(());
+    }
+    let all = !d.store.ns_keep_by_rules(ns).map_err(|e| e.to_string())?;
+    let rules = keep_rules(records, &d.device);
+    let peers = d.store.ns_peers(ns).map_err(|e| e.to_string())?;
+    let mut keep: std::collections::HashSet<Cid> = std::collections::HashSet::new();
+    let mut already: std::collections::HashSet<Cid> = d.store.ns_kept(ns).map_err(|e| e.to_string())?.iter().map(|f| f.root).collect();
+    let mut pulled = 0;
+    for r in records.iter().filter(|r| kept(r, &d.device, all, &rules)) {
+        for b in &r.blocks {
+            keep.insert(b.root);
+            if !already.insert(b.root) {
+                continue; // already kept
+            }
+            if d.store.is_needed(&b.root).map_err(|e| e.to_string())? && !d.store.is_wanted(&b.root).unwrap_or(false) {
+                continue; // this node's own content (or kept for another reason): not ours to release
+            }
+            d.store.set_ns_kept(ns, b, true).map_err(|e| e.to_string())?;
+            pulled += 1;
+            if complete(&d.store, b) {
+                // Already here (read before, so in the cache tier): pin it.
+                for (c, _) in file_chunks(&d.store, b)? {
+                    if let Some(t) = d.store.tier(&c).map_err(|e| e.to_string())? {
+                        d.store.set_tier(&c, (t & !tier::CACHE) | tier::PINNED).map_err(|e| e.to_string())?;
+                    }
+                }
+                d.store.need_file(b).map_err(|e| e.to_string())?;
+            } else if !d.store.is_wanted(&b.root).unwrap_or(false) {
+                d.store.want_file(b, &peers).map_err(|e| e.to_string())?;
+                d.wake.notify_one();
+            }
+        }
+    }
+    let mut released = 0;
+    for f in d.store.ns_kept(ns).map_err(|e| e.to_string())? {
+        if !keep.contains(&f.root) {
+            forget(d, &f)?;
+            d.store.set_ns_kept(ns, &f, false).map_err(|e| e.to_string())?;
+            released += 1;
+        }
+    }
+    if pulled > 0 || released > 0 {
+        let how = if all { "everything".to_string() } else { format!("by tags and {} rule(s) for {}", rules.len(), d.device) };
+        println!("ns {ns}: keeping {how}: {pulled} file(s) newly kept, {released} no longer kept");
+    }
+    Ok(())
 }
 
 /// One walked commit of a writer chain.

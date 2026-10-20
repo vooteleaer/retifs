@@ -62,7 +62,7 @@ fn usage() -> ! {
          retifs [--store DIR] follow ADDRESS [--from NODE]... | channels\n\
          retifs [--store DIR] rec add NS [KEY=VALUE]... [--file PATH] | rec set NS ID [KEY=VALUE]... [--unset KEY]...\n\
          retifs [--store DIR] rec get NS ID | rec rm NS ID | rec history NS ID | query NS [--at VERSION] [TERM]...\n\
-         retifs [--store DIR] ns address NS | ns info NS | ns checkpoint NS | ns verify NS | ns join NAME ADDRESS [--from NODE]...\n\
+         retifs [--store DIR] ns address NS | ns info NS | ns checkpoint NS | ns verify NS | ns keep NS all|rules | ns join NAME ADDRESS [--from NODE]...\n\
          retifs [--store DIR] ns grant NS WRITER [--grant] [--from NODE]... | ns revoke NS WRITER"
     );
     std::process::exit(2);
@@ -283,6 +283,7 @@ async fn main() {
                 "address" => libretifs::Request::NsAddress { ns },
                 "info" => libretifs::Request::NsInfo { ns },
                 "checkpoint" => libretifs::Request::NsCheckpoint { ns },
+                "keep" => libretifs::Request::NsKeep { ns, mode: rest.first().cloned().unwrap_or_else(|| usage()) },
                 "verify" => libretifs::Request::NsVerify { ns },
                 "join" => libretifs::Request::NsJoin {
                     ns,
@@ -310,6 +311,7 @@ async fn main() {
                     if let Some(c) = &v.checkpoint {
                         println!("  checkpoint {c}");
                     }
+                    println!("  keeps      {} on device {} ({} file(s) pulled for it)", v.keep, v.device, v.kept);
                 }
                 libretifs::Response::Verified { ok, detail } => {
                     println!("{detail}");

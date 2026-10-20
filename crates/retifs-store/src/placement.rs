@@ -328,6 +328,12 @@ impl SlabStore {
         Ok(released.len())
     }
 
+    /// Whether this node needs `root` kept (it wrote or sought it).
+    pub fn is_needed(&self, root: &Cid) -> Result<bool, StoreError> {
+        let r = self.db.begin_read()?;
+        Ok(r.open_table(NEEDED)?.get(root.as_bytes().as_slice())?.is_some())
+    }
+
     pub fn needed_files(&self) -> Result<Vec<FileRef>, StoreError> {
         let r = self.db.begin_read()?;
         let t = r.open_table(NEEDED)?;

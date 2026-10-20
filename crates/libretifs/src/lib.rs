@@ -149,6 +149,9 @@ pub enum Request {
     NsGrant { ns: String, writer: String, grant: bool, from: Vec<String> },
     NsRevoke { ns: String, writer: String },
     NsInfo { ns: String },
+    /// What this node keeps of the namespace's content (ADR-0005): `all`, or
+    /// `rules` (records tagged `keep`/`keep:<device>` or matched by a keep rule).
+    NsKeep { ns: String, mode: String },
     /// Writes a checkpoint of the namespace now and, if this node holds
     /// `grant`, names it in its chain for new members (ADR-0018).
     NsCheckpoint { ns: String },
@@ -206,6 +209,15 @@ pub struct NsView {
     /// The latest checkpoint kept here (a read capability), if any.
     #[serde(default)]
     pub checkpoint: Option<String>,
+    /// This device's name for keep tags and rules.
+    #[serde(default)]
+    pub device: String,
+    /// "all" or "rules".
+    #[serde(default)]
+    pub keep: String,
+    /// Files pulled here because they're kept.
+    #[serde(default)]
+    pub kept: usize,
 }
 
 /// One version of a namespace as seen by one record.
