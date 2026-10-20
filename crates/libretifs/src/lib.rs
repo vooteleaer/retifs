@@ -63,6 +63,18 @@ pub enum Request {
     },
     /// What of `cap` is held locally.
     Status { cap: String },
+    /// Bytes `offset..offset + len` of `cap` (clamped to the file). Chunks the
+    /// range needs that aren't here are fetched from the peers of namespace
+    /// `ns` and the file's known holders, for at most `wait_ms`; then it fails
+    /// rather than hang (offline semantics, ADR-0002).
+    ReadRange {
+        cap: String,
+        #[serde(default)]
+        ns: Option<String>,
+        offset: u64,
+        len: u64,
+        wait_ms: u64,
+    },
     /// Seek `cap` in the background until it's complete (ADR-0010): ask the
     /// given nodes now, and again whenever they announce, with back-off.
     Want {
@@ -251,6 +263,10 @@ pub enum Response {
         entries: Vec<HistoryEntry>,
     },
     Namespace(NsView),
+    Range {
+        #[serde(with = "serde_bytes")]
+        data: Vec<u8>,
+    },
     Verified {
         ok: bool,
         detail: String,

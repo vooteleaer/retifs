@@ -52,9 +52,11 @@ pub struct RetifsFs {
     uid: u32,
     gid: u32,
     started: SystemTime,
+    /// How long a read may wait for content that isn't here yet.
+    wait: Duration,
 }
 
-pub fn mount(store: &Path, ns: &str, mountpoint: &Path) -> Result<(), String> {
+pub fn mount(store: &Path, ns: &str, mountpoint: &Path, wait: Duration) -> Result<(), String> {
     let rt = tokio::runtime::Builder::new_current_thread().enable_all().build().map_err(|e| e.to_string())?;
     let client = rt.block_on(Client::connect(store)).map_err(|e| format!("can't reach retifsd at {}: {e}", store.display()))?;
     let fs = RetifsFs {
@@ -73,6 +75,7 @@ pub fn mount(store: &Path, ns: &str, mountpoint: &Path) -> Result<(), String> {
         uid: unsafe { libc::getuid() },
         gid: unsafe { libc::getgid() },
         started: SystemTime::now(),
+        wait,
     };
     let opts = [MountOption::FSName(format!("retifs:{ns}")), MountOption::Subtype("retifs".into()), MountOption::DefaultPermissions];
     fuser::mount2(fs, mountpoint, &opts).map_err(|e| e.to_string())
@@ -212,14 +215,23 @@ impl RetifsFs {
         }
     }
 
-    /// A file's current content (from the daemon's store).
+    /// Part of a file's content, fetched from peers if it isn't here yet.
+    fn read_range(&mut self, cap: &str, offset: u64, len: u64) -> Result<Vec<u8>, i32> {
+        let req = Request::ReadRange { cap: cap.to_string(), ns: Some(self.ns.clone()), offset, len, wait_ms: self.wait.as_millis() as u64 };
+        match self.call(req)? {
+            Response::Range { data } => Ok(data),
+            _ => Err(libc::EIO),
+        }
+    }
+
+    /// A file's whole content (to change it), fetched if it isn't here yet.
     fn read_content(&mut self, cap: Option<String>) -> Result<Vec<u8>, i32> {
         let Some(cap) = cap else { return Ok(Vec::new()) };
         if let Some(c) = self.content.get(&cap) {
             return Ok(c.clone());
         }
-        match self.call(Request::Get { cap: cap.clone(), from: Vec::new(), links_per_node: 1, batch: 64 })? {
-            Response::Get { data, .. } => {
+        match self.call(Request::ReadRange { cap: cap.clone(), ns: Some(self.ns.clone()), offset: 0, len: u64::MAX, wait_ms: self.wait.as_millis() as u64 })? {
+            Response::Range { data } => {
                 if self.content.values().map(Vec::len).sum::<usize>() + data.len() > CACHE_BYTES {
                     self.content.clear();
                 }
@@ -279,7 +291,14 @@ impl Filesystem for RetifsFs {
     fn lookup(&mut self, _req: &Req, parent: u64, name: &OsStr, reply: ReplyEntry) {
         let (Some(dir), Ok(name)) = (self.path(parent), os(name)) else { return reply.error(libc::ENOENT) };
         let path = tree::join(&dir, name);
-        match self.entry(&path) {
+        let mut found = self.entry(&path);
+        // Not found in a view that may be stale (a record made a moment ago by
+        // another program or member): look again before saying so.
+        if found.is_none() && self.loaded.is_some_and(|t| t.elapsed() > Duration::from_millis(100)) {
+            self.refresh(true);
+            found = self.entry(&path);
+        }
+        match found {
             Some(e) => {
                 let a = self.attr(&path, &e);
                 reply.entry(&TTL, &a, 0)
@@ -345,20 +364,20 @@ impl Filesystem for RetifsFs {
 
     fn read(&mut self, _req: &Req, _ino: u64, fh: u64, offset: i64, size: u32, _flags: i32, _lock: Option<u64>, reply: ReplyData) {
         let Some(h) = self.handles.get(&fh) else { return reply.error(libc::EBADF) };
-        let data = match &h.buf {
-            Some(b) => b.clone(),
-            None => {
-                let path = h.path.clone();
-                let cap = self.file_id(&path).and_then(|(_, c)| c);
-                match self.read_content(cap) {
-                    Ok(d) => d,
-                    Err(e) => return reply.error(e),
-                }
-            }
-        };
-        let start = (offset as usize).min(data.len());
-        let end = (start + size as usize).min(data.len());
-        reply.data(&data[start..end])
+        if let Some(b) = &h.buf {
+            // Being written: the buffer is the content.
+            let start = (offset as usize).min(b.len());
+            let end = (start + size as usize).min(b.len());
+            return reply.data(&b[start..end]);
+        }
+        // Only the range asked for, fetched if it isn't here (a 1 GB file read
+        // for its header costs about one chunk).
+        let path = h.path.clone();
+        let Some(cap) = self.file_id(&path).and_then(|(_, c)| c) else { return reply.data(&[]) };
+        match self.read_range(&cap, offset.max(0) as u64, size as u64) {
+            Ok(d) => reply.data(&d),
+            Err(e) => reply.error(e),
+        }
     }
 
     #[allow(clippy::too_many_arguments)]

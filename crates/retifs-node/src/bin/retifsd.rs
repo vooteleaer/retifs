@@ -1113,6 +1113,14 @@ async fn handle(d: &Daemon, req: Request) -> Result<Response, String> {
             Ok(Response::Records { records: found.iter().map(view).collect() })
         }
 
+        Request::ReadRange { cap, ns, offset, len, wait_ms } => {
+            let file: FileRef = cap.parse().map_err(|e: retifs_core::ManifestError| e.to_string())?;
+            let end = offset.saturating_add(len).min(file.size);
+            let range = offset.min(end)..end;
+            let data = read_range_fetching(d, &file, range, ns.as_deref(), Duration::from_millis(wait_ms)).await?;
+            Ok(Response::Range { data })
+        }
+
         Request::RecordHistory { ns, id } => {
             let id = parse_record_id(&id)?;
             let mut entries = Vec::new();
@@ -1702,6 +1710,79 @@ async fn publish_checkpoint(d: &Daemon, ns: &str) -> Result<(), String> {
     write_ops(d, ns, vec![Op::Checkpoint(file)]).await?;
     println!("ns {ns}: checkpoint {file} named in this node's chain");
     Ok(())
+}
+
+/// Reads `range` of `file`, fetching what it needs and isn't here: only the
+/// chunks the range covers (and the manifest nodes above them), from the
+/// namespace's peers and the file's hinted holders, in rounds (each round's
+/// nodes reveal the next level). Gives up at `wait` instead of hanging, and
+/// at once when no peer is reachable; a peer over a slow link is used only if
+/// the transfer fits the slow-link budget (ADR-0013). Fetched chunks go to
+/// the cache tier: evictable, never served to others.
+async fn read_range_fetching(d: &Daemon, file: &FileRef, range: std::ops::Range<u64>, ns: Option<&str>, wait: Duration) -> Result<Vec<u8>, String> {
+    let deadline = Instant::now() + wait;
+    let mut peers: Vec<PeerId> = match ns {
+        Some(ns) => d.store.ns_peers(ns).map_err(|e| e.to_string())?,
+        None => Vec::new(),
+    };
+    for h in d.store.hints(&file.root).unwrap_or_default() {
+        if !peers.contains(&h.peer) {
+            peers.push(h.peer);
+        }
+    }
+    loop {
+        let missing = manifest::missing_for_range(&*d.store, file, range.clone()).map_err(|e| e.to_string())?;
+        if missing.is_empty() {
+            return manifest::read_range(&*d.store, file, range).map_err(|e| e.to_string());
+        }
+        if peers.is_empty() {
+            return Err(format!("{}: not here, and no peer known to ask", file.root));
+        }
+        let mut progressed = false;
+        let mut too_slow = false;
+        for peer in &peers {
+            let left = deadline.saturating_duration_since(Instant::now());
+            if left.is_zero() {
+                break;
+            }
+            let q = d.quality(peer);
+            // Chunks are at most 256 KiB; most are far smaller. A rough upper bound.
+            if q.slow() && q.transfer_secs(missing.len() as u64 * 64 * 1024) > d.slow_budget as f64 {
+                too_slow = true;
+                continue;
+            }
+            let link = match tokio::time::timeout(left, d.link_to(peer)).await {
+                Ok(Ok(l)) => l,
+                _ => continue,
+            };
+            let t0 = Instant::now();
+            let round = match seek_round(&d.transport, link, &missing, d.private_requests, left).await {
+                Ok(r) => r,
+                Err(_) => {
+                    d.drop_link(peer);
+                    continue;
+                }
+            };
+            let bytes: u64 = round.got.iter().map(|(_, ct, _)| ct.len() as u64).sum();
+            let _ = d.store.record_transfer(peer, bytes, t0.elapsed().as_millis() as u64);
+            for (i, ct, _) in round.got {
+                d.store.insert(&missing[i].0, &ct, tier::CACHE).map_err(|e| e.to_string())?;
+                progressed = true;
+            }
+            if progressed {
+                break; // look again: fetched nodes may reveal more chunks
+            }
+        }
+        if !progressed {
+            return Err(if Instant::now() >= deadline {
+                format!("{}: timed out fetching {} chunk(s)", file.root, missing.len())
+            } else if too_slow {
+                format!("{}: only reachable over a slow link, and this read doesn't fit its budget", file.root)
+            } else {
+                format!("{}: no reachable peer has the {} chunk(s) this read needs", file.root, missing.len())
+            });
+        }
+    }
 }
 
 /// Followed channels' namespaces belong to their writer.

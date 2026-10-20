@@ -64,9 +64,19 @@ The mount exposes plaintext to processes in the user's session, and root on the 
 - a query directory and a percent-encoded path-prefix query;
 - `sed -i`: same record ID, attribute kept, one more version.
 
+**Reads on demand (2026-10-20):**
+- A read asks the daemon for just that byte range (`ReadRange` in the local API; `retifs read CAP` on the command line). The daemon walks the manifest as far as it's held here (`manifest::missing_for_range`) and fetches the missing nodes and chunks the range covers, in rounds, from the namespace's peers and the file's hinted holders. Fetched chunks go to the cache tier.
+  - Reading 100 KB at offset 20 MB of a 30 MB file fetched 10 of its 2,211 chunks.
+  - Through the mount: reads at six offsets of a 20 MiB file match the source, and the whole file reads at about 240 MB/s when local.
+- **Offline semantics (decided):** a read never hangs.
+  - Content that's here is read whatever the network does.
+  - Content that isn't: the read waits while a peer is reachable, up to `--wait` (default 30 s, a mount option), then fails with `EIO` and a message in the mount's log. With no peer known it fails at once.
+  - Over a slow link (ADR-0013) a peer is used only if the transfer fits the slow-link budget.
+  - Measured: with the only holder stopped, a read of a range not held failed after its 8 s wait; with no peer known, at once.
+- A lookup that misses re-reads the namespace if its view is older than 100 ms, so a record made a moment ago by another program is found.
+
 **Not yet:**
-- **Contents in memory:** a file's whole content is held while it's open, and reads fetch the whole file. Range reads via the manifest's random access, and FUSE passthrough for cached reads, come later.
-- **Offline reads:** a file whose content isn't local fails with `EIO`; see the [open questions](../06-open-questions.md).
+- **Writes in memory:** a file being written is held whole until it's closed. FUSE passthrough for cached reads comes later.
 - **Several renames are several commits:** a directory rename or a save is not yet one transaction.
 - **Permissions:** the mounting user owns everything. Modes aren't stored.
 - **Mounting as a normal user** needs `fusermount3` (the `fuse3` package); the test ran as root.

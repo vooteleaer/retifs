@@ -358,6 +358,65 @@ pub fn read_range(store: &impl Store, file: &FileRef, range: Range<u64>) -> Resu
     Ok(out)
 }
 
+/// The chunks reading `range` needs that `store` doesn't hold, as far as the
+/// nodes held tell: missing nodes (their children show up once they're
+/// fetched) and missing data chunks under held nodes. Empty: [`read_range`]
+/// will succeed. A fetcher repeats this until it is.
+pub fn missing_for_range(store: &impl Store, file: &FileRef, range: Range<u64>) -> Result<Vec<(Cid, Seed)>, ManifestError> {
+    if range.start > range.end || range.end > file.size {
+        return Err(ManifestError::OutOfRange);
+    }
+    let mut out = Vec::new();
+    if range.start < range.end {
+        missing_node(store, file.root, file.seed, file.size, true, 0, &range, &mut out)?;
+    }
+    Ok(out)
+}
+
+#[allow(clippy::too_many_arguments)]
+fn missing_node(
+    store: &impl Store,
+    cid: Cid,
+    seed: Seed,
+    expected_span: u64,
+    root: bool,
+    base: u64,
+    want: &Range<u64>,
+    out: &mut Vec<(Cid, Seed)>,
+) -> Result<(), ManifestError> {
+    let Some(ct) = store.get(&cid).map_err(store_err)? else {
+        out.push((cid, seed));
+        return Ok(());
+    };
+    let pt = chunk::open(&cid, &seed, &ct).map_err(|e| ManifestError::Chunk(cid, e))?;
+    let (kind, entries) = match decode(&pt)? {
+        Decoded::Inline(_) => return Ok(()),
+        Decoded::Entries(kind, entries) => (kind, entries),
+    };
+    let sum = entries.iter().map(|e| e.span).sum::<u64>();
+    if sum != expected_span && !(root && sum > expected_span) {
+        return Err(ManifestError::Malformed("spans don't add up to the parent's span"));
+    }
+    let mut start = base;
+    for e in entries {
+        let end = start + e.span;
+        if end > want.start && start < want.end {
+            if kind == KIND_LEAF {
+                if store.get(&e.cid).map_err(store_err)?.is_none() {
+                    out.push((e.cid, e.seed));
+                }
+            } else {
+                missing_node(store, e.cid, e.seed, e.span, false, start, want, out)?;
+            }
+        }
+        if end >= want.end {
+            break;
+        }
+        start = end;
+    }
+    Ok(())
+}
+
 pub fn read_all(store: &impl Store, file: &FileRef) -> Result<Vec<u8>, ManifestError> {
     read_range(store, file, 0..file.size)
 }
@@ -546,4 +605,33 @@ mod tests {
         assert_eq!(read_range(&store, &f, 0..1).unwrap_err(),
                    ManifestError::Malformed("spans don't add up to the parent's span"));
     }
+
+    /// A range read over a store that starts with only the root: each round
+    /// lists what's missing, a fetcher copies it over, and the read then
+    /// works having copied only the chunks the range covers.
+    #[test]
+    fn missing_for_range_leads_a_partial_fetch() {
+        let mut full = CountingStore::default();
+        let data: Vec<u8> = (0..3_000_000u32).map(|i| (i.wrapping_mul(2_654_435_761) >> 13) as u8).collect();
+        let secret = ConvergenceSecret::personal([9; 32]);
+        let file = write(&mut full, &secret, &data).unwrap();
+        let mut part = CountingStore::default();
+        let range = 1_234_567..1_300_000;
+        let mut rounds = 0;
+        loop {
+            let missing = missing_for_range(&part, &file, range.clone()).unwrap();
+            if missing.is_empty() {
+                break;
+            }
+            rounds += 1;
+            for (cid, _) in missing {
+                part.put(cid, full.get(&cid).unwrap().unwrap()).unwrap();
+            }
+        }
+        assert_eq!(read_range(&part, &file, range.clone()).unwrap(), data[range.start as usize..range.end as usize]);
+        assert!(rounds <= 4, "one round per tree level: {rounds}");
+        assert!(part.chunks.len() * 10 < full.chunks.len(), "fetched {} of {} chunks", part.chunks.len(), full.chunks.len());
+        assert!(missing_for_range(&part, &file, 0..data.len() as u64).unwrap().len() > 1, "the rest is still missing");
+    }
+
 }

@@ -8,36 +8,39 @@ mod tree;
 mod fs;
 
 fn usage() -> ! {
-    eprintln!("retifs-mount [--store DIR] NS MOUNTPOINT");
+    eprintln!("retifs-mount [--store DIR] [--wait SECONDS] NS MOUNTPOINT");
+    eprintln!("  --wait: how long a read waits for content that isn't here yet (default 30)");
     std::process::exit(2)
 }
 
 fn main() {
     let mut store = libretifs::default_store_dir();
+    let mut wait = std::time::Duration::from_secs(30);
     let mut rest = Vec::new();
     let mut args = std::env::args().skip(1);
     while let Some(a) = args.next() {
         match a.as_str() {
             "--store" => store = args.next().unwrap_or_else(|| usage()).into(),
+            "--wait" => wait = std::time::Duration::from_secs(args.next().and_then(|v| v.parse().ok()).unwrap_or_else(|| usage())),
             "-h" | "--help" => usage(),
             _ => rest.push(a),
         }
     }
     let [ns, mountpoint] = <[String; 2]>::try_from(rest).unwrap_or_else(|_| usage());
-    run(&store, &ns, std::path::Path::new(&mountpoint));
+    run(&store, &ns, std::path::Path::new(&mountpoint), wait);
 }
 
 #[cfg(target_os = "linux")]
-fn run(store: &std::path::Path, ns: &str, mountpoint: &std::path::Path) {
+fn run(store: &std::path::Path, ns: &str, mountpoint: &std::path::Path, wait: std::time::Duration) {
     eprintln!("retifs-mount: namespace {ns} at {} (unmount with fusermount3 -u or umount)", mountpoint.display());
-    if let Err(e) = fs::mount(store, ns, mountpoint) {
+    if let Err(e) = fs::mount(store, ns, mountpoint, wait) {
         eprintln!("retifs-mount: {e}");
         std::process::exit(1);
     }
 }
 
 #[cfg(not(target_os = "linux"))]
-fn run(_store: &std::path::Path, _ns: &str, _mountpoint: &std::path::Path) {
+fn run(_store: &std::path::Path, _ns: &str, _mountpoint: &std::path::Path, _wait: std::time::Duration) {
     eprintln!("retifs-mount: FUSE mounts are Linux only for now (ADR-0002); Haiku's userlandfs frontend comes later");
     std::process::exit(1);
 }

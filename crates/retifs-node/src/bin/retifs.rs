@@ -54,6 +54,7 @@ fn usage() -> ! {
          retifs [--store DIR] put FILE [--public] [--compress] [--publish] [--record NAME | --one-off]\n\
          retifs [--store DIR] get READ-CAP [--from NODE]... [-o OUT] [--links N] [--batch N]\n\
          retifs [--store DIR] status READ-CAP\n\
+         retifs [--store DIR] read READ-CAP [--offset N] [--len N] [--ns NS] [--wait SECONDS]\n\
          retifs [--store DIR] want READ-CAP [--from NODE]...
          retifs [--store DIR] replicate READ-CAP --to NODE...\n\
          retifs [--store DIR] forget READ-CAP\n\
@@ -344,6 +345,28 @@ async fn main() {
             let cap = it.next().unwrap_or_else(|| usage());
             let s = client.status(&cap).await.unwrap_or_else(|e| fail(e));
             print_status(&s);
+        }
+        "read" => {
+            // Part of a file, fetched on demand from a namespace's peers if it isn't here.
+            let cap = it.next().unwrap_or_else(|| usage());
+            let rest: Vec<String> = it.collect();
+            let opt = |name: &str| rest.windows(2).find(|w| w[0] == name).map(|w| w[1].clone());
+            let num = |name: &str, default: u64| opt(name).map_or(default, |v| v.parse().unwrap_or_else(|_| usage()));
+            let req = libretifs::Request::ReadRange {
+                cap,
+                ns: opt("--ns"),
+                offset: num("--offset", 0),
+                len: num("--len", u64::MAX),
+                wait_ms: num("--wait", 30) * 1000,
+            };
+            match client.call(req).await.unwrap_or_else(|e| fail(e)) {
+                libretifs::Response::Range { data } => {
+                    use std::io::Write;
+                    std::io::stdout().write_all(&data).unwrap_or_else(|e| fail(e.to_string()));
+                }
+                libretifs::Response::Error { message } => fail(message),
+                _ => fail("unexpected response"),
+            }
         }
         _ => usage(),
     }
