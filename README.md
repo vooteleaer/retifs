@@ -6,8 +6,8 @@
 
 It has no files as such. Instead it has **records** (a stable ID, attributes and encrypted data blocks) and a **database**. Applications use it directly through a native API (records, attributes, queries, history; no paths), the way apps attach to a shared Reticulum instance. An ordinary file tree is just one view of that database, for legacy software.
 
-> [!NOTE]
-> **Status: concept phase.** This repo is mostly design. The first prototype crate, [`retifs-core`](crates/retifs-core), covers chunking, per-chunk encryption and CIDs (ADR-0008, proposed and awaiting crypto review). It isn't for real data yet.
+> [!WARNING]
+> **Status: working prototype, not for real data yet.** The formats are proposed and still change, and the crypto awaits external review (ADR-0008). The daemon, the native API, multi-writer namespaces, sync between nodes over Reticulum, a FUSE mount and a local web gateway work, and they have been tested across machines. See [Try it](#try-it).
 
 ## The shift
 
@@ -66,17 +66,52 @@ See the [architecture](docs/01-architecture.md) for details.
 - Guaranteed deletion across the network. Deletion means destroying the key (crypto-shredding).
 - A single global namespace replacing DNS.
 
+## Try it
+
+retifs runs on Linux (Haiku later). The daemon, `retifsd`, attaches to the machine's Reticulum shared instance, so start [prnsd](https://github.com/KenAKAFrosty/Prns) or Python `rnsd` first.
+
+```sh
+cargo install --path crates/retifs-node      # retifsd and the retifs CLI
+cargo install --path crates/retifs-fuse      # retifs-mount (needs fuse3)
+cargo install --path crates/retifs-gateway   # retifs-gateway
+cp packaging/systemd/*.service ~/.config/systemd/user/
+systemctl --user enable --now retifsd
+```
+
+Records, attributes and queries:
+
+```sh
+retifs rec add photos album="Prangli 2026" --file boat.jpg
+retifs query photos 'album=Prangli 2026'
+retifs rec history photos <id>
+```
+
+As a file tree (attributes are `user.retifs.*` xattrs; `.query/<terms>/` lists matches):
+
+```sh
+systemctl --user enable --now retifs-mount@photos   # ~/retifs/photos
+ls ~/retifs/photos/.query/album=Prangli\ 2026/
+```
+
+As websites, one origin per namespace, read-only: `systemctl --user enable --now retifs-gateway`, then open <http://localhost:8740/>.
+
+**Sharing a namespace** with another machine:
+1. On your machine: `retifs ns address photos`.
+2. On theirs: `retifs ns join photos <address> --from <your node>`. This prints their writer key.
+3. On yours: `retifs ns grant photos <their key> --from <their node>`.
+4. Both now write and sync. Each node pulls everything by default; for a small device, `retifs ns keep photos rules` and tag what it should keep: `keep:<device>=true`, or a keep-rule record.
+
 ## Roadmap
 
 Prototypes are throwaway. They're for learning, not for locking in the format, and every phase ends in a usable system.
 
 | Phase | Goal | |
 |---|---|---|
-| 0 | **Reconnaissance**: rnfs on a test mesh, reading, YubiKey firmware | ◀ now |
-| 1 | **Content layer**: Rust daemon on [Prns](https://github.com/KenAKAFrosty/Prns), per-chunk encryption, local HTTP gateway | |
-| 2 | **Database**: signed attributes, Prolly-tree index, blind index, commit chain | |
-| 3 | **Identity & permissions**: capability chains, group keys, YubiKey-backed RNS identity | |
-| 4 | **Linux client**: FUSE mount, attributes as xattrs, query directories | |
+| 0 | **Reconnaissance**: rnfs on a test mesh, reading, YubiKey firmware | partly |
+| 1 | **Content layer**: Rust daemon on [Prns](https://github.com/KenAKAFrosty/Prns), per-chunk encryption, placement and repair, local HTTP gateway | prototype works |
+| 2 | **Database**: records and queries, multi-writer commit chains, Prolly-tree state and checkpoints, keep rules | prototype works; blind index to do |
+| 3 | **Identity & permissions**: capability chains, group keys, YubiKey-backed RNS identity | grants, revokes and key rotation work; ◀ next |
+| 4 | **Linux client**: FUSE mount, attributes as xattrs, query directories | prototype works |
 | 5 | **Thin client**: bootable USB stick plus YubiKey, with the system loaded from your namespace | |
 | later | **Haiku client**: native attributes and live queries in Tracker | |
 

@@ -74,7 +74,8 @@ Prototypes are throwaway. They're for learning, not for locking in the format. T
 - [x] Linux: FUSE frontend on `libretifs`: `retifs-mount` (POSIX view of a namespace, `user.retifs.*` xattrs, `.query/` dirs, saves keep the record) ([ADR-0002](adr/0002-os-integration.md)).
 - [x] Reads on demand: only the byte ranges read, fetched from peers within a wait, never hanging (offline semantics, [ADR-0002](adr/0002-os-integration.md)).
 - [x] Writes without whole-file buffering: write sessions spooled in the daemon, streamed into the store ([ADR-0002](adr/0002-os-integration.md)).
-- [ ] Linux, continued: FUSE passthrough, several namespaces in one mount, packaging (`fuse3`, systemd user unit).
+- [x] Packaging, first step: systemd user units for retifsd, retifs-mount@<namespace> and retifs-gateway (`packaging/systemd`), and "Try it" in the README.
+- [ ] Linux, continued: FUSE passthrough, several namespaces in one mount, distribution packages (.deb, apk).
 - [ ] apkovl in the user namespace.
 
 ## Phase 5: thin client

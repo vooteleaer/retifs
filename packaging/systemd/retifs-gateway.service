@@ -1,0 +1,15 @@
+# Namespaces as local read-only websites: http://<namespace>.localhost:8740/
+#   systemctl --user enable --now retifs-gateway
+[Unit]
+Description=retifs local HTTP gateway
+Requires=retifsd.service
+After=retifsd.service
+
+[Service]
+Type=simple
+ExecStart=%h/.cargo/bin/retifs-gateway --listen 127.0.0.1:8740
+Restart=on-failure
+RestartSec=10
+
+[Install]
+WantedBy=default.target

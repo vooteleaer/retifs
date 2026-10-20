@@ -1,0 +1,18 @@
+# One namespace as a file tree at ~/retifs/<namespace>.
+#   systemctl --user enable --now retifs-mount@photos
+# Needs fusermount3 (Debian/Ubuntu: apt install fuse3).
+[Unit]
+Description=retifs namespace %i at ~/retifs/%i
+Requires=retifsd.service
+After=retifsd.service
+
+[Service]
+Type=simple
+ExecStartPre=/bin/mkdir -p %h/retifs/%i
+ExecStart=%h/.cargo/bin/retifs-mount %i %h/retifs/%i
+ExecStop=/bin/fusermount3 -u %h/retifs/%i
+Restart=on-failure
+RestartSec=10
+
+[Install]
+WantedBy=default.target

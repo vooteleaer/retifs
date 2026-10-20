@@ -1,0 +1,16 @@
+# retifsd as a systemd user service.
+#   cp packaging/systemd/*.service ~/.config/systemd/user/
+#   systemctl --user enable --now retifsd
+# Needs a Reticulum shared instance on the machine (prnsd or rnsd).
+[Unit]
+Description=retifs daemon (records, sync, placement)
+After=network-online.target
+
+[Service]
+Type=simple
+ExecStart=%h/.cargo/bin/retifsd
+Restart=on-failure
+RestartSec=10
+
+[Install]
+WantedBy=default.target
