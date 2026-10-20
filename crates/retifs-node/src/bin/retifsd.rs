@@ -1442,7 +1442,7 @@ async fn handle(d: &Daemon, req: Request) -> Result<Response, String> {
         Request::RecordGet { ns, id } => {
             let rid = parse_record_id(&id)?;
             if d.store.get_record(&ns, &rid).map_err(|e| e.to_string())?.is_none() && d.store.ns_lazy(&ns).map_err(|e| e.to_string())? {
-                fetch_paths(d, &ns, &[rid], &[]).await?;
+                fetch_paths(d, &ns, &[rid], &[], false).await?;
                 materialize(d, &ns)?;
             }
             let rec = d.store.get_record(&ns, &rid).map_err(|e| e.to_string())?.ok_or("no such record")?;
@@ -2407,7 +2407,7 @@ async fn search_query(d: &Daemon, ns: &str, node: &str, terms: &[String]) -> Res
     let mut held = held;
     if d.store.ns_lazy(ns).map_err(|e| e.to_string())? {
         let missing: Vec<RecordId> = ids.iter().filter(|id| !held.contains_key(*id)).copied().collect();
-        if !missing.is_empty() && fetch_paths(d, ns, &missing, &[]).await? > 0 {
+        if !missing.is_empty() && fetch_paths(d, ns, &missing, &[], false).await? > 0 {
             materialize(d, ns)?;
             held = d.store.records(ns).map_err(|e| e.to_string())?.into_iter().map(|r| (r.id, r)).collect();
         }
@@ -2429,7 +2429,12 @@ async fn search_query(d: &Daemon, ns: &str, node: &str, terms: &[String]) -> Res
 /// the namespace's peers (and `extra`): a lazy member's records on demand.
 /// Each leaf fetched is complete, so its records merge exactly; the state is
 /// reloaded from the checkpoint with them. Returns the nodes fetched.
-async fn fetch_paths(d: &Daemon, ns: &str, ids: &[RecordId], extra: &[PeerId]) -> Result<usize, String> {
+///
+/// `pin`: the paths of records changed since the checkpoint must stay (their
+/// merge needs them), so they're pinned, also where already held. Records
+/// fetched only to be read go to the cache: evicted under disk pressure,
+/// fetched again when asked for.
+async fn fetch_paths(d: &Daemon, ns: &str, ids: &[RecordId], extra: &[PeerId], pin: bool) -> Result<usize, String> {
     let Some(file) = d.store.ns_checkpoint(ns).map_err(|e| e.to_string())? else { return Ok(0) };
     let cp = manifest::read_all(&*d.store, &file)
         .map_err(|e| e.to_string())
@@ -2469,12 +2474,29 @@ async fn fetch_paths(d: &Daemon, ns: &str, ids: &[RecordId], extra: &[PeerId]) -
             }
             let mut tokens = Vec::new();
             for (i, ct, _) in round.got {
-                d.store.insert(&wanted[i].0, &ct, tier::PINNED).map_err(|e| e.to_string())?;
+                d.store.insert(&wanted[i].0, &ct, if pin { tier::PINNED } else { tier::CACHE }).map_err(|e| e.to_string())?;
                 tokens.push((wanted[i].0, ChunkToken::for_seed(&wanted[i].1)));
                 fetched += 1;
             }
-            d.store.register_serving(&tokens).map_err(|e| e.to_string())?;
+            // Read-only fetches are reading history: never served on (holder privacy rule 2).
+            if pin {
+                d.store.register_serving(&tokens).map_err(|e| e.to_string())?;
+            }
         }
+    }
+    if pin {
+        let mut upgraded = Vec::new();
+        for id in ids {
+            for (cid, seed) in prolly::path_held(&*d.store, &root, id).map_err(|e| e.to_string())? {
+                if let Some(t) = d.store.tier(&cid).map_err(|e| e.to_string())?
+                    && t & tier::PINNED == 0
+                {
+                    d.store.set_tier(&cid, t | tier::PINNED).map_err(|e| e.to_string())?;
+                    upgraded.push((cid, ChunkToken::for_seed(&seed)));
+                }
+            }
+        }
+        d.store.register_serving(&upgraded).map_err(|e| e.to_string())?;
     }
     if fetched > 0 {
         // Reload: the records of the new leaves come from the checkpoint,
@@ -2509,7 +2531,7 @@ async fn fill_lazy(d: &Daemon, ns: &str) -> Result<usize, String> {
             }
         }
     }
-    fetch_paths(d, ns, &ids.into_iter().collect::<Vec<_>>(), &[]).await
+    fetch_paths(d, ns, &ids.into_iter().collect::<Vec<_>>(), &[], true).await
 }
 
 /// Names this node's latest checkpoint in its chain, if it holds `grant`
@@ -3261,7 +3283,16 @@ fn materialize(d: &Daemon, ns: &str) -> Result<retifs_core::ops::Merged, String>
                 .iter()
                 .map(|(w, (seq, time_ms, commit))| Frontier { writer: *w, seq: *seq, time_ms: *time_ms, commit: *commit })
                 .collect();
-            checkpoint = Some((state.clone(), frontier));
+            // The same tombstones the checkpoint leaves out go from memory too.
+            let reach: Vec<([u8; 32], u64, u64)> = entry.applied.iter().map(|(w, (seq, t, _))| (*w, *seq, *t)).collect();
+            let st = entry.state.as_mut().expect("built above");
+            let gone = st.prunable(&reach);
+            if !gone.is_empty() {
+                st.prune(&gone);
+                println!("ns {ns}: pruned {} tombstone(s)", gone.len());
+            }
+            checkpoint = Some((st.clone(), frontier));
+            break st.merged();
         }
         break state.merged();
     };

@@ -298,6 +298,24 @@ pub fn missing_on_path<S: Store>(store: &S, root: &Root, key: &[u8]) -> Result<O
     }
 }
 
+/// The nodes on `key`'s path that are held here, root first (up to the
+/// first missing one).
+pub fn path_held<S: Store>(store: &S, root: &Root, key: &[u8]) -> Result<Vec<Root>, TreeError<S::Error>> {
+    let mut out = Vec::new();
+    let mut at = *root;
+    while store.get(&at.0).map_err(TreeError::Store)?.is_some() {
+        out.push(at);
+        match read_node(store, &at)? {
+            Node::Leaf(_) => break,
+            Node::Internal(children) => {
+                let Some((_, child)) = children.iter().rev().find(|(first, _)| first.as_slice() <= key).or(children.first()) else { break };
+                at = *child;
+            }
+        }
+    }
+    Ok(out)
+}
+
 /// Every entry in the leaves held here, skipping subtrees that aren't (a
 /// partial state: each leaf held is complete, so its records are exact).
 pub fn read_present<S: Store, const K: usize>(store: &S, root: &Root) -> Result<KeyedEntries<K>, TreeError<S::Error>> {
