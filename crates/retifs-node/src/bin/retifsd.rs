@@ -612,6 +612,8 @@ struct Daemon {
     node_id: PeerId,
     /// This node's RNS identity hash: what it reveals on links to own nodes.
     identity_hash: [u8; 16],
+    /// Serialises channel publishing (see `publish_channel`).
+    publishing: tokio::sync::Mutex<()>,
     /// The checkpoint each namespace's published blind index describes.
     indexed: Mutex<HashMap<String, Cid>>,
     /// Links this node has identified itself on.
@@ -889,6 +891,7 @@ async fn serve(store: Arc<SlabStore>, identity: node::IdentitySecret, endpoint: 
         identity_hash: <sha2::Sha256 as sha2::Digest>::digest(lease::identity_public(&identity_bytes))[..16].try_into().unwrap(),
         identified: Mutex::new(std::collections::HashSet::new()),
         indexed: Mutex::new(HashMap::new()),
+        publishing: tokio::sync::Mutex::new(()),
         namespace_key: namespace_key(&store),
         lease_term: args.lease_term,
         upkeep_wake: Notify::new(),
@@ -1809,6 +1812,10 @@ fn full_status(d: &Daemon, cap: &FileRef) -> Status {
 /// and a new signed head (ADR-0015).
 /// `not_before`: the commit's time is at least this (ms), whatever the clock says.
 async fn publish_channel(d: &Daemon, name: &str, data: Vec<u8>, compress: bool, not_before: u64) -> Result<(u64, FileRef), String> {
+    // One write at a time: each reads the channel's last version and stores
+    // the next. Two at once took the same sequence number and one commit was
+    // lost (found by the scale test: 131 of 300 concurrent writes vanished).
+    let _one_at_a_time = d.publishing.lock().await;
     let mut c = d.store.own_channel(name).map_err(|e| e.to_string())?.ok_or_else(|| format!("no channel {name}"))?;
     let store = d.store.clone();
     let opts = manifest::WriteOpts {
@@ -2884,14 +2891,20 @@ async fn transaction(d: &Daemon, ns: &str, steps: Vec<TxStep>) -> Result<Vec<Rec
     write_ops(d, ns, ops).await?;
     // Content no record uses any more: no longer kept elsewhere; deleted
     // records' content also becomes evictable here.
-    let still_used: std::collections::HashSet<Cid> = d
-        .store
-        .namespaces()
-        .map_err(|e| e.to_string())?
-        .iter()
-        .flat_map(|n| d.store.records(n).unwrap_or_default())
-        .flat_map(|r| r.blocks.into_iter().map(|b| b.root))
-        .collect();
+    // (Reads every record of every namespace: only when something was replaced
+    // or deleted. An import of new records skipped it after the scale test
+    // found every write getting slower with the namespace's size.)
+    let still_used: std::collections::HashSet<Cid> = if replaced.is_empty() && deleted.is_empty() {
+        Default::default()
+    } else {
+        d.store
+            .namespaces()
+            .map_err(|e| e.to_string())?
+            .iter()
+            .flat_map(|n| d.store.records(n).unwrap_or_default())
+            .flat_map(|r| r.blocks.into_iter().map(|b| b.root))
+            .collect()
+    };
     for old in replaced.iter().filter(|b| !still_used.contains(&b.root)) {
         d.store.unneed_file(&old.root).map_err(|e| e.to_string())?;
     }
@@ -3023,7 +3036,8 @@ type CommitRef = (Cid, retifs_core::Seed);
 #[derive(Default)]
 struct NsCache {
     chains: HashMap<[u8; 32], Vec<Walked>>,
-    records: Option<std::collections::BTreeMap<RecordId, Record>>,
+    /// The store's record view matches the state (else it's rewritten whole).
+    view_built: bool,
     /// The merged state as a CRDT, and how far each writer's chain is applied
     /// (sequence number, commit time, commit): new commits apply one by one.
     state: Option<State>,
@@ -3140,27 +3154,31 @@ fn chains(d: &Daemon, ns: &str, full: bool) -> Result<(ChannelAddr, [u8; 32], Ch
 fn apply_view(d: &Daemon, ns: &str, records: &[Record]) -> Result<(), String> {
     let mut cache = d.ns_cache.lock().unwrap();
     let entry = cache.entry(ns.to_string()).or_default();
-    let new: std::collections::BTreeMap<RecordId, Record> = records.iter().map(|r| (r.id, r.clone())).collect();
     let mut changed = false;
-    match &entry.records {
-        None => {
-            d.store.replace_namespace(ns, records).map_err(|e| e.to_string())?;
-            changed = true;
-        }
-        Some(old) => {
-            for id in old.keys().filter(|id| !new.contains_key(*id)) {
-                d.store.delete_record(ns, id).map_err(|e| e.to_string())?;
-                changed = true;
-            }
-            for (id, r) in &new {
-                if old.get(id) != Some(r) {
-                    d.store.put_record(ns, r).map_err(|e| e.to_string())?;
-                    changed = true;
+    let dirty = entry.state.as_mut().map(|s| s.take_dirty()).unwrap_or_default();
+    if !entry.view_built || entry.state.is_none() {
+        // First time (or after a rebuild): the view is rewritten from the state.
+        d.store.replace_namespace(ns, records).map_err(|e| e.to_string())?;
+        entry.view_built = entry.state.is_some();
+        changed = true;
+    } else {
+        // Only the records the state says changed: no copy of every record,
+        // no comparison of everything on each write.
+        let st = entry.state.as_ref().expect("checked");
+        for id in dirty {
+            let now = st.record(&id);
+            let before = d.store.get_record(ns, &id).map_err(|e| e.to_string())?;
+            if now != before {
+                match &now {
+                    Some(r) => d.store.put_record(ns, r).map_err(|e| e.to_string())?,
+                    None => {
+                        d.store.delete_record(ns, &id).map_err(|e| e.to_string())?;
+                    }
                 }
+                changed = true;
             }
         }
     }
-    entry.records = Some(new);
     drop(cache);
     if changed {
         ns_changed(d, ns);
@@ -3202,6 +3220,7 @@ fn resume(d: &Daemon, ns: &str) -> Result<(), String> {
     entry.floors = cp.frontier.iter().map(|f| (f.writer, f.commit)).collect();
     entry.chains.clear();
     entry.state = Some(state);
+    entry.view_built = false;
     entry.since_checkpoint = 0;
     println!("ns {ns}: resumed from checkpoint ({} writer(s))", cp.frontier.len());
     Ok(())
@@ -3315,6 +3334,7 @@ fn materialize(d: &Daemon, ns: &str) -> Result<retifs_core::ops::Merged, String>
                 .map(|(w, c)| (*w, c.iter().map(|(_, c)| c.clone()).collect()))
                 .collect();
             entry.state = Some(State::build(&addr.writer, &plain, now));
+            entry.view_built = false;
             entry.applied = chains
                 .iter()
                 .filter(|(w, _)| complete(w))
@@ -3333,7 +3353,7 @@ fn materialize(d: &Daemon, ns: &str) -> Result<retifs_core::ops::Merged, String>
         let state = entry.state.as_ref().expect("built above");
         if entry.since_checkpoint >= CHECKPOINT_EVERY && !held_back && entry.gaps.is_empty() && !lazy {
             entry.since_checkpoint = 0;
-            let frontier = entry
+            let frontier: Vec<Frontier> = entry
                 .applied
                 .iter()
                 .map(|(w, (seq, time_ms, commit))| Frontier { writer: *w, seq: *seq, time_ms: *time_ms, commit: *commit })
@@ -3352,8 +3372,23 @@ fn materialize(d: &Daemon, ns: &str) -> Result<retifs_core::ops::Merged, String>
         break state.merged();
     };
     if let Some((state, frontier)) = checkpoint {
+        let reach: Vec<([u8; 32], u64, Cid)> = frontier.iter().map(|f| (f.writer, f.seq, f.commit)).collect();
         match save_checkpoint(d, ns, &state, frontier) {
-            Ok(file) => println!("ns {ns}: checkpoint {file}"),
+            Ok(file) => {
+                println!("ns {ns}: checkpoint {file}");
+                // The commits it covers needn't stay in memory: chains are walked
+                // back only to it from now on, like after resuming from it, and
+                // a rebuild reads the history from the store.
+                let mut cache = d.ns_cache.lock().unwrap();
+                if let Some(e) = cache.get_mut(ns) {
+                    for (w, seq, commit) in &reach {
+                        e.floors.insert(*w, *commit);
+                        if let Some(c) = e.chains.get_mut(w) {
+                            c.retain(|(s, _, _)| s > seq);
+                        }
+                    }
+                }
+            }
             Err(e) => println!("ns {ns}: checkpoint failed: {e}"),
         }
     }

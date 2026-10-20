@@ -116,3 +116,20 @@ fn namespace_info_member_channels_and_writer_heads() {
     assert_eq!(st.ns_keys("shared").unwrap(), vec![[2; 32], [9; 32]]);
 }
 
+
+/// Found by the scale test: `album=a7` also returned `a74` and `a76`
+/// (string values have no terminator in the index keys).
+#[test]
+fn string_terms_match_exactly_not_by_prefix() {
+    let (_d, st) = store();
+    let s = |v: &str| Value::Str(v.into());
+    for (id, a) in [(1, "a7"), (2, "a74"), (3, "a70"), (4, "a8"), (5, "a6zz")] {
+        st.put_record("photos", &rec(id, &[("album", s(a))])).unwrap();
+    }
+    assert_eq!(q(&st, "album=a7"), vec![1]);
+    assert_eq!(q(&st, "album<=a7"), vec![1, 5]);
+    assert_eq!(q(&st, "album<a7"), vec![5]);
+    assert_eq!(q(&st, "album>a7"), vec![2, 3, 4]);
+    assert_eq!(q(&st, "album>=a7"), vec![1, 2, 3, 4]);
+    assert_eq!(q(&st, "album^=a7"), vec![1, 2, 3]);
+}

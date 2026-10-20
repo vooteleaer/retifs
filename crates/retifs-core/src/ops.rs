@@ -548,6 +548,9 @@ pub struct State {
     /// Latest set or blocks per record: it exists if newer than its latest delete.
     live: BTreeMap<RecordId, Stamp>,
     deleted: BTreeMap<RecordId, Stamp>,
+    /// Records touched since [`State::take_dirty`] was last called: a view
+    /// built from the state updates only these instead of comparing everything.
+    dirty: std::collections::BTreeSet<RecordId>,
 }
 
 const ZERO: Stamp = (0, [0; 32], 0, 0);
@@ -656,6 +659,9 @@ impl State {
             return;
         }
         let newer = |old: Option<&Stamp>| old.is_none_or(|o| s > *o);
+        if let Op::Set(id, ..) | Op::Unset(id, _) | Op::Blocks(id, _) | Op::Delete(id) = op {
+            self.dirty.insert(*id);
+        }
         match op {
             Op::Set(id, k, v) => {
                 if newer(self.fields.get(&(*id, k.clone())).map(|(st, _)| st)) {
@@ -1028,11 +1034,17 @@ impl State {
 
     /// Drops these records' CRDT state entirely (see [`State::prunable`]).
     pub fn prune(&mut self, ids: &[RecordId]) {
+        self.dirty.extend(ids.iter().copied());
         let ids: std::collections::BTreeSet<&RecordId> = ids.iter().collect();
         self.live.retain(|id, _| !ids.contains(id));
         self.deleted.retain(|id, _| !ids.contains(id));
         self.blocks.retain(|id, _| !ids.contains(id));
         self.fields.retain(|(id, _), _| !ids.contains(id));
+    }
+
+    /// The records touched since the last call (applied operations, pruning).
+    pub fn take_dirty(&mut self) -> Vec<RecordId> {
+        std::mem::take(&mut self.dirty).into_iter().collect()
     }
 
     /// Every record's CRDT state (tombstones included), by ID.

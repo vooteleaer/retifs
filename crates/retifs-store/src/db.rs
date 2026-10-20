@@ -270,37 +270,42 @@ impl SlabStore {
         Ok(out)
     }
 
+    /// Index keys are `namespace ‖ key ‖ value ‖ record id (16)`. Values have
+    /// no terminator, so a scan from a string value also passes longer strings
+    /// that start with it (`a7` then `a74`): the scan is wide enough, and each
+    /// key's value part (unambiguous: the ID is the last 16 bytes) is compared
+    /// exactly, the same way [`Term::matches`] does.
     fn term_ids(&self, ns: &str, t: &Term) -> Result<BTreeSet<RecordId>, StoreError> {
         let r = self.db.begin_read()?;
         let attrs = r.open_table(ATTRS)?;
-        let (lo, hi): (Vec<u8>, Vec<u8>) = match t {
-            Term::Has(k) => {
-                let p = attr_prefix(ns, k);
-                (p.clone(), after(&p))
+        let base = match t {
+            Term::Has(k) | Term::Eq(k, _) | Term::Prefix(k, _) | Term::Range(k, ..) => attr_prefix(ns, k),
+        };
+        let at = |v: &[u8]| [base.as_slice(), v].concat();
+        // Which value parts count, and the (inclusive) byte range holding them.
+        let (lo, hi, keep): (Vec<u8>, Vec<u8>, Box<dyn Fn(&[u8]) -> bool>) = match t {
+            Term::Has(_) => (base.clone(), after(&base), Box::new(|_| true)),
+            Term::Eq(_, v) => {
+                let Some(sk) = sort_key(v) else { return Ok(BTreeSet::new()) };
+                (at(&sk), after(&at(&sk)), Box::new(move |vb| vb == sk.as_slice()))
             }
-            Term::Eq(k, v) => {
-                let p = [attr_prefix(ns, k), sort_key(v).unwrap_or_default()].concat();
-                (p.clone(), after(&p))
+            Term::Prefix(_, s) => {
+                let p = [&[4u8][..], s.as_bytes()].concat();
+                (at(&p), after(&at(&p)), Box::new(move |vb| vb.starts_with(&p)))
             }
-            Term::Prefix(k, s) => {
-                let p = [attr_prefix(ns, k), vec![4], s.as_bytes().to_vec()].concat();
-                (p.clone(), after(&p))
-            }
-            Term::Range(k, lo, hi, lo_incl, hi_incl) => {
-                let base = attr_prefix(ns, k);
+            Term::Range(_, lo, hi, lo_incl, hi_incl) => {
                 // The type of the bounds limits the range to that type.
                 let tag = lo.as_ref().or(hi.as_ref()).and_then(sort_key).map(|s| s[0]).unwrap_or(0);
-                let lo_key = match lo.as_ref().and_then(sort_key) {
-                    Some(sk) if *lo_incl => [base.as_slice(), &sk].concat(),
-                    Some(sk) => after(&[base.as_slice(), &sk].concat()),
-                    None => [base.as_slice(), &[tag]].concat(),
+                let (lo, hi) = (lo.as_ref().and_then(sort_key), hi.as_ref().and_then(sort_key));
+                let lo_key = at(lo.as_deref().unwrap_or(&[tag]));
+                let hi_key = after(&at(hi.as_deref().unwrap_or(&[tag])));
+                let (lo_incl, hi_incl) = (*lo_incl, *hi_incl);
+                let keep = move |vb: &[u8]| {
+                    vb.first() == Some(&tag)
+                        && lo.as_deref().is_none_or(|l| if lo_incl { vb >= l } else { vb > l })
+                        && hi.as_deref().is_none_or(|h| if hi_incl { vb <= h } else { vb < h })
                 };
-                let hi_key = match hi.as_ref().and_then(sort_key) {
-                    Some(sk) if *hi_incl => after(&[base.as_slice(), &sk].concat()),
-                    Some(sk) => [base.as_slice(), &sk].concat(),
-                    None => after(&[base.as_slice(), &[tag]].concat()),
-                };
-                (lo_key, hi_key)
+                (lo_key, hi_key, Box::new(keep))
             }
         };
         let mut out = BTreeSet::new();
@@ -310,7 +315,7 @@ impl SlabStore {
         for e in attrs.range(lo.as_slice()..hi.as_slice())? {
             let (k, _) = e?;
             let k = k.value();
-            if k.len() >= 16 {
+            if k.len() >= base.len() + 16 && keep(&k[base.len()..k.len() - 16]) {
                 out.insert(k[k.len() - 16..].try_into().unwrap());
             }
         }
