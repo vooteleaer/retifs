@@ -225,11 +225,21 @@ pub struct SlabStore {
 
 const DISK_SAMPLE: Duration = Duration::from_secs(1);
 
+/// The index's page cache by default. redb's own default is 1 GiB, which a
+/// growing store fills: a daemon on a 1 GB Raspberry Pi would end up killed
+/// for memory. The index stays on disk; this only bounds what's kept in RAM.
+pub const DEFAULT_DB_CACHE: usize = 64 << 20;
+
 impl SlabStore {
     pub fn open(root: impl AsRef<Path>) -> Result<Self, StoreError> {
+        Self::open_with_cache(root, DEFAULT_DB_CACHE)
+    }
+
+    /// Opens with an index page cache of `cache_bytes`.
+    pub fn open_with_cache(root: impl AsRef<Path>, cache_bytes: usize) -> Result<Self, StoreError> {
         let root = root.as_ref().to_path_buf();
         fs::create_dir_all(root.join("slabs"))?;
-        let db = Database::create(root.join("index.redb"))?;
+        let db = redb::Builder::new().set_cache_size(cache_bytes).create(root.join("index.redb"))?;
         let w = db.begin_write()?;
         w.open_table(INDEX)?;
         w.open_table(FREE)?;

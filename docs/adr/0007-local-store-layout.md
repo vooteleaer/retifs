@@ -52,3 +52,5 @@ A copied or stolen store is ciphertext plus an index of CIDs, size classes, tier
   - A **system-wide shared store** across users ([ADR-0006](0006-versioning-and-sharing.md)).
   - A later move to a raw partition or zoned storage (SMR, ZNS) without changing anything above the store.
 - Harder: slot reuse needs care so that a freed slot is never overwritten while a reader still holds it (epoch or refcount). Padding wastes space by design, which is the price of not leaking size.
+
+**Index cache (2026-10-20):** the index opens with a 64 MiB page cache (`retifsd --db-cache SIZE`). redb's own default is 1 GiB, which a growing store fills: the soak daemon's memory rose with its store, and on a 1 GB Raspberry Pi a large store would get the daemon killed for memory. The index stays on disk; the cache only bounds what's kept in RAM.

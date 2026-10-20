@@ -1,7 +1,7 @@
 //! retifsd (prototype): the retifs shared instance.
 //!
 //!     retifsd [--store DIR] [--max-store SIZE] [--min-free SIZE] [--cache-max SIZE]
-//!             [--private-requests] [--hold-for-others SIZE] [--lease-term DURATION] [--loss-target P]
+//!             [--private-requests] [--hold-for-others SIZE] [--db-cache SIZE] [--lease-term DURATION] [--loss-target P]
 //!             [--public] [--put FILE]...
 //!
 //! SIZE: bytes, or with a K/M/G/T suffix (powers of 1024). Defaults (ADR-0012):
@@ -431,6 +431,8 @@ impl Shared {
 
 struct Args {
     store: PathBuf,
+    /// The store index's page cache in RAM (`--db-cache`, default 64 MiB).
+    db_cache: usize,
     public: bool,
     put: Vec<PathBuf>,
     budget: retifs_store::Budget,
@@ -492,6 +494,7 @@ fn args() -> Args {
         budget: Default::default(),
         private_requests: false,
         hold_limit: None,
+        db_cache: retifs_store::DEFAULT_DB_CACHE,
         lease_term: 30 * 86_400,
         loss_target: 1e-3,
         slow_budget: 600,
@@ -513,6 +516,7 @@ fn args() -> Args {
             "--cache-max" => a.budget.cache_max = Some(size(&it.next().expect("--cache-max SIZE"))),
             "--private-requests" => a.private_requests = true,
             "--hold-for-others" => a.hold_limit = Some(size(&it.next().expect("--hold-for-others SIZE"))),
+            "--db-cache" => a.db_cache = size(&it.next().expect("--db-cache SIZE")) as usize,
             "--slow-link-budget" => a.slow_budget = duration_secs(&it.next().expect("--slow-link-budget DURATION")),
             "--treat-as-slow" => a.treat_as_slow.push(*parse_destination(&it.next().expect("--treat-as-slow NODE")).expect("node hash").as_bytes()),
             "--stamp-cost" => a.stamp_cost = it.next().and_then(|v| v.parse().ok()).expect("--stamp-cost BITS"),
@@ -525,7 +529,7 @@ fn args() -> Args {
             "-h" | "--help" => {
                 println!(
                     "retifsd [--store DIR] [--max-store SIZE] [--min-free SIZE] [--cache-max SIZE] [--private-requests]
-                             [--hold-for-others SIZE] [--lease-term DURATION] [--loss-target P] [--slow-link-budget DURATION]\n        \
+                             [--hold-for-others SIZE] [--db-cache SIZE] [--lease-term DURATION] [--loss-target P] [--slow-link-budget DURATION]\n        \
                      [--stamp-cost BITS] [--max-stamp-cost BITS]\n        \
                      [--nomadnet NAMESPACE [--nomadnet-name NAME]] [--device NAME] [--public] [--put FILE]..."
                 );
@@ -570,7 +574,7 @@ fn namespace_key(store: &SlabStore) -> [u8; 32] {
 fn main() {
     let args = args();
     std::fs::create_dir_all(&args.store).expect("create store dir");
-    let store = match SlabStore::open(&args.store) {
+    let store = match SlabStore::open_with_cache(&args.store, args.db_cache) {
         Ok(s) => {
             s.set_budget(args.budget.clone());
             s

@@ -69,6 +69,41 @@ impl Gateway {
     }
 }
 
+/// How much of a file is read from the daemon at a time.
+const PIECE: u64 = 1 << 20;
+
+/// A response body read from the daemon a piece at a time.
+struct Pieces<'a> {
+    gw: &'a mut Gateway,
+    ns: String,
+    cap: String,
+    pos: u64,
+    end: u64,
+    buf: Vec<u8>,
+    at: usize,
+}
+
+impl std::io::Read for Pieces<'_> {
+    fn read(&mut self, out: &mut [u8]) -> std::io::Result<usize> {
+        if self.at == self.buf.len() {
+            if self.pos >= self.end {
+                return Ok(0);
+            }
+            let n = (self.end - self.pos).min(PIECE);
+            self.buf = self.gw.read(&self.ns, &self.cap, self.pos, n).map_err(std::io::Error::other)?;
+            if self.buf.is_empty() {
+                return Err(std::io::Error::other("the daemon returned nothing"));
+            }
+            self.pos += self.buf.len() as u64;
+            self.at = 0;
+        }
+        let n = out.len().min(self.buf.len() - self.at);
+        out[..n].copy_from_slice(&self.buf[self.at..self.at + n]);
+        self.at += n;
+        Ok(n)
+    }
+}
+
 fn header(name: &str, value: &str) -> Header {
     Header::from_bytes(name.as_bytes(), value.as_bytes()).expect("valid header")
 }
@@ -248,10 +283,14 @@ fn serve(gw: &mut Gateway, req: tiny_http::Request, port: &str) -> std::io::Resu
         None => (200, 0..size),
     };
     let head = *req.method() == Method::Head;
-    let body = if head {
+    // The first piece is read before answering, so a file that can't be
+    // fetched gets a 504; the rest streams a piece at a time, so a large file
+    // is never held whole (here or in the daemon).
+    let len = if head { 0 } else { span.end - span.start };
+    let first = if head {
         Vec::new()
     } else {
-        match gw.read(&ns, &cap, span.start, span.end - span.start) {
+        match gw.read(&ns, &cap, span.start, len.min(PIECE)) {
             Ok(d) => d,
             Err(e) => {
                 return req.respond(page(
@@ -265,8 +304,9 @@ fn serve(gw: &mut Gateway, req: tiny_http::Request, port: &str) -> std::io::Resu
             }
         }
     };
-    let mut resp = HttpResponse::from_data(body)
-        .with_status_code(status)
+    let pos = span.start + first.len() as u64;
+    let body = Pieces { gw, ns: ns.clone(), cap, pos, end: span.start + len, buf: first, at: 0 };
+    let mut resp = HttpResponse::new(tiny_http::StatusCode(status), Vec::new(), body, Some(len as usize), None)
         .with_header(header("Content-Type", ctype))
         .with_header(header("Accept-Ranges", "bytes"));
     if let Some(r) = &range {
