@@ -330,6 +330,64 @@ impl SlabStore {
         Ok(true)
     }
 
+    /// Stores many chunks at once: slots written, each touched segment file
+    /// synced once, then one index transaction (content before reference, as
+    /// in [`SlabStore::insert`]). One at a time, a pinned chunk cost two syncs:
+    /// a 2 GiB put took 22 minutes. Returns which were new.
+    pub fn insert_batch(&self, items: &[(Cid, Vec<u8>)], tier: u8) -> Result<Vec<bool>, StoreError> {
+        let t = Tier::of(tier);
+        let mut out = vec![false; items.len()];
+        let mut new: Vec<(usize, u8)> = Vec::new();
+        let mut seen = std::collections::HashSet::new();
+        for (i, (cid, ct)) in items.iter().enumerate() {
+            let class = class_index(ct.len())?;
+            if !cid.verify(ct) {
+                return Err(StoreError::Corrupt(*cid));
+            }
+            if !seen.insert(*cid) {
+                continue; // twice in one batch
+            }
+            if self.lookup(cid)?.is_some() {
+                self.insert(cid, ct, tier)?; // merges flags; not new
+                continue;
+            }
+            self.admit(t, class, ct.len() as u64)?;
+            new.push((i, class));
+        }
+        if new.is_empty() {
+            return Ok(out);
+        }
+        let durable = self.sync && tier & tier::PINNED != 0;
+        let mut w = self.db.begin_write()?;
+        if !durable {
+            w.set_durability(redb::Durability::None);
+        }
+        let mut touched = std::collections::BTreeSet::new();
+        {
+            for &(i, class) in &new {
+                let (cid, ct) = &items[i];
+                let (seg, slot) = allocate(&w, class)?;
+                self.write_slot(class, seg, slot, ct, false)?;
+                touched.insert((class, seg));
+                w.open_table(INDEX)?.insert(cid.as_bytes().as_slice(), (class, seg, slot, tier))?;
+                add_usage(&w, t, ct.len() as i64)?;
+                out[i] = true;
+            }
+        }
+        if durable {
+            for (class, seg) in &touched {
+                OpenOptions::new().write(true).open(self.segment_path(*class, *seg))?.sync_data()?;
+            }
+        }
+        w.commit()?;
+        if !t.hard() {
+            for &(i, _) in &new {
+                self.touch(&items[i].0);
+            }
+        }
+        Ok(out)
+    }
+
     /// Reads and verifies a chunk. `Err(Corrupt)` means the stored copy is bad.
     pub fn fetch(&self, cid: &Cid) -> Result<Option<Vec<u8>>, StoreError> {
         let Some((class, seg, slot, flags)) = self.lookup(cid)? else {
@@ -812,19 +870,44 @@ impl Store for CacheTier<'_> {
 pub struct TrackedPinned<'a> {
     pub store: &'a SlabStore,
     pub added: Vec<Cid>,
+    /// Chunks not stored yet: written in batches ([`SlabStore::insert_batch`]).
+    pending: Vec<(Cid, Vec<u8>)>,
 }
+
+/// Chunks a [`TrackedPinned`] collects before storing them in one batch.
+const BATCH: usize = 256;
 
 impl<'a> TrackedPinned<'a> {
     pub fn new(store: &'a SlabStore) -> Self {
-        TrackedPinned { store, added: Vec::new() }
+        TrackedPinned { store, added: Vec::new(), pending: Vec::new() }
     }
 
-    /// Removes every chunk this writer added.
-    pub fn roll_back(self) -> Result<(), StoreError> {
+    /// Stores what's collected so far. Call it before relying on the chunks
+    /// being in the store (dropping the writer also flushes, ignoring errors).
+    pub fn flush(&mut self) -> Result<(), StoreError> {
+        if self.pending.is_empty() {
+            return Ok(());
+        }
+        let items = std::mem::take(&mut self.pending);
+        let new = self.store.insert_batch(&items, tier::PINNED)?;
+        self.added.extend(items.iter().zip(new).filter(|(_, n)| *n).map(|((c, _), _)| *c));
+        Ok(())
+    }
+
+    /// Removes every chunk this writer added (and forgets what it hadn't stored).
+    pub fn roll_back(mut self) -> Result<(), StoreError> {
+        self.pending.clear();
         for cid in &self.added {
             self.store.remove(cid)?;
         }
+        self.added.clear();
         Ok(())
+    }
+}
+
+impl Drop for TrackedPinned<'_> {
+    fn drop(&mut self) {
+        let _ = self.flush();
     }
 }
 
@@ -832,13 +915,17 @@ impl Store for TrackedPinned<'_> {
     type Error = StoreError;
 
     fn put(&mut self, cid: Cid, ciphertext: Vec<u8>) -> Result<(), StoreError> {
-        if self.store.insert(&cid, &ciphertext, tier::PINNED)? {
-            self.added.push(cid);
+        self.pending.push((cid, ciphertext));
+        if self.pending.len() >= BATCH {
+            self.flush()?;
         }
         Ok(())
     }
 
     fn get(&self, cid: &Cid) -> Result<Option<Vec<u8>>, StoreError> {
+        if let Some((_, ct)) = self.pending.iter().rev().find(|(c, _)| c == cid) {
+            return Ok(Some(ct.clone()));
+        }
         self.store.fetch(cid)
     }
 }

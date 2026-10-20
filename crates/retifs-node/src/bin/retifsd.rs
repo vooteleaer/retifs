@@ -1746,11 +1746,14 @@ async fn put_file(d: &Daemon, file: std::fs::File, public: bool, compress: bool,
         let secret = secret(&store, public, record.as_deref());
         let opts = manifest::WriteOpts { stable_padding: record.is_some() && !public, ..opts };
         let mut pinned = retifs_store::TrackedPinned::new(&store);
-        let (file, blobs) = match manifest::write_reader(&mut pinned, &secret, std::io::BufReader::with_capacity(1 << 20, file), opts) {
+        let (file, blobs) = match manifest::write_reader(&mut pinned, &secret, std::io::BufReader::with_capacity(1 << 20, file), opts)
+            .map_err(|e| e.to_string())
+            .and_then(|w| pinned.flush().map(|_| w).map_err(|e| e.to_string()))
+        {
             Ok(written) => written,
             Err(e) => {
                 let _ = pinned.roll_back();
-                return Err(e.to_string());
+                return Err(e);
             }
         };
         let tokens: Vec<_> = blobs.iter().map(|(c, s)| (*c, ChunkToken::for_seed(s))).collect();
@@ -1780,12 +1783,15 @@ fn store_file(
     // across its versions (ADR-0009), so an edit doesn't re-store all padding.
     let opts = manifest::WriteOpts { stable_padding: record.is_some() && !public, ..opts };
     let mut pinned = retifs_store::TrackedPinned::new(store);
-    let (file, blobs) = match manifest::write_tracked(&mut pinned, &secret, data, opts) {
+    let (file, blobs) = match manifest::write_tracked(&mut pinned, &secret, data, opts)
+        .map_err(|e| e.to_string())
+        .and_then(|w| pinned.flush().map(|_| w).map_err(|e| e.to_string()))
+    {
         Ok(written) => written,
         Err(e) => {
             // Don't leave half a file pinned (and eating the budget).
             let _ = pinned.roll_back();
-            return Err(e.to_string());
+            return Err(e);
         }
     };
     let tokens: Vec<_> = blobs.iter().map(|(c, s)| (*c, ChunkToken::for_seed(s))).collect();
@@ -2785,11 +2791,14 @@ async fn commit_session(d: &Daemon, s: &WriteSession, attrs: Vec<(String, AttrVa
         let secret = secret(&store, false, Some(&record));
         let opts = manifest::WriteOpts { stable_padding: true, ..Default::default() };
         let mut pinned = retifs_store::TrackedPinned::new(&store);
-        let (file, blobs) = match manifest::write_reader(&mut pinned, &secret, reader, opts) {
+        let (file, blobs) = match manifest::write_reader(&mut pinned, &secret, reader, opts)
+            .map_err(|e| e.to_string())
+            .and_then(|w| pinned.flush().map(|_| w).map_err(|e| e.to_string()))
+        {
             Ok(w) => w,
             Err(e) => {
                 let _ = pinned.roll_back();
-                return Err(e.to_string());
+                return Err(e);
             }
         };
         let tokens: Vec<_> = blobs.iter().map(|(c, s)| (*c, ChunkToken::for_seed(s))).collect();
@@ -3243,6 +3252,7 @@ fn save_checkpoint(d: &Daemon, ns: &str, state: &State, frontier: Vec<Frontier>)
     let cp = Checkpoint::save(&mut pinned, &secret, state, frontier).map_err(|e| e.to_string())?;
     let (file, blobs) = manifest::write_tracked(&mut pinned, &secret, &cp.encode(), manifest::WriteOpts::default())
         .map_err(|e| e.to_string())?;
+    pinned.flush().map_err(|e| e.to_string())?; // the tree's nodes are read back just below
     let new_nodes = match &cp.state {
         Some(root) => prolly::nodes(&*d.store, root).map_err(|e| e.to_string())?,
         None => Vec::new(),
