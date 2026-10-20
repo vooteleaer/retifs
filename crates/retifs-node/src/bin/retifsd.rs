@@ -1213,11 +1213,13 @@ async fn handle(d: &Daemon, req: Request) -> Result<Response, String> {
             Ok(Response::Namespace(ns_view(d, &ns)?))
         }
 
-        Request::NsGrant { ns, writer, grant, from } => {
+        Request::NsGrant { ns, writer, grant, from, keys, until } => {
             writable(&ns)?;
             let w = parse_writer(&writer)?;
             let rights = if grant { vec![Right::Write, Right::Grant] } else { vec![Right::Write] };
-            write_ops(d, &ns, vec![Op::Grant(w, rights)]).await?;
+            let limits = retifs_core::ops::Limits { keys: (!keys.is_empty()).then(|| keys.into_iter().collect()), until };
+            let op = if limits.is_none() { Op::Grant(w, rights) } else { Op::GrantLimited(w, rights, limits) };
+            write_ops(d, &ns, vec![op]).await?;
             d.store.add_ns_peers(&ns, &parse_peers(&from)?).map_err(|e| e.to_string())?;
             d.ns_wake.notify_one();
             Ok(Response::Namespace(ns_view(d, &ns)?))
@@ -1456,7 +1458,18 @@ fn ns_view(d: &Daemon, ns: &str) -> Result<NsView, String> {
         writers: merged
             .writers
             .iter()
-            .map(|(w, rights)| (hex(w), rights.iter().map(|r| if *r == Right::Grant { "grant" } else { "write" }.to_string()).collect()))
+            .map(|(w, rights)| {
+                let mut shown: Vec<String> = rights.iter().map(|r| if *r == Right::Grant { "grant" } else { "write" }.to_string()).collect();
+                if let Some(l) = merged.limits.get(w) {
+                    if let Some(keys) = &l.keys {
+                        shown.push(format!("keys={}", keys.iter().cloned().collect::<Vec<_>>().join("|")));
+                    }
+                    if let Some(u) = l.until {
+                        shown.push(format!("until={u}{}", if u <= now_ms() { " (expired)" } else { "" }));
+                    }
+                }
+                (hex(w), shown)
+            })
             .collect(),
         records: merged.records.len(),
         peers: d.store.ns_peers(ns).map_err(|e| e.to_string())?.len(),

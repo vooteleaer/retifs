@@ -84,6 +84,21 @@ fn op(o: &Op) -> J {
             hex::encode(w),
             rs.iter().map(|r| if *r == Right::Grant { "grant" } else { "write" }).collect::<Vec<_>>()
         ]),
+        Op::GrantLimited(w, rs, l) => {
+            let mut limits = serde_json::Map::new();
+            if let Some(k) = &l.keys {
+                limits.insert("keys".into(), json!(k.iter().collect::<Vec<_>>()));
+            }
+            if let Some(u) = l.until {
+                limits.insert("until".into(), json!(u));
+            }
+            json!([
+                "grant",
+                hex::encode(w),
+                rs.iter().map(|r| if *r == Right::Grant { "grant" } else { "write" }).collect::<Vec<_>>(),
+                limits
+            ])
+        }
         Op::Revoke(w) => json!(["revoke", hex::encode(w)]),
         Op::Identity(p) => json!(["identity", hex::encode(p)]),
         Op::Checkpoint(f) => json!(["checkpoint", [f.root.to_string(), hex::encode(f.seed.0), f.size]]),

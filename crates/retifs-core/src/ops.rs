@@ -6,9 +6,12 @@
 //! op       = [ "set", id, key, value ] | [ "unset", id, key ] | [ "blocks", id, [ ref, … ] ]
 //!          | [ "delete", id ] | [ "grant", writer (bin 32), [ right, … ] ] | [ "revoke", writer ]
 //!          | [ "identity", public (bin 64) ]                     the signer's RNS identity (X25519 ‖ Ed25519)
+//!          | [ "grant", writer, [ right, … ], limits ]             a limited grant
 //!          | [ "rekey", epoch, [ [ writer (bin 32), wrapped (bin) ], … sorted by writer ] ]
 //!          | [ "checkpoint", [ cid, seed, size ] ]               a checkpoint file (ADR-0018); changes nothing
 //! right    = "grant" | "write"                                   sorted, unique
+//! limits   = { "keys": [ key, … ], "until": time_ms }            either or both; keys sorted, unique;
+//!                                                                "@content" and "@delete" name content and deletion
 //! ```
 //! Every reader replays all writers' operations in stamp order —
 //! `(commit time, writer key, commit sequence number, index in commit)` — and so reaches the same
@@ -16,7 +19,7 @@
 //! count only if their writer held `write` at that stamp; grants and revokes
 //! only if it held `grant`. The creator holds both, always.
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 
 use crate::{
     manifest::FileRef,
@@ -47,6 +50,81 @@ impl Right {
     }
 }
 
+/// What a limited grant allows (ADR-0017): only these attribute keys
+/// (`@content` for the record's content, `@delete` for deleting it), and only
+/// before `until`. `None` is no limit.
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
+pub struct Limits {
+    pub keys: Option<BTreeSet<String>>,
+    pub until: Option<u64>,
+}
+
+/// The pseudo-key a limited grant names for content (`Op::Blocks`).
+pub const CONTENT_KEY: &str = "@content";
+/// The pseudo-key a limited grant names for deleting records.
+pub const DELETE_KEY: &str = "@delete";
+
+impl Limits {
+    pub fn is_none(&self) -> bool {
+        self.keys.is_none() && self.until.is_none()
+    }
+
+    /// Both limits at once: a writer with `self` can grant no more than this.
+    pub fn narrowed(&self, other: &Limits) -> Limits {
+        Limits {
+            keys: match (&self.keys, &other.keys) {
+                (None, k) | (k, None) => k.clone(),
+                (Some(a), Some(b)) => Some(a.intersection(b).cloned().collect()),
+            },
+            until: match (self.until, other.until) {
+                (None, u) | (u, None) => u,
+                (Some(a), Some(b)) => Some(a.min(b)),
+            },
+        }
+    }
+
+    /// Whether these limits let `op` (a data operation) count at time `time_ms`.
+    pub fn allow(&self, op: &Op, time_ms: u64) -> bool {
+        if self.until.is_some_and(|u| time_ms >= u) {
+            return false;
+        }
+        let Some(keys) = &self.keys else { return true };
+        match op {
+            Op::Set(_, k, _) | Op::Unset(_, k) => keys.contains(k),
+            Op::Blocks(..) => keys.contains(CONTENT_KEY),
+            Op::Delete(_) => keys.contains(DELETE_KEY),
+            _ => true,
+        }
+    }
+}
+
+/// A writer's rights and their limits.
+#[derive(Debug, Clone, PartialEq, Default)]
+pub struct Grant {
+    pub rights: Vec<Right>,
+    pub limits: Limits,
+}
+
+impl Grant {
+    fn full() -> Grant {
+        Grant { rights: vec![Right::Grant, Right::Write], limits: Limits::default() }
+    }
+
+    /// Holds `right` at time `time_ms` (an expired grant holds nothing).
+    fn holds(&self, right: Right, time_ms: u64) -> bool {
+        self.rights.contains(&right) && self.limits.until.is_none_or(|u| time_ms < u)
+    }
+}
+
+/// The grant an operation makes, if it is one: (writer, rights, limits).
+fn grant_of(op: &Op) -> Option<(&WriterKey, &Vec<Right>, Limits)> {
+    match op {
+        Op::Grant(w, r) => Some((w, r, Limits::default())),
+        Op::GrantLimited(w, r, l) => Some((w, r, l.clone())),
+        _ => None,
+    }
+}
+
 #[derive(Debug, Clone, PartialEq)]
 pub enum Op {
     Set(RecordId, String, Value),
@@ -55,6 +133,9 @@ pub enum Op {
     Delete(RecordId),
     /// Sets the writer's rights (replacing earlier ones).
     Grant(WriterKey, Vec<Right>),
+    /// A grant with limits (keys, expiry). Granted by a limited writer, it's
+    /// narrowed to that writer's own limits.
+    GrantLimited(WriterKey, Vec<Right>, Limits),
     Revoke(WriterKey),
     /// The signer's public identity (X25519 ‖ Ed25519), so others can wrap keys to it.
     /// Counts only if its Ed25519 half is the signer's own key.
@@ -151,6 +232,31 @@ pub(crate) fn write_op(out: &mut Vec<u8>, op: &Op) {
                 write_str(out, r.name());
             }
         }
+        Op::GrantLimited(w, rights, limits) => {
+            let mut rights = rights.clone();
+            rights.sort();
+            rights.dedup();
+            write_array_len(out, 4);
+            write_str(out, "grant");
+            write_bin(out, w);
+            write_array_len(out, rights.len());
+            for r in rights {
+                write_str(out, r.name());
+            }
+            let n = limits.keys.is_some() as usize + limits.until.is_some() as usize;
+            write_map_len(out, n);
+            if let Some(keys) = &limits.keys {
+                write_str(out, "keys");
+                write_array_len(out, keys.len());
+                for k in keys {
+                    write_str(out, k);
+                }
+            }
+            if let Some(u) = limits.until {
+                write_str(out, "until");
+                crate::record::write_int(out, u as i64);
+            }
+        }
         Op::Revoke(w) => {
             write_array_len(out, 2);
             write_str(out, "revoke");
@@ -211,7 +317,7 @@ pub(crate) fn read_op(r: &mut Reader) -> Result<Op, RecordError> {
             Op::Blocks(i, blocks)
         }
         ("delete", 2) => Op::Delete(id(r)?),
-        ("grant", 3) => {
+        ("grant", 3 | 4) => {
             let w = writer(r)?;
             let m = r.array_len()?;
             let mut rights = Vec::new();
@@ -222,7 +328,35 @@ pub(crate) fn read_op(r: &mut Reader) -> Result<Op, RecordError> {
                     _ => return Err(RecordError::Malformed("unknown right")),
                 });
             }
-            Op::Grant(w, rights)
+            if n == 3 {
+                Op::Grant(w, rights)
+            } else {
+                let fields = r.map_len()?;
+                let mut limits = Limits::default();
+                for _ in 0..fields {
+                    match r.str()?.as_str() {
+                        "keys" if limits.keys.is_none() && limits.until.is_none() => {
+                            let k = r.array_len()?;
+                            let mut keys = BTreeSet::new();
+                            for _ in 0..k {
+                                keys.insert(r.str()?);
+                            }
+                            limits.keys = Some(keys);
+                        }
+                        "until" if limits.until.is_none() => {
+                            limits.until = Some(match r.value(0)? {
+                                Value::Int(u) if u >= 0 => u as u64,
+                                _ => return Err(RecordError::Malformed("grant expiry")),
+                            });
+                        }
+                        _ => return Err(RecordError::Malformed("grant limits")),
+                    }
+                }
+                if limits.is_none() {
+                    return Err(RecordError::Malformed("a limited grant without limits"));
+                }
+                Op::GrantLimited(w, rights, limits)
+            }
         }
         ("revoke", 2) => Op::Revoke(writer(r)?),
         ("identity", 2) => Op::Identity(r.bin()?.try_into().map_err(|_| RecordError::Malformed("identity"))?),
@@ -278,6 +412,8 @@ pub struct Merged {
     pub records: Vec<Record>,
     /// Writers and their rights at the end.
     pub writers: BTreeMap<WriterKey, Vec<Right>>,
+    /// The limits of writers whose grants have any.
+    pub limits: BTreeMap<WriterKey, Limits>,
     /// Operations that didn't count (no right at their stamp), and commits
     /// ignored for their dates.
     pub ignored_ops: usize,
@@ -304,11 +440,11 @@ pub fn merge(creator: &WriterKey, chains: &BTreeMap<WriterKey, Vec<WriterCommit>
     }
     events.sort_by_key(|a| (a.0, a.1, a.2, a.3));
 
-    let mut rights: BTreeMap<WriterKey, Vec<Right>> = BTreeMap::new();
-    rights.insert(*creator, vec![Right::Grant, Right::Write]);
+    let mut rights: BTreeMap<WriterKey, Grant> = BTreeMap::new();
+    rights.insert(*creator, Grant::full());
     let mut records: BTreeMap<RecordId, Record> = BTreeMap::new();
-    let has = |rights: &BTreeMap<WriterKey, Vec<Right>>, w: &WriterKey, r: Right| rights.get(w).is_some_and(|v| v.contains(&r));
     for (time_ms, writer, _, _, op) in events {
+        let has = |rights: &BTreeMap<WriterKey, Grant>, w: &WriterKey, r: Right| rights.get(w).is_some_and(|g| g.holds(r, time_ms));
         match op {
             Op::Identity(p) => {
                 if p[32..] == writer {
@@ -321,12 +457,14 @@ pub fn merge(creator: &WriterKey, chains: &BTreeMap<WriterKey, Vec<WriterCommit>
                 m.rekeys.push(RekeyEvent { epoch: *epoch, time_ms, by: writer, entries: entries.clone() });
             }
             Op::Rekey(..) => m.ignored_ops += 1,
-            Op::Grant(w, granted) if has(&rights, &writer, Right::Grant) => {
+            Op::Grant(..) | Op::GrantLimited(..) if has(&rights, &writer, Right::Grant) => {
+                let (w, granted, limits) = grant_of(op).expect("a grant");
                 if w != creator {
                     let mut g = granted.clone();
                     g.sort();
                     g.dedup();
-                    rights.insert(*w, g);
+                    let by = rights[&writer].limits.clone();
+                    rights.insert(*w, Grant { rights: g, limits: by.narrowed(&limits) });
                 }
             }
             Op::Revoke(w) if has(&rights, &writer, Right::Grant) => {
@@ -334,9 +472,9 @@ pub fn merge(creator: &WriterKey, chains: &BTreeMap<WriterKey, Vec<WriterCommit>
                     rights.remove(w);
                 }
             }
-            Op::Grant(..) | Op::Revoke(_) => m.ignored_ops += 1,
+            Op::Grant(..) | Op::GrantLimited(..) | Op::Revoke(_) => m.ignored_ops += 1,
             Op::Checkpoint(_) => {}
-            _ if !has(&rights, &writer, Right::Write) => m.ignored_ops += 1,
+            _ if !has(&rights, &writer, Right::Write) || !rights[&writer].limits.allow(op, time_ms) => m.ignored_ops += 1,
             Op::Set(id, k, v) => {
                 let rec = records.entry(*id).or_insert_with(|| Record { id: *id, attrs: BTreeMap::new(), blocks: Vec::new() });
                 rec.attrs.insert(k.clone(), v.clone());
@@ -356,7 +494,8 @@ pub fn merge(creator: &WriterKey, chains: &BTreeMap<WriterKey, Vec<WriterCommit>
         }
     }
     m.records = records.into_values().collect();
-    m.writers = rights;
+    m.limits = rights.iter().filter(|(_, g)| !g.limits.is_none()).map(|(w, g)| (*w, g.limits.clone())).collect();
+    m.writers = rights.into_iter().map(|(w, g)| (w, g.rights)).collect();
     m
 }
 
@@ -367,7 +506,7 @@ pub type Stamp = (u64, WriterKey, u64, u32);
 /// Grants, revokes, identities and rekeys: they decide what other operations
 /// mean, so they're evaluated as a whole, in stamp order.
 pub fn is_control(op: &Op) -> bool {
-    matches!(op, Op::Grant(..) | Op::Revoke(_) | Op::Identity(_) | Op::Rekey(..))
+    matches!(op, Op::Grant(..) | Op::GrantLimited(..) | Op::Revoke(_) | Op::Identity(_) | Op::Rekey(..))
 }
 
 /// The commits of a chain that count: not dated before their predecessor,
@@ -414,7 +553,7 @@ pub struct State {
 const ZERO: Stamp = (0, [0; 32], 0, 0);
 
 /// A writer's rights from each stamp on (None: revoked).
-type RightsTimeline = Vec<(Stamp, Option<Vec<Right>>)>;
+type RightsTimeline = Vec<(Stamp, Option<Grant>)>;
 
 impl State {
     /// A state with this control timeline and no data yet.
@@ -428,7 +567,7 @@ impl State {
     /// Re-evaluates the control operations: rights, identities, rekeys.
     fn timeline(&mut self) {
         let creator = self.creator;
-        self.rights = BTreeMap::from([(creator, vec![(ZERO, Some(vec![Right::Grant, Right::Write]))])]);
+        self.rights = BTreeMap::from([(creator, vec![(ZERO, Some(Grant::full()))])]);
         self.identities.clear();
         self.rekeys.clear();
         self.ignored_control = 0;
@@ -447,12 +586,14 @@ impl State {
                 Op::Rekey(epoch, entries) if can_grant => {
                     self.rekeys.push(RekeyEvent { epoch: *epoch, time_ms: s.0, by: writer, entries: entries.clone() })
                 }
-                Op::Grant(w, granted) if can_grant => {
+                Op::Grant(..) | Op::GrantLimited(..) if can_grant => {
+                    let (w, granted, limits) = grant_of(op).expect("a grant");
                     if *w != creator {
                         let mut granted = granted.clone();
                         granted.sort();
                         granted.dedup();
-                        self.rights.entry(*w).or_default().push((*s, Some(granted)));
+                        let by = self.grant_at(&writer, s).map(|g| g.limits).unwrap_or_default();
+                        self.rights.entry(*w).or_default().push((*s, Some(Grant { rights: granted, limits: by.narrowed(&limits) })));
                     }
                 }
                 Op::Revoke(w) if can_grant => {
@@ -492,12 +633,14 @@ impl State {
         self.high
     }
 
-    /// Whether `writer` held `right` just before stamp `at`.
+    /// The grant `writer` held just before stamp `at`.
+    fn grant_at(&self, writer: &WriterKey, at: &Stamp) -> Option<Grant> {
+        self.rights.get(writer).and_then(|t| t.iter().rev().find(|(s, _)| s < at)).and_then(|(_, g)| g.clone())
+    }
+
+    /// Whether `writer` held `right` just before stamp `at` (and it hadn't expired).
     fn has(&self, writer: &WriterKey, right: Right, at: &Stamp) -> bool {
-        self.rights
-            .get(writer)
-            .and_then(|t| t.iter().rev().find(|(s, _)| s < at))
-            .is_some_and(|(_, r)| r.as_ref().is_some_and(|r| r.contains(&right)))
+        self.grant_at(writer, at).is_some_and(|g| g.holds(right, at.0))
     }
 
     /// Applies one data operation; any order gives the same state.
@@ -508,7 +651,7 @@ impl State {
         if self.high.is_none_or(|h| s > h) {
             self.high = Some(s);
         }
-        if !self.has(&s.1, Right::Write, &s) {
+        if !self.grant_at(&s.1, &s).is_some_and(|g| g.holds(Right::Write, s.0) && g.limits.allow(op, s.0)) {
             self.ignored_data += 1;
             return;
         }
@@ -654,7 +797,12 @@ impl State {
             writers: self
                 .rights
                 .iter()
-                .filter_map(|(w, t)| t.last().and_then(|(_, r)| r.clone()).map(|r| (*w, r)))
+                .filter_map(|(w, t)| t.last().and_then(|(_, r)| r.clone()).map(|g| (*w, g.rights)))
+                .collect(),
+            limits: self
+                .rights
+                .iter()
+                .filter_map(|(w, t)| t.last().and_then(|(_, r)| r.clone()).filter(|g| !g.limits.is_none()).map(|g| (*w, g.limits)))
                 .collect(),
             ignored_ops: self.ignored_control + self.ignored_data,
             ignored_commits: 0,
@@ -894,6 +1042,7 @@ mod tests {
     const BOB: WriterKey = [2; 32];
     const EVE: WriterKey = [3; 32];
     const R: RecordId = [7; 16];
+    const R2: RecordId = [8; 16];
 
     fn c(time_ms: u64, ops: Vec<Op>) -> WriterCommit {
         WriterCommit { seq: 0, time_ms, ops }
@@ -1012,7 +1161,24 @@ mod tests {
                                 4 => Op::Unset(id, k),
                                 5 => Op::Blocks(id, vec![]),
                                 6 => Op::Delete(id),
-                                7 => Op::Grant(writers[rnd(3) as usize], if rnd(2) == 0 { vec![Right::Write] } else { vec![Right::Write, Right::Grant] }),
+                                7 => {
+                                    let w = writers[rnd(3) as usize];
+                                    let rights = if rnd(2) == 0 { vec![Right::Write] } else { vec![Right::Write, Right::Grant] };
+                                    if rnd(2) == 0 {
+                                        Op::Grant(w, rights)
+                                    } else {
+                                        // Limited: some of the keys, maybe an expiry.
+                                        let keys = (rnd(3) != 0).then(|| {
+                                            ["a", "b", "c", super::CONTENT_KEY, super::DELETE_KEY]
+                                                .iter()
+                                                .filter(|_| rnd(2) == 0)
+                                                .map(|k| k.to_string())
+                                                .collect()
+                                        });
+                                        let until = (keys.is_none() || rnd(2) == 0).then(|| rnd(250));
+                                        Op::GrantLimited(w, rights, super::Limits { keys, until })
+                                    }
+                                }
                                 8 => Op::Revoke(writers[rnd(3) as usize]),
                                 _ => Op::Set(id, k, Value::Bool(true)),
                             }
@@ -1105,6 +1271,54 @@ mod tests {
             });
             assert_eq!(seen, chains.get(&own).map_or(0, Vec::len));
         }
+    }
+
+    /// A limited grant: only some keys, until a time; a limited granter can
+    /// only grant within its own limits.
+    #[test]
+    fn limited_grants_by_keys_expiry_and_narrowing() {
+        let keys = |ks: &[&str]| Some(ks.iter().map(|k| k.to_string()).collect::<BTreeSet<String>>());
+        let ch = chains(vec![
+            (ALICE, vec![c(10, vec![Op::GrantLimited(BOB, vec![Right::Write, Right::Grant], Limits { keys: keys(&["rating", CONTENT_KEY]), until: Some(500) })])]),
+            (
+                BOB,
+                vec![
+                    c(100, vec![
+                        Op::Set(R, "rating".into(), Value::Int(4)),             // allowed key
+                        Op::Set(R, "title".into(), s("Bob's title")),           // not allowed
+                        Op::Blocks(R, vec![]),                                  // @content: allowed
+                        Op::Delete(R2),                                         // @delete: not allowed
+                    ]),
+                    c(200, vec![Op::Grant(EVE, vec![Right::Write])]),          // narrowed to Bob's limits
+                    c(600, vec![Op::Set(R, "rating".into(), Value::Int(1)), Op::Grant(EVE, vec![Right::Write])]), // expired: neither counts
+                ],
+            ),
+            (
+                EVE,
+                vec![
+                    c(300, vec![Op::Set(R, "rating".into(), Value::Int(5)), Op::Set(R, "title".into(), s("Eve's title"))]),
+                    c(550, vec![Op::Set(R, "rating".into(), Value::Int(2))]), // past Bob's expiry, inherited
+                ],
+            ),
+        ]);
+        let mut with_r2 = ch.clone();
+        with_r2.get_mut(&ALICE).unwrap().push(c(20, vec![Op::Set(R2, "x".into(), Value::Int(1))]));
+        with_r2.get_mut(&ALICE).unwrap().sort_by_key(|c| c.time_ms);
+        for (i, cm) in with_r2.get_mut(&ALICE).unwrap().iter_mut().enumerate() {
+            cm.seq = i as u64 + 1;
+        }
+        let m = merge(&ALICE, &with_r2, 10_000);
+        let r = m.records.iter().find(|r| r.id == R).unwrap();
+        assert_eq!(r.attrs.get("rating"), Some(&Value::Int(5)), "Eve's in-limit write at 300 counts; later ones don't");
+        assert_eq!(r.attrs.get("title"), None, "title was never allowed");
+        assert!(m.records.iter().any(|r| r.id == R2), "Bob may not delete");
+        assert_eq!(m.limits[&EVE], Limits { keys: keys(&["rating", CONTENT_KEY]), until: Some(500) }, "narrowed to Bob's");
+        assert_eq!(State::build(&ALICE, &with_r2, 10_000).records(), m.records, "the CRDT state agrees");
+        // The encoding round-trips, canonically.
+        let f = OpsFile { ops: vec![Op::GrantLimited(BOB, vec![Right::Write], Limits { keys: keys(&["b", "a"]), until: Some(7) })] };
+        assert_eq!(OpsFile::decode(&f.encode()).unwrap(), f);
+        let no_limits = OpsFile { ops: vec![Op::GrantLimited(BOB, vec![Right::Write], Limits::default())] };
+        assert!(OpsFile::decode(&no_limits.encode()).is_err(), "a limited grant must limit something");
     }
 
     #[test]

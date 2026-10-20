@@ -6,7 +6,7 @@ use std::collections::BTreeMap;
 
 use retifs_core::{
     keywrap,
-    ops::{merge, Op, OpsFile, Right, WriterCommit},
+    ops::{merge, Limits, Op, OpsFile, Right, WriterCommit},
     record::{Snapshot, Value},
     Cid, FileRef, Seed,
 };
@@ -39,6 +39,21 @@ fn op(o: &Op) -> J {
             hex::encode(w),
             rs.iter().map(|r| if *r == Right::Grant { "grant" } else { "write" }).collect::<Vec<_>>()
         ]),
+        Op::GrantLimited(w, rs, l) => {
+            let mut limits = serde_json::Map::new();
+            if let Some(k) = &l.keys {
+                limits.insert("keys".into(), json!(k.iter().collect::<Vec<_>>()));
+            }
+            if let Some(u) = l.until {
+                limits.insert("until".into(), json!(u));
+            }
+            json!([
+                "grant",
+                hex::encode(w),
+                rs.iter().map(|r| if *r == Right::Grant { "grant" } else { "write" }).collect::<Vec<_>>(),
+                limits
+            ])
+        }
         Op::Revoke(w) => json!(["revoke", hex::encode(w)]),
         Op::Identity(p) => json!(["identity", hex::encode(p)]),
         Op::Checkpoint(f) => json!(["checkpoint", [f.root.to_string(), hex::encode(f.seed.0), f.size]]),
@@ -70,6 +85,8 @@ fn main() {
                 ops: vec![
                     Op::Identity(keywrap::public(&alice_id)),
                     Op::Grant(bob, vec![Right::Write]),
+                    // Eve: only the rating, until 3500.
+                    Op::GrantLimited(eve, vec![Right::Write], Limits { keys: Some(["rating".to_string()].into()), until: Some(3500) }),
                     Op::Set(page, "path".into(), s("/index.mu")),
                     Op::Blocks(page, vec![block]),
                     Op::Set(page, "title".into(), s("Home")),
@@ -104,12 +121,20 @@ fn main() {
             WriterCommit { seq: 2, time_ms: 4000, ops: vec![Op::Delete(page)] },
         ],
     );
-    chains.insert(eve, vec![WriterCommit { seq: 1, time_ms: 2500, ops: vec![Op::Set(photo, "spam".into(), Value::Bool(true))] }]);
+    chains.insert(
+        eve,
+        vec![
+            // A key she may change, and one she may not.
+            WriterCommit { seq: 1, time_ms: 2500, ops: vec![Op::Set(photo, "spam".into(), Value::Bool(true)), Op::Set(photo, "rating".into(), Value::Int(4))] },
+            // After her grant expired.
+            WriterCommit { seq: 2, time_ms: 3600, ops: vec![Op::Set(photo, "rating".into(), Value::Int(1))] },
+        ],
+    );
     let merged = merge(&alice, &chains, 10_000);
     let snapshot = Snapshot::new(merged.records.clone()).unwrap();
 
     let doc = json!({
-        "construction": "retifs operations v1 (ADR-0017, proposed): ops file canonical msgpack; merge in stamp order (time, writer, seq, index)",
+        "construction": "retifs operations v1 (ADR-0017, proposed): ops file canonical msgpack; merge in stamp order (time, writer, seq, index); limited grants (keys, until) narrowed by the granter's",
         "creator": hex::encode(alice),
         "now_ms": 10_000,
         "chains": chains.iter().map(|(w, cs)| json!({
@@ -124,6 +149,7 @@ fn main() {
         "merged_snapshot": hex::encode(snapshot.encode()),
         "ignored_ops": merged.ignored_ops,
         "writers_after": merged.writers.keys().map(hex::encode).collect::<Vec<_>>(),
+        "limits_after": merged.limits.iter().map(|(w, l)| (hex::encode(w), json!({"keys": l.keys, "until": l.until}))).collect::<serde_json::Map<_, _>>(),
         "identities_after": merged.identities.keys().map(hex::encode).collect::<Vec<_>>(),
         "rekeys_after": merged.rekeys.len(),
         "alice_identity_secret": hex::encode(alice_id),

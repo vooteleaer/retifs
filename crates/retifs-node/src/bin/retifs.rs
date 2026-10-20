@@ -24,7 +24,7 @@
 //!
 //!     retifs [--store DIR] ns address NS | ns info NS
 //!     retifs [--store DIR] ns join NAME ADDRESS [--from NODE]...
-//!     retifs [--store DIR] ns grant NS WRITER [--grant] [--from NODE]... | ns revoke NS WRITER
+//!     retifs [--store DIR] ns grant NS WRITER [--grant] [--keys K1,K2,@content,@delete] [--until YYYY-MM-DD|+30d] [--from NODE]... | ns revoke NS WRITER
 //!
 //! Several writers per namespace (ADR-0017): a member joins with the address
 //! and shows its writer key; the creator grants it; members sync each other.
@@ -301,6 +301,12 @@ async fn main() {
                     writer: rest.first().cloned().unwrap_or_else(|| usage()),
                     grant: rest.iter().any(|a| a == "--grant"),
                     from: froms(&rest),
+                    keys: rest
+                        .windows(2)
+                        .find(|w| w[0] == "--keys")
+                        .map(|w| w[1].split(',').map(|k| k.trim().to_string()).filter(|k| !k.is_empty()).collect())
+                        .unwrap_or_default(),
+                    until: rest.windows(2).find(|w| w[0] == "--until").map(|w| parse_time(&w[1]).unwrap_or_else(|e| fail(e))),
                 },
                 "revoke" => libretifs::Request::NsRevoke { ns, writer: rest.first().cloned().unwrap_or_else(|| usage()) },
                 _ => usage(),
@@ -422,6 +428,36 @@ fn attr(arg: &str) -> (String, libretifs::AttrValue) {
     (k.to_string(), value)
 }
 
+/// A point in time for `--until`: `YYYY-MM-DD` (UTC midnight), `+30d` /
+/// `+12h` / `+90m` from now, or milliseconds since the epoch.
+fn parse_time(s: &str) -> Result<u64, String> {
+    let now = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map(|d| d.as_millis() as u64).unwrap_or(0);
+    if let Some(rel) = s.strip_prefix('+') {
+        let (n, unit) = rel.split_at(rel.len().saturating_sub(1));
+        let n: u64 = n.parse().map_err(|_| format!("bad duration {s}"))?;
+        let ms = match unit {
+            "d" => 86_400_000,
+            "h" => 3_600_000,
+            "m" => 60_000,
+            _ => return Err(format!("bad duration {s} (d, h or m)")),
+        };
+        return Ok(now + n * ms);
+    }
+    if let [y, m, d] = s.split('-').collect::<Vec<_>>()[..]
+        && let (Ok(y), Ok(m), Ok(d)) = (y.parse::<i64>(), m.parse::<i64>(), d.parse::<i64>())
+    {
+        // Days since 1970-01-01 (civil calendar, Howard Hinnant's algorithm).
+        let y = if m <= 2 { y - 1 } else { y };
+        let era = y.div_euclid(400);
+        let yoe = y - era * 400;
+        let doy = (153 * (if m > 2 { m - 3 } else { m + 9 }) + 2) / 5 + d - 1;
+        let doe = yoe * 365 + yoe / 4 - yoe / 100 + doy;
+        let days = era * 146_097 + doe - 719_468;
+        return u64::try_from(days * 86_400_000).map_err(|_| format!("{s} is before 1970"));
+    }
+    s.parse().map_err(|_| format!("bad time {s}: YYYY-MM-DD, +30d or milliseconds"))
+}
+
 fn print_record(r: &libretifs::RecordView) {
     println!("{}", r.id);
     for (k, v) in &r.attrs {
@@ -472,4 +508,20 @@ fn human(b: u64) -> String {
 fn fail(e: impl std::fmt::Display) -> ! {
     eprintln!("retifs: {e}");
     std::process::exit(1);
+}
+
+#[cfg(test)]
+mod tests {
+    #[test]
+    fn until_times() {
+        for (s, ms) in [("1970-01-01", 0), ("2000-02-29", 951_782_400_000), ("2026-10-20", 1_792_454_400_000), ("2026-12-31", 1_798_675_200_000), ("2100-03-01", 4_107_542_400_000)] {
+            assert_eq!(super::parse_time(s), Ok(ms), "{s}");
+        }
+        assert_eq!(super::parse_time("1792454400000"), Ok(1_792_454_400_000));
+        let in_a_day = super::parse_time("+1d").unwrap();
+        let now = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_millis() as u64;
+        assert!(in_a_day >= now + 86_399_000 && in_a_day <= now + 86_401_000);
+        assert!(super::parse_time("+3w").is_err());
+        assert!(super::parse_time("tomorrow").is_err());
+    }
 }

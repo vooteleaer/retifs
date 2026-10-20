@@ -175,7 +175,19 @@ pub enum Request {
     /// (returned; the creator grants it). `from`: other members' nodes.
     NsJoin { ns: String, address: String, from: Vec<String> },
     /// Grants a writer key `write` (and `grant` if asked); `from`: its node, to sync with.
-    NsGrant { ns: String, writer: String, grant: bool, from: Vec<String> },
+    /// `keys` limits the writer to those attribute keys (`@content`,
+    /// `@delete` for content and deletion); `until` (ms since the epoch) ends
+    /// the grant. Both empty: no limits.
+    NsGrant {
+        ns: String,
+        writer: String,
+        grant: bool,
+        from: Vec<String>,
+        #[serde(default)]
+        keys: Vec<String>,
+        #[serde(default)]
+        until: Option<u64>,
+    },
     NsRevoke { ns: String, writer: String },
     NsInfo { ns: String },
     /// What this node keeps of the namespace's content (ADR-0005): `all`, or

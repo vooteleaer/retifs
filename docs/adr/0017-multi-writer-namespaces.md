@@ -26,6 +26,7 @@ op       = [ "set", id (bin 16), key (str), value ]
          | [ "blocks", id, [ [cid, seed, size], … ] ]                           the record's content
          | [ "delete", id ]
          | [ "grant", writer (bin 32, Ed25519), [ right, … ] ]                  rights: "write", "grant"
+         | [ "grant", writer, [ right, … ], limits ]                           a limited grant (below)
          | [ "revoke", writer ]
          | [ "checkpoint", [cid, seed, size] ]                                   names a checkpoint file (ADR-0018); changes nothing
 ```
@@ -54,7 +55,7 @@ One commit is one modification (or one transaction): its operations take effect 
   - A clock far ahead still pulls everyone forward, bounded by the one-day limit.
 - **Revocation and keys:** the read key is shared; revoking a writer stops its later writes from counting but doesn't rotate the key (ADR-0006's rotation comes later). Writes made concurrently with a revocation count by stamp.
 - **Concurrent content:** ADR-0006 wants concurrent content versions kept until a merge commit; here the latest `blocks` wins for now.
-- **Filtered capabilities** (e.g. write only `type = document`) and expiry.
+- **Filtering by record content** (e.g. write only `type = document`). The limits below are by attribute key and time only. Content filters would make whether a write counts depend on the record's state at its stamp, so late writes would force rebuilds as late revokes do.
 
 ## Impact on the threat model
 See the [threat model](../04-threat-model.md).
@@ -86,5 +87,14 @@ See the [threat model](../04-threat-model.md).
     - A local walk that stops at a missing commit isn't cached, and that writer's later commits wait until the gap is filled.
     - A rebuild leaves gapped writers out, and no checkpoint is written while a gap exists.
   - Restarted with the fix on the affected stores, both nodes fetched the missing commits and converged within a minute.
-- **Not yet:** filtered and expiring grants, keeping concurrent content versions side by side, checkpoints for new members (local checkpoints and resuming from them: [ADR-0018](0018-state-trees.md)), announcing new writers without a known peer.
+- **Limited grants (2026-10-20; decision 4: narrowing and expiry).**
+  - Format: `limits = { "keys": [ key, … ], "until": time_ms }`, either or both. Keys are sorted and unique, and the map is canonical. An unlimited grant keeps the three-element form, so earlier data and vectors are unchanged.
+  - A limited writer's data operation counts only if it touches an allowed key and is stamped before `until`. `Set` and `Unset` name the attribute; `@content` allows `blocks`; `@delete` allows `delete`.
+  - **Expiry** ends every right of the grant, `grant` included: an expired granter's grants, revokes and rekeys don't count either.
+  - **Narrowing:** a grant counts only as far as the granter's own grant reaches. Keys are intersected and the earlier `until` wins, so delegation can't widen access. The creator is never limited.
+  - Everything is evaluated at each operation's stamp, so the merge stays order-independent (the property tests include limited grants).
+  - Vectors: `ops-v1.json` has a key-limited, expiring grant (14/14, with an independent Python merge that includes narrowing). `prolly-v1.json`'s stamped replay uses the same rules (18/18).
+  - Daemon and CLI: `retifs ns grant NS KEY --keys rating,@content --until 2026-12-31` (or `+30d`, or milliseconds), and `ns info` shows each writer's limits.
+  - Live, two daemons: B, granted only `rating` for one minute, set `rating` and `title`. Only `rating` counted, on both nodes. After the minute, B's next `rating` was ignored everywhere, and `ns info` marks the grant expired.
+- **Not yet:** filtering by record content, keeping concurrent content versions side by side, checkpoints for new members (local checkpoints and resuming from them: [ADR-0018](0018-state-trees.md)), announcing new writers without a known peer.
 

@@ -273,7 +273,24 @@ mod tests {
                             4 => Op::Unset(id, k),
                             5 => Op::Blocks(id, vec![]),
                             6 => Op::Delete(id),
-                            7 => Op::Grant(writers[rnd(3) as usize], if rnd(2) == 0 { vec![Right::Write] } else { vec![Right::Write, Right::Grant] }),
+                            7 => {
+                                    let w = writers[rnd(3) as usize];
+                                    let rights = if rnd(2) == 0 { vec![Right::Write] } else { vec![Right::Write, Right::Grant] };
+                                    if rnd(2) == 0 {
+                                        Op::Grant(w, rights)
+                                    } else {
+                                        // Limited: some of the keys, maybe an expiry.
+                                        let keys = (rnd(3) != 0).then(|| {
+                                            ["a", "b", "c", crate::ops::CONTENT_KEY, crate::ops::DELETE_KEY]
+                                                .iter()
+                                                .filter(|_| rnd(2) == 0)
+                                                .map(|k| k.to_string())
+                                                .collect()
+                                        });
+                                        let until = (keys.is_none() || rnd(2) == 0).then(|| rnd(250));
+                                        Op::GrantLimited(w, rights, crate::ops::Limits { keys, until })
+                                    }
+                                }
                             8 => Op::Revoke(writers[rnd(3) as usize]),
                             _ => Op::Set(id, k, Value::Bool(true)),
                         }

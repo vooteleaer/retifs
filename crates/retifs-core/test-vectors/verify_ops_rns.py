@@ -45,7 +45,15 @@ def op(o):
     if tag == "delete":
         return ["delete", h(o[1])]
     if tag == "grant":
-        return ["grant", h(o[1]), sorted(set(o[2]))]
+        g = ["grant", h(o[1]), sorted(set(o[2]))]
+        if len(o) == 4:
+            limits = {}
+            if "keys" in o[3]:
+                limits["keys"] = sorted(set(o[3]["keys"]), key=lambda k: k.encode("utf-8"))
+            if "until" in o[3]:
+                limits["until"] = o[3]["until"]
+            g.append(limits)
+        return g
     if tag == "revoke":
         return ["revoke", h(o[1])]
     if tag == "checkpoint":
@@ -56,6 +64,39 @@ def op(o):
     if tag == "rekey":
         return ["rekey", o[1], [[h(w), h(x)] for w, x in sorted(o[2])]]
     raise ValueError(tag)
+
+
+def limits_of(o):
+    """A grant's limits as (keys or None, until or None)."""
+    l = o[3] if len(o) == 4 else {}
+    return (set(l["keys"]) if "keys" in l else None, l.get("until"))
+
+
+def narrowed(by, new):
+    keys = new[0] if by[0] is None else by[0] if new[0] is None else by[0] & new[0]
+    until = new[1] if by[1] is None else by[1] if new[1] is None else min(by[1], new[1])
+    return (keys, until)
+
+
+def holds(rights, w, right, t):
+    g = rights.get(w)
+    return g is not None and right in g["rights"] and (g["limits"][1] is None or t < g["limits"][1])
+
+
+def allows(rights, w, o, t):
+    if not holds(rights, w, "write", t):
+        return False
+    keys = rights[w]["limits"][0]
+    if keys is None:
+        return True
+    tag = o[0]
+    if tag in ("set", "unset"):
+        return o[2] in keys
+    if tag == "blocks":
+        return "@content" in keys
+    if tag == "delete":
+        return "@delete" in keys
+    return True
 
 
 def merge(creator, chains, now):
@@ -69,7 +110,7 @@ def merge(creator, chains, now):
             for i, o in enumerate(c["ops"]):
                 events.append((c["time_ms"], writer, c["seq"], i, op(o)))
     events.sort(key=lambda e: (e[0], e[1], e[2], e[3]))
-    rights = {creator: {"grant", "write"}}
+    rights = {creator: {"rights": {"grant", "write"}, "limits": (None, None)}}
     records, ignored, identities, rekeys = {}, 0, {}, []
     for t, w, _, _, o in events:
         tag = o[0]
@@ -82,21 +123,21 @@ def merge(creator, chains, now):
                 ignored += 1
             continue
         if tag == "rekey":
-            if "grant" in rights.get(w, ()):
+            if holds(rights, w, "grant", t):
                 rekeys.append((o[1], t, w, o[2]))
             else:
                 ignored += 1
             continue
         if tag in ("grant", "revoke"):
-            if "grant" not in rights.get(w, ()):
+            if not holds(rights, w, "grant", t):
                 ignored += 1
             elif o[1] != creator:
                 if tag == "grant":
-                    rights[o[1]] = set(o[2])
+                    rights[o[1]] = {"rights": set(o[2]), "limits": narrowed(rights[w]["limits"], limits_of(o))}
                 else:
                     rights.pop(o[1], None)
             continue
-        if "write" not in rights.get(w, ()):
+        if not allows(rights, w, o, t):
             ignored += 1
             continue
         rid = o[1]
@@ -134,6 +175,9 @@ def main():
     checks["merged snapshot"] = umsgpack.packb(snap).hex() == v["merged_snapshot"]
     checks["ignored operations"] = ignored == v["ignored_ops"]
     checks["writers after"] = sorted(k.hex() for k in rights) == v["writers_after"]
+    limits = {k.hex(): {"keys": sorted(g["limits"][0]) if g["limits"][0] is not None else None, "until": g["limits"][1]}
+              for k, g in rights.items() if g["limits"] != (None, None)}
+    checks["limited grants after (narrowed)"] = limits == v["limits_after"]
     checks["identities after"] = sorted(k.hex() for k in identities) == v["identities_after"]
     checks["rekeys after"] = len(rekeys) == v["rekeys_after"]
     # The wrapped key opens with stock RNS Identity.decrypt.

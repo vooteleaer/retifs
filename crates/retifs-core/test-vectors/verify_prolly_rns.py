@@ -18,7 +18,7 @@ from pathlib import Path
 import RNS.vendor.umsgpack as umsgpack
 from RNS.Cryptography.HKDF import hkdf
 
-from verify_ops_rns import op as ops_op
+from verify_ops_rns import allows, holds, limits_of, narrowed, op as ops_op
 from verify_rns import seal
 
 CLASSES = [1 << k for k in range(10, 19)]
@@ -115,7 +115,7 @@ def stamped_state(creator, chains):
             for i, o in enumerate(c["ops"]):
                 events.append(((c["time_ms"], writer, c["seq"], i), ops_op(o)))
     events.sort(key=lambda e: e[0])
-    rights = {creator: {"grant", "write"}}
+    rights = {creator: {"rights": {"grant", "write"}, "limits": (None, None)}}
     control, high, recs = [], None, {}
     for s, o in events:
         stamp = [s[0], s[1], s[2], s[3]]
@@ -124,14 +124,14 @@ def stamped_state(creator, chains):
             continue
         if tag in CONTROL:
             control.append([stamp, o])
-            if tag in ("grant", "revoke") and "grant" in rights.get(w, ()) and o[1] != creator:
+            if tag in ("grant", "revoke") and holds(rights, w, "grant", s[0]) and o[1] != creator:
                 if tag == "grant":
-                    rights[o[1]] = set(o[2])
+                    rights[o[1]] = {"rights": set(o[2]), "limits": narrowed(rights[w]["limits"], limits_of(o))}
                 else:
                     rights.pop(o[1], None)
             continue
         high = stamp
-        if "write" not in rights.get(w, ()):
+        if not allows(rights, w, o, s[0]):
             continue
         r = recs.setdefault(o[1], {"blocks": None, "deleted": None, "fields": {}, "live": None})
         if tag == "set":
