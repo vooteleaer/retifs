@@ -51,7 +51,7 @@ use retifs_core::{
     manifest::{self, decode_node, decode_root, NodeEntry},
     keywrap,
     checkpoint::{state_secret, Checkpoint, Frontier},
-    ops::{merge, Op, OpsFile, Right, State, WriterCommit, MAX_CLOCK_AHEAD_MS},
+    ops::{Op, OpsFile, Right, State, WriterCommit, MAX_CLOCK_AHEAD_MS},
     prolly,
     record::{Record, RecordId, Snapshot, Value},
     open, ChunkToken, Cid, ConvergenceSecret, FileRef,
@@ -1100,10 +1100,13 @@ async fn handle(d: &Daemon, req: Request) -> Result<Response, String> {
             let found = match at {
                 None => d.store.query(&ns, &terms).map_err(|e| e.to_string())?,
                 Some(seq) => {
-                    let (_, _, records) = versions(d, &ns)?
-                        .into_iter()
-                        .find(|(v, _, _)| *v == seq)
-                        .ok_or_else(|| format!("version {seq} of {ns} isn't held here"))?;
+                    let mut at = None;
+                    versions(d, &ns, |v, _, st| {
+                        if v == seq {
+                            at = Some(st.records());
+                        }
+                    })?;
+                    let records = at.ok_or_else(|| format!("version {seq} of {ns} isn't held here"))?;
                     records.into_iter().filter(|r| terms.iter().all(|t| t.matches(r))).collect()
                 }
             };
@@ -1112,14 +1115,11 @@ async fn handle(d: &Daemon, req: Request) -> Result<Response, String> {
 
         Request::RecordHistory { ns, id } => {
             let id = parse_record_id(&id)?;
-            let entries = versions(d, &ns)?
-                .into_iter()
-                .map(|(version, time_ms, records)| HistoryEntry {
-                    version,
-                    time_ms,
-                    record: records.iter().find(|r| r.id == id).map(view),
-                })
-                .collect();
+            let mut entries = Vec::new();
+            versions(d, &ns, |version, time_ms, st| {
+                entries.push(HistoryEntry { version, time_ms, record: st.record(&id).as_ref().map(view) });
+            })?;
+            entries.reverse(); // newest first
             Ok(Response::History { entries })
         }
 
@@ -2122,31 +2122,20 @@ fn materialize(d: &Daemon, ns: &str) -> Result<retifs_core::ops::Merged, String>
     Ok(merged)
 }
 
-/// The namespace as of each of this node's versions, newest first:
-/// (version, time, records). A version includes every writer's operations up
-/// to its time.
-fn versions(d: &Daemon, ns: &str) -> Result<Vec<(u64, u64, Vec<Record>)>, String> {
+/// The namespace as of each of this node's versions, oldest first: `visit`
+/// sees (version, time, state). A version includes every writer's
+/// operations up to its time. One replay for the whole history: rebuilding
+/// each version from scratch made `rec history` quadratic in time and memory
+/// (found by the overnight soak test: 184 MB after 400 versions).
+fn versions(d: &Daemon, ns: &str, visit: impl FnMut(u64, u64, &State)) -> Result<(), String> {
     if ns.starts_with("ch-") || d.store.ns_info(ns).map_err(|e| e.to_string())?.is_none() {
         return Err(format!("{ns} has no version history here"));
     }
     let (addr, own, chains) = chains(d, ns, true)?;
-    let own_chain = chains.get(&own).cloned().unwrap_or_default();
-    let mut out = Vec::new();
-    for (seq, c) in own_chain.iter().rev() {
-        let upto: std::collections::BTreeMap<[u8; 32], Vec<WriterCommit>> = chains
-            .iter()
-            .map(|(w, chain)| {
-                let kept = chain
-                    .iter()
-                    .filter(|(s, wc)| if *w == own { s <= seq } else { wc.time_ms <= c.time_ms })
-                    .map(|(_, wc)| wc.clone())
-                    .collect();
-                (*w, kept)
-            })
-            .collect();
-        out.push((*seq, c.time_ms, merge(&addr.writer, &upto, now_ms()).records));
-    }
-    Ok(out)
+    let plain: std::collections::BTreeMap<[u8; 32], Vec<WriterCommit>> =
+        chains.into_iter().map(|(w, c)| (w, c.into_iter().map(|(_, wc)| wc).collect())).collect();
+    retifs_core::ops::versions(&addr.writer, &plain, &own, now_ms(), visit);
+    Ok(())
 }
 
 fn to_value(v: &AttrValue) -> Result<Value, String> {

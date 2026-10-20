@@ -621,6 +621,30 @@ impl State {
         out.into_values().collect()
     }
 
+    /// One record as it's visible now, if it is.
+    pub fn record(&self, id: &RecordId) -> Option<Record> {
+        let live = self.live.get(id)?;
+        let deleted = self.deleted.get(id);
+        if deleted.is_some_and(|d| live <= d) {
+            return None;
+        }
+        let after_delete = |s: &Stamp| deleted.is_none_or(|d| s > d);
+        let mut r = Record { id: *id, attrs: BTreeMap::new(), blocks: Vec::new() };
+        for ((_, k), (s, v)) in self.fields.range((*id, String::new())..).take_while(|((rid, _), _)| rid == id) {
+            if let Some(v) = v
+                && after_delete(s)
+            {
+                r.attrs.insert(k.clone(), v.clone());
+            }
+        }
+        if let Some((s, b)) = self.blocks.get(id)
+            && after_delete(s)
+        {
+            r.blocks = b.clone();
+        }
+        Some(r)
+    }
+
     /// The merged view, as [`merge`] gives it.
     pub fn merged(&self) -> Merged {
         Merged {
@@ -635,6 +659,43 @@ impl State {
             ignored_ops: self.ignored_control + self.ignored_data,
             ignored_commits: 0,
         }
+    }
+}
+
+/// The namespace as of each of `own`'s commits, oldest first (ADR-0006: every
+/// modification is a version): `own`'s commits up to it and every other
+/// writer's commits up to its time. `visit(seq, time, state)` sees each.
+/// One state is carried from version to version, so a whole history costs
+/// about one replay, not one per version.
+pub fn versions(
+    creator: &WriterKey,
+    chains: &BTreeMap<WriterKey, Vec<WriterCommit>>,
+    own: &WriterKey,
+    now_ms: u64,
+    mut visit: impl FnMut(u64, u64, &State),
+) {
+    let accepted: BTreeMap<WriterKey, Vec<&WriterCommit>> = chains.iter().map(|(w, c)| (*w, accepted(c, now_ms))).collect();
+    let mut taken: BTreeMap<WriterKey, usize> = accepted.keys().map(|w| (*w, 0)).collect();
+    let mut st = State::with_control(creator, Vec::new());
+    for c in chains.get(own).map(Vec::as_slice).unwrap_or_default() {
+        let mut batch: Vec<(WriterKey, &WriterCommit)> = Vec::new();
+        for (w, list) in &accepted {
+            let from = taken[w];
+            let upto = from
+                + list[from..]
+                    .iter()
+                    .take_while(|x| if w == own { x.seq <= c.seq } else { x.time_ms <= c.time_ms })
+                    .count();
+            batch.extend(list[from..upto].iter().map(|x| (*w, *x)));
+            taken.insert(*w, upto);
+        }
+        if !st.apply_commits(&batch) {
+            // A grant or revoke older than data already applied: this version from scratch.
+            let upto: BTreeMap<WriterKey, Vec<WriterCommit>> =
+                accepted.iter().map(|(w, l)| (*w, l[..taken[w]].iter().map(|x| (*x).clone()).collect())).collect();
+            st = State::build(creator, &upto, now_ms);
+        }
+        visit(c.seq, c.time_ms, &st);
     }
 }
 
@@ -985,6 +1046,64 @@ mod tests {
                 st.apply(*s, op);
             }
             assert_eq!(st.records(), expect.records, "shuffled order");
+        }
+    }
+
+    /// History in one pass equals a full merge per version.
+    #[test]
+    fn versions_match_merge_per_version() {
+        let mut seed = 0x51d7_348c_2f0e_9a6bu64;
+        let mut rnd = move |n: u64| {
+            seed ^= seed << 13;
+            seed ^= seed >> 7;
+            seed ^= seed << 17;
+            seed % n
+        };
+        let writers = [ALICE, BOB, EVE];
+        let ids: Vec<RecordId> = (0..4u8).map(|i| [i; 16]).collect();
+        for _ in 0..500 {
+            let mut chains: BTreeMap<WriterKey, Vec<WriterCommit>> = BTreeMap::new();
+            for w in writers {
+                let mut t = 0;
+                for _ in 0..rnd(6) {
+                    t += rnd(30);
+                    let ops = (0..1 + rnd(3))
+                        .map(|_| {
+                            let id = ids[rnd(4) as usize];
+                            let k = ["a", "b"][rnd(2) as usize].to_string();
+                            match rnd(9) {
+                                0..=3 => Op::Set(id, k, Value::Int(rnd(5) as i64)),
+                                4 => Op::Unset(id, k),
+                                5 => Op::Delete(id),
+                                6 => Op::Grant(writers[rnd(3) as usize], vec![Right::Write]),
+                                7 => Op::Revoke(writers[rnd(3) as usize]),
+                                _ => Op::Blocks(id, vec![]),
+                            }
+                        })
+                        .collect();
+                    let list = chains.entry(w).or_default();
+                    let seq = list.len() as u64 + 1;
+                    list.push(WriterCommit { seq, time_ms: t, ops });
+                }
+            }
+            let own = writers[rnd(3) as usize];
+            let mut seen = 0;
+            versions(&ALICE, &chains, &own, 10_000, |seq, time, st| {
+                seen += 1;
+                let upto: BTreeMap<WriterKey, Vec<WriterCommit>> = chains
+                    .iter()
+                    .map(|(w, c)| (*w, c.iter().filter(|x| if *w == own { x.seq <= seq } else { x.time_ms <= time }).cloned().collect()))
+                    .collect();
+                let expect = merge(&ALICE, &upto, 10_000).records;
+                assert_eq!(st.records(), expect, "version {seq}");
+                for r in &expect {
+                    assert_eq!(st.record(&r.id).as_ref(), Some(r));
+                }
+                for id in &ids {
+                    assert_eq!(st.record(id).is_some(), expect.iter().any(|r| r.id == *id));
+                }
+            });
+            assert_eq!(seen, chains.get(&own).map_or(0, Vec::len));
         }
     }
 
