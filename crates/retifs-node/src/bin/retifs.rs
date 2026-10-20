@@ -55,8 +55,9 @@ fn usage() -> ! {
          retifs [--store DIR] get READ-CAP [--from NODE]... [-o OUT] [--links N] [--batch N]\n\
          retifs [--store DIR] status READ-CAP\n\
          retifs [--store DIR] read READ-CAP [--offset N] [--len N] [--ns NS] [--wait SECONDS]\n\
-         retifs [--store DIR] app add NAME --ns NS[,NS] [--write] | app list | app remove NAME\n\
+         retifs [--store DIR] app add NAME --ns NS[,NS] [--write] [--device NODE] | app list | app remove NAME\n\
          retifs [--store DIR] --app TOKEN ...   (as an application: only what its token allows)\n\
+         retifs [--store DIR] --via NODE ...    (ask own node NODE over a Link; it must have added this node with --device)\n\
          retifs [--store DIR] want READ-CAP [--from NODE]...
          retifs [--store DIR] replicate READ-CAP --to NODE...\n\
          retifs [--store DIR] forget READ-CAP\n\
@@ -90,6 +91,12 @@ async fn main() {
         app_token = Some(args.get(i + 1).cloned().unwrap_or_else(|| usage()));
         args.drain(i..=i + 1);
     }
+    // Ask one of the user's own nodes instead, over a Link (ADR-0019).
+    let mut via = None;
+    if let Some(i) = args.iter().position(|a| a == "--via") {
+        via = Some(args.get(i + 1).cloned().unwrap_or_else(|| usage()));
+        args.drain(i..=i + 1);
+    }
     let mut it = args.into_iter();
     let command = it.next().unwrap_or_else(|| usage());
 
@@ -97,7 +104,8 @@ async fn main() {
         Some(token) => Client::connect_app(&store, token).await,
         None => Client::connect(&store).await,
     }
-    .unwrap_or_else(|e| fail(e));
+    .unwrap_or_else(|e| fail(e))
+    .via(via);
     match command.as_str() {
         "ping" => {
             let (node, chunks, usage) = client.ping().await.unwrap_or_else(|e| fail(e));
@@ -359,6 +367,7 @@ async fn main() {
                         .map(|w| w[1].split(',').map(|n| n.trim().to_string()).filter(|n| !n.is_empty()).collect())
                         .unwrap_or_else(|| usage()),
                     write: rest.iter().any(|a| a == "--write"),
+                    device: rest.windows(2).find(|w| w[0] == "--device").map(|w| w[1].clone()),
                 },
                 "list" => libretifs::Request::AppList,
                 "remove" => libretifs::Request::AppRemove { name: rest.first().cloned().unwrap_or_else(|| usage()) },
@@ -376,11 +385,14 @@ async fn main() {
                             a.name,
                             if a.write { "read+write" } else { "read" },
                             a.namespaces.join(","),
-                            a.exe.map(|e| format!("  pinned to {e}")).unwrap_or_default()
+                            a.exe
+                                .map(|e| format!("  pinned to {e}"))
+                                .or(a.device.map(|n| format!("  device <{n}> over a Link")))
+                                .unwrap_or_default()
                         );
                     }
                 }
-                libretifs::Response::Done => println!("removed"),
+                libretifs::Response::Done => println!("ok"),
                 libretifs::Response::Error { message } => fail(message),
                 _ => fail("unexpected response"),
             }

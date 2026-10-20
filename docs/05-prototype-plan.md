@@ -18,7 +18,7 @@ Prototypes are throwaway. They're for learning, not for locking in the format. T
 - [x] Local store, continued: keep rules ([ADR-0005](adr/0005-local-store-offline.md)).
 - [x] `libretifs` + local endpoint (Unix socket / Windows named pipe): `ping`, `put`, `get`, `status` via `retifsd` ([ADR-0004](adr/0004-native-record-api.md), implementation status).
 - [x] Local API, continued: records and attributes, queries, history, `Watch`, transactions, range reads, write sessions (streamed into the store), per-app capabilities ([ADR-0004](adr/0004-native-record-api.md)).
-- [ ] Local API, open: fd passing, remote use over a Link, faster cache writes (batch per tree level, keep segment files open).
+- [ ] Local API, open: fd passing, faster cache writes (batch per tree level, keep segment files open).
 - [x] Local HTTP gateway, `retifs-gateway` (a client of `libretifs`, the base for the browser extension): every namespace is a site at `http://<namespace>.localhost:8740/` with its own origin. It's read-only, has a content security policy that allows only its own origin, and refuses foreign `Host` headers (DNS rebinding). Range requests are answered from on-demand reads, so video seeks. It answers only its own user (connection owner from `/proc/net/tcp`, Linux) and refuses cross-site background requests.
 - [ ] Gateway, continued: NomadNet pages fetched over RNS, so any NomadNet node can be browsed; micron rendered as HTML.
 - [ ] Browser extension (later; Firefox first, Manifest V3): `web+retifs:` links and pasted addresses open through the gateway, micron rendered as HTML, a popup with node status and copies, "follow this site" and "save to retifs". Privileged actions go through a native-messaging host talking to the local API, never through the gateway.
@@ -64,7 +64,7 @@ Prototypes are throwaway. They're for learning, not for locking in the format. T
 - [x] Multi-writer, continued: hybrid logical clock for commit times, grants limited by attribute key and expiry and narrowed on delegation, `watch` (long poll per namespace), transactions, `query --at` ([ADR-0017](adr/0017-multi-writer-namespaces.md)).
 - [ ] Multi-writer, open: grants filtered by record content, pruning tombstones.
 - [x] `keep:<device>` tag and query-based keep rules (proactive pull), keep mode per namespace, `user.retifs.local` ([ADR-0005](adr/0005-local-store-offline.md)).
-- [ ] Remote queries to own nodes over a Link, full query language ([ADR-0019](adr/0019-remote-query-and-blind-index.md)).
+- [x] Remote queries to own nodes over a Link, full query language: `--via NODE`, devices admitted with app-style scopes ([ADR-0019](adr/0019-remote-query-and-blind-index.md)).
 - [ ] Blind index for search nodes without the read key: declared keys, exact match, vectors against RNS ([ADR-0019](adr/0019-remote-query-and-blind-index.md)); remote live query.
 - [x] Per-writer commit chains (one commit per modification), merge, history queries, per-record `versions` ([ADR-0017](adr/0017-multi-writer-namespaces.md)).
 

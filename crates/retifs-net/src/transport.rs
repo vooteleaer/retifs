@@ -75,6 +75,12 @@ impl PrnsTransport {
         Err(format!("no path within {:?} (last: {last})", self.path_timeout))
     }
 
+    /// Reveals this node's identity (by hash; the node holds the secret) to
+    /// the other end of `link`, so it can tell who is asking.
+    pub async fn identify(&self, link: LinkId, identity_hash: [u8; 16]) -> Result<(), String> {
+        self.handle.identify(link, personal_rns::identity::IdentityHash::new(identity_hash)).await.map_err(|e| format!("identify: {e:?}"))
+    }
+
     /// Opens a link to a peer whose path is already known.
     pub async fn link(&self, peer: DestinationHash) -> Result<LinkId, String> {
         self.link_with_rtt(peer).await.map(|(link, _)| link)

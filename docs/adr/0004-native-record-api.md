@@ -58,7 +58,8 @@ The first slice exists: `crates/libretifs` (client, no Reticulum dependency) and
 - **Framing:** `u32_be length ‖ msgpack {v, id, msg}`.
 - **Operations:** `ping`, `put` (file → pinned → read-cap), `get` (local store first, then the given nodes; fetched chunks cached) and `status` (local presence, walking the manifest offline).
 - **Since added (2026-10-20):** records, attributes, queries, history ([ADR-0016](0016-records-and-snapshots.md), [ADR-0017](0017-multi-writer-namespaces.md)), `Watch`, transactions, range reads and write sessions ([ADR-0002](0002-os-integration.md)), per-app capabilities (below). The [API draft](../07-api.md) maps each section to what exists.
-- **Not yet:** fd passing (bulk data travels in the message, ≤ 256 MiB, or through a write session); remote use over a Link.
+- **Remote use over a Link (2026-10-20):** own devices only, admitted by node address, with app-style scopes ([ADR-0019](0019-remote-query-and-blind-index.md)).
+- **Not yet:** fd passing (bulk data travels in the message, ≤ 256 MiB, or through a write session).
 - **Measured locally (two daemons, one machine):**
   - `put` 10 MiB, then local `get` in 0.04–0.06 s.
   - The second daemon fetched it from the first over Reticulum in 2.5 s (4 links, cache writes not fsynced); afterwards `status` showed it complete, and a repeat `get` was fully local.
@@ -81,6 +82,5 @@ The first slice exists: `crates/libretifs` (client, no Reticulum dependency) and
 - **Not yet:**
   - narrower app scopes (record filters, keys) as capability chains, the same as between people;
   - Flatpak/portal identity;
-  - fd passing for bulk data;
-  - remote use over a Link.
+  - fd passing for bulk data.
 

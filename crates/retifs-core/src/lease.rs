@@ -278,9 +278,14 @@ pub fn identity_public(secret: &[u8; 64]) -> [u8; 64] {
 /// The RNS destination hash of `retifs.node` for an identity public key
 /// (X25519 ‖ Ed25519): `SHA-256(SHA-256("retifs.node")[0..10] ‖ SHA-256(key)[0..16])[0..16]`.
 pub fn node_destination(public_key: &[u8; 64]) -> [u8; 16] {
+    node_destination_of(Sha256::digest(public_key)[..16].try_into().unwrap())
+}
+
+/// The `retifs.node` address of the identity with this (truncated) hash: who
+/// an identified link's requester is, in the form `retifs ping` shows.
+pub fn node_destination_of(identity_hash: &[u8; 16]) -> [u8; 16] {
     let name_hash = &Sha256::digest(b"retifs.node")[..10];
-    let identity_hash = &Sha256::digest(public_key)[..16];
-    Sha256::digest([name_hash, identity_hash].concat())[..16].try_into().unwrap()
+    Sha256::digest([name_hash, identity_hash.as_slice()].concat())[..16].try_into().unwrap()
 }
 
 /// Storage proof answer for one chunk: needs the ciphertext itself, so a

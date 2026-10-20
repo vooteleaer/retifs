@@ -58,6 +58,10 @@ pub const PROVE_ENDPOINT: &str = "/retifs/prove";
 pub const MAX_PROVE: usize = 16;
 pub const PUT_ENDPOINT: &str = "/retifs/put";
 pub const HEAD_ENDPOINT: &str = "/retifs/head";
+/// The local API over a Link, for the user's own devices (ADR-0019): the
+/// requester identifies, and the body and answer are a msgpack
+/// `libretifs::Request` and `Response`.
+pub const API_ENDPOINT: &str = "/retifs/api";
 /// 16 chunks of up to 16 KiB: one resource of about 256 KiB.
 pub const MAX_PUT: usize = 16;
 

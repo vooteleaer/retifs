@@ -19,6 +19,7 @@ path = "src/bin/retifs.rs"
 getrandom = "0.3"
 libretifs = { path = "../libretifs" }
 redb = "2"
+rmp-serde = "1"
 personal-rns = { version = "=0.3.7", features = ["tokio-host", "tcp", "shared-instance"] }
 retifs-core = { path = "../retifs-core" }
 retifs-net = { path = "../retifs-net" }

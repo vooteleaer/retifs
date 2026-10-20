@@ -6,7 +6,7 @@ use redb::{ReadableTable, TableDefinition};
 
 use crate::{SlabStore, StoreError};
 
-/// App name → hash(32) ‖ write(1) ‖ u16 n ‖ (u16 len ‖ namespace)* ‖ u16 len ‖ exe.
+/// App name → hash(32) ‖ write(1) ‖ u16 n ‖ (u16 len ‖ namespace)* ‖ u16 len ‖ exe [‖ device(16)].
 const APPS: TableDefinition<&str, &[u8]> = TableDefinition::new("apps");
 
 pub(crate) fn open_tables(w: &redb::WriteTransaction) -> Result<(), StoreError> {
@@ -22,6 +22,9 @@ pub struct App {
     pub write: bool,
     /// The executable that first used the token (Linux), if pinned.
     pub exe: Option<String>,
+    /// For one of the user's own nodes asking over a Link (ADR-0019): its
+    /// `retifs.node` address. Such an entry has no token.
+    pub device: Option<[u8; 16]>,
 }
 
 fn encode(a: &App) -> Vec<u8> {
@@ -36,6 +39,9 @@ fn encode(a: &App) -> Vec<u8> {
     let exe = a.exe.as_deref().unwrap_or("");
     v.extend_from_slice(&(exe.len() as u16).to_be_bytes());
     v.extend_from_slice(exe.as_bytes());
+    if let Some(d) = &a.device {
+        v.extend_from_slice(d);
+    }
     v
 }
 
@@ -56,7 +62,8 @@ fn decode(name: &str, v: &[u8]) -> Option<App> {
     }
     let len = u16::from_be_bytes(take(2)?.try_into().ok()?) as usize;
     let exe = String::from_utf8(take(len)?.to_vec()).ok()?;
-    Some(App { name: name.to_string(), token_hash, namespaces, write, exe: (!exe.is_empty()).then_some(exe) })
+    let device = take(16).and_then(|d| d.try_into().ok());
+    Some(App { name: name.to_string(), token_hash, namespaces, write, exe: (!exe.is_empty()).then_some(exe), device })
 }
 
 impl SlabStore {
@@ -94,9 +101,11 @@ mod tests {
 
     #[test]
     fn apps_round_trip() {
-        let a = App { name: "viewer".into(), token_hash: [7; 32], namespaces: vec!["photos".into(), "notes".into()], write: false, exe: Some("/usr/bin/viewer".into()) };
+        let a = App { name: "viewer".into(), token_hash: [7; 32], namespaces: vec!["photos".into(), "notes".into()], write: false, exe: Some("/usr/bin/viewer".into()), device: None };
         assert_eq!(decode("viewer", &encode(&a)), Some(a.clone()));
         let b = App { exe: None, write: true, namespaces: vec![], ..a };
-        assert_eq!(decode("viewer", &encode(&b)), Some(b));
+        assert_eq!(decode("viewer", &encode(&b)), Some(b.clone()));
+        let c = App { device: Some([9; 16]), ..b };
+        assert_eq!(decode("viewer", &encode(&c)), Some(c));
     }
 }

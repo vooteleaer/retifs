@@ -75,6 +75,15 @@ A search node, beyond what a holder sees:
 2. **Who builds the index** in a multi-writer namespace: every checkpoint maker, or one designated device.
 3. **Coarse range buckets** declared per key (`modified` by month, `geo` as geohash prefixes up to a precision) as ordinary tokens: exact matches on buckets give range-like queries at the price of leaking the bucket's frequency.
 
+## Implementation status (2026-10-20)
+**Layer 1, remote queries to own nodes:**
+- `retifs app add NAME --ns NS[,NS] [--write] --device NODE` admits another of the user's nodes (by the address `retifs ping` shows) with the same scope as an app token, and no token.
+- `/retifs/api` on `retifs.node` takes msgpack local API requests. The requester must `identify` on the link; its identity hash gives its `retifs.node` address, which must be an admitted device. Requests are checked with the app socket's rules, then answered from a separate task (a request may wait on the network). Over a Link, a range read returns at most 1 MiB and a watch waits at most 45 s.
+- The local API gained `Remote { node, req }` (owner only, one hop), and the CLI `--via NODE`: any command runs against the other node, carried by the local daemon, which identifies once per link.
+- Live, two daemons on one machine: B queried A's namespace in 17–19 ms per request with nothing synced, read a record's history, and wrote with a read-write scope. A node that wasn't admitted, a removed device, another namespace, writing with a read-only scope and granting were all refused.
+
+**Not yet:** the blind index (layer 2) and its vectors; remote live queries beyond `Watch`; a cross-machine measurement over slow links.
+
 ## Consequences
 - Easier: a phone or LoRa node can query a namespace it doesn't hold; search can be delegated to always-on nodes without giving them the read key.
 - Harder: every checkpoint costs an index build; search nodes are a new, weaker kind of blind; one more key pair rotates on revoke.

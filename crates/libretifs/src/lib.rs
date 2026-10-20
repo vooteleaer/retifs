@@ -41,7 +41,18 @@ pub enum Request {
     /// Owner only: lets an application use the app socket with a new token
     /// (answered once, never stored), limited to `namespaces`, read-only
     /// unless `write`.
-    AppAdd { name: String, namespaces: Vec<String>, write: bool },
+    /// With `device` (a node's `retifs.node` address): admits that node of
+    /// the user's to ask over a Link instead (ADR-0019); no token.
+    AppAdd {
+        name: String,
+        namespaces: Vec<String>,
+        write: bool,
+        #[serde(default)]
+        device: Option<String>,
+    },
+    /// Owner only: sends `req` to the user's own node `node` over a Link and
+    /// returns its answer (it must have admitted this node as a device).
+    Remote { node: String, req: Box<Request> },
     AppList,
     AppRemove { name: String },
     /// Chunk, encrypt and pin `data`; returns its read-cap.
@@ -253,6 +264,9 @@ pub struct AppInfo {
     pub write: bool,
     /// The executable its token is pinned to (Linux), once used.
     pub exe: Option<String>,
+    /// A device's node address, for entries that ask over a Link.
+    #[serde(default)]
+    pub device: Option<String>,
 }
 
 /// One step of a [`Request::Transaction`].
@@ -563,6 +577,8 @@ type Stream = tokio::net::UnixStream;
 pub struct Client {
     stream: Stream,
     next_id: u32,
+    /// Send every request to this own node over a Link (ADR-0019).
+    via: Option<String>,
 }
 
 #[derive(Debug)]
@@ -596,7 +612,7 @@ impl Client {
         #[cfg(not(windows))]
         let stream = tokio::net::UnixStream::connect(&at).await;
         let stream = stream.map_err(|e| ClientError::NotRunning(at, e))?;
-        Ok(Client { stream, next_id: 1 })
+        Ok(Client { stream, next_id: 1, via: None })
     }
 
     /// Connects to the app socket as an application with `token`: requests
@@ -608,7 +624,7 @@ impl Client {
         #[cfg(not(windows))]
         let stream = tokio::net::UnixStream::connect(&at).await;
         let stream = stream.map_err(|e| ClientError::NotRunning(at, e))?;
-        let mut client = Client { stream, next_id: 1 };
+        let mut client = Client { stream, next_id: 1, via: None };
         match client.call(Request::Hello { token: token.to_string() }).await? {
             Response::Done => Ok(client),
             Response::Error { message } => Err(ClientError::Daemon(message)),
@@ -616,7 +632,19 @@ impl Client {
         }
     }
 
+    /// From now on, asks the user's own node `node` (a `retifs.node`
+    /// address) instead of the local daemon; the local daemon carries the
+    /// requests over a Link.
+    pub fn via(mut self, node: Option<String>) -> Self {
+        self.via = node;
+        self
+    }
+
     pub async fn call(&mut self, msg: Request) -> Result<Response, ClientError> {
+        let msg = match &self.via {
+            Some(node) => Request::Remote { node: node.clone(), req: Box::new(msg) },
+            None => msg,
+        };
         let id = self.next_id;
         self.next_id = self.next_id.wrapping_add(1);
         write_frame(&mut self.stream, &Envelope { v: PROTOCOL_VERSION, id, msg }).await.map_err(ClientError::Io)?;

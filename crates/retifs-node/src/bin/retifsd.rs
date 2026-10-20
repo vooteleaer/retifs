@@ -46,7 +46,7 @@ use libretifs::{
 use personal_rns::prelude::*;
 use retifs_core::{
     channel::{key_id, ChannelAddr, ChannelKey, Commit, Head},
-    lease::{self, node_destination, Lease, LeaseId, LeaseKey, Receipt, Renewal},
+    lease::{self, node_destination, node_destination_of, Lease, LeaseId, LeaseKey, Receipt, Renewal},
     stamp,
     manifest::{self, decode_node, decode_root, NodeEntry},
     keywrap,
@@ -68,7 +68,7 @@ use retifs_net::{
         decode_request, encode_bitmap, encode_lease_request, encode_prove, encode_prove_reply,
         encode_lease_status, encode_response, LeaseRequest, LeaseStatus, ReceiptReply, GET_ENDPOINT, HAVE_ENDPOINT, LEASE_ENDPOINT,
         PROVE_ENDPOINT, RECEIPT_ENDPOINT, decode_bitmap, decode_put, encode_have, encode_put, HAVE_PREFIX, MAX_HAVE,
-        MAX_PUT, PUT_ENDPOINT, HEAD_ENDPOINT,
+        MAX_PUT, PUT_ENDPOINT, HEAD_ENDPOINT, API_ENDPOINT,
     },
     seek::{pull_round, seek_round},
     transport::{PrnsTransport, Transport},
@@ -90,6 +90,34 @@ struct Shared {
     pull_wake: Notify,
     /// Bits of proof of work asked of every lease offer (0: none).
     stamp_cost: u8,
+    /// Requests from own devices over a Link, answered by the daemon (ADR-0019).
+    api: mpsc::UnboundedSender<ApiCall>,
+}
+
+/// A local API request that arrived over a Link, to answer later.
+struct ApiCall {
+    requester: Option<[u8; 16]>,
+    body: Vec<u8>,
+    token: RespondToken,
+}
+
+/// `/retifs/api`: the local API for the user's own nodes (ADR-0019). The
+/// requester must identify; the daemon checks it against its devices and
+/// answers from another task, since a request may wait on the network.
+struct ApiEndpoint;
+impl RequestEndpoint<Arc<Shared>> for ApiEndpoint {
+    const ENDPOINT_ID: &'static str = API_ENDPOINT;
+    const POLICY: RequestEndpointPolicy = RequestEndpointPolicy::AllowAll;
+
+    async fn handle(context: RequestContext<'_, Arc<Shared>>) -> Result<(), Decline> {
+        let call = ApiCall {
+            requester: context.requester.map(|r| *r.as_bytes()),
+            body: context.data.to_vec(),
+            token: context.respond_token(),
+        };
+        let _ = context.state.api.send(call);
+        Err(Decline::Ignore) // answered by `api_server`
+    }
 }
 
 struct Get;
@@ -494,6 +522,10 @@ struct Daemon {
     /// can't group chunks by request (ADR-0010, request-pattern leaks).
     private_requests: bool,
     node_id: PeerId,
+    /// This node's RNS identity hash: what it reveals on links to own nodes.
+    identity_hash: [u8; 16],
+    /// Links this node has identified itself on.
+    identified: Mutex<std::collections::HashSet<LinkId>>,
     /// Derives per-lease signing keys (prototype: one namespace per store).
     namespace_key: [u8; 32],
     lease_term: u64,
@@ -707,12 +739,14 @@ async fn serve(store: Arc<SlabStore>, identity: node::IdentitySecret, endpoint: 
     if node_destination(&lease::identity_public(&identity_bytes)) != *dest_hash.as_bytes() {
         eprintln!("warning: node identity layout differs from RNS; receipts from this node won't verify");
     }
+    let (api_tx, api_rx) = mpsc::unbounded_channel::<ApiCall>();
     let shared = Arc::new(Shared {
         store: store.clone(),
         identity: identity_bytes,
         hold_limit: args.hold_limit,
         pull_wake: Notify::new(),
         stamp_cost: args.stamp_cost,
+        api: api_tx,
     });
     // Announces from the whole network arrive here: bounded, and an announce
     // dropped when it's full is harmless (nodes announce again). An unbounded
@@ -734,7 +768,7 @@ async fn serve(store: Arc<SlabStore>, identity: node::IdentitySecret, endpoint: 
         pre_configured_destinations: destinations,
         app_state: shared.clone(),
         storage: GrowableHeap,
-        request_endpoints: request_endpoints![Get, Have, LeaseEndpoint, ReceiptEndpoint, ProveEndpoint, PutEndpoint, HeadEndpoint],
+        request_endpoints: request_endpoints![Get, Have, LeaseEndpoint, ReceiptEndpoint, ProveEndpoint, PutEndpoint, HeadEndpoint, ApiEndpoint],
         on_event: move |event, _state| {
             match event {
                 PrnsEvent::Diagnostic(Diagnostic::AnnounceHeard { destination, hops, .. }) => {
@@ -762,6 +796,8 @@ async fn serve(store: Arc<SlabStore>, identity: node::IdentitySecret, endpoint: 
         links: Mutex::new(HashMap::new()),
         private_requests: args.private_requests,
         node_id: *dest_hash.as_bytes(),
+        identity_hash: <sha2::Sha256 as sha2::Digest>::digest(lease::identity_public(&identity_bytes))[..16].try_into().unwrap(),
+        identified: Mutex::new(std::collections::HashSet::new()),
         namespace_key: namespace_key(&store),
         lease_term: args.lease_term,
         upkeep_wake: Notify::new(),
@@ -797,6 +833,7 @@ async fn serve(store: Arc<SlabStore>, identity: node::IdentitySecret, endpoint: 
     let daemon_for_nn = daemon.clone();
     tokio::spawn(local_api(endpoint, daemon.clone(), false));
     tokio::spawn(local_api(libretifs::app_endpoint(&args.store), daemon.clone(), true));
+    tokio::spawn(api_server(daemon.clone(), handle.clone(), api_rx));
     tokio::spawn(lease_puller(daemon.clone(), shared.clone()));
     tokio::spawn(lease_upkeep(daemon.clone()));
     tokio::spawn(follower(daemon.clone()));
@@ -1033,22 +1070,106 @@ fn authorize(d: &Daemon, s: &AppScope, req: &Request) -> Result<(), String> {
     }
 }
 
+/// The most a range read over a Link returns in one answer.
+const REMOTE_MAX_RANGE: u64 = 1 << 20;
+/// The longest a watch over a Link waits (below the requester's 60 s timeout).
+const REMOTE_MAX_WATCH_MS: u64 = 45_000;
+
+/// Answers local API requests from own devices over Links (ADR-0019).
+async fn api_server(d: Arc<Daemon>, handle: PrnsNodeHandle, mut calls: mpsc::UnboundedReceiver<ApiCall>) {
+    while let Some(call) = calls.recv().await {
+        let d = d.clone();
+        let handle = handle.clone();
+        tokio::spawn(async move {
+            let resp = remote_call(&d, call.requester, &call.body).await.unwrap_or_else(|message| Response::Error { message });
+            let bytes = rmp_serde::to_vec_named(&resp).unwrap_or_default();
+            handle.respond_owned_packed(call.token, bytes);
+        });
+    }
+}
+
+/// One request from another node: it must have identified as one of this
+/// user's devices, and the request must fit that device's scope.
+async fn remote_call(d: &Daemon, requester: Option<[u8; 16]>, body: &[u8]) -> Result<Response, String> {
+    let who = requester.ok_or("identify first: only this user's own nodes may ask")?;
+    let node = node_destination_of(&who);
+    let app = d
+        .store
+        .apps()
+        .map_err(|e| e.to_string())?
+        .into_iter()
+        .find(|a| a.device == Some(node))
+        .ok_or_else(|| format!("node <{}> isn't one of this node's devices (retifs app add NAME --ns NS --device ADDRESS)", hex(&node)))?;
+    let req: Request = rmp_serde::from_slice(body).map_err(|e| format!("bad request: {e}"))?;
+    let scope = AppScope { name: app.name, namespaces: app.namespaces, write: app.write };
+    authorize(d, &scope, &req)?;
+    let req = match req {
+        Request::ReadRange { len, .. } if len > REMOTE_MAX_RANGE => {
+            return Err(format!("over a Link, read at most {REMOTE_MAX_RANGE} bytes at a time"));
+        }
+        Request::Watch { ns, since, timeout_ms } => Request::Watch { ns, since, timeout_ms: timeout_ms.min(REMOTE_MAX_WATCH_MS) },
+        r => r,
+    };
+    let names_only = matches!(req, Request::Namespaces);
+    match Box::pin(handle(d, req)).await? {
+        Response::Names { names } if names_only => Ok(Response::Names { names: names.into_iter().filter(|n| scope.namespaces.contains(n)).collect() }),
+        r => Ok(r),
+    }
+}
+
+/// Sends `req` to own node `peer` over a Link, identifying this node first.
+async fn remote_request(d: &Daemon, peer: &PeerId, req: &Request) -> Result<Response, String> {
+    let body = rmp_serde::to_vec_named(req).map_err(|e| e.to_string())?;
+    for attempt in 0..2 {
+        let link = d.link_to(peer).await?;
+        if !d.identified.lock().unwrap().contains(&link) {
+            d.transport.identify(link, d.identity_hash).await?;
+            d.identified.lock().unwrap().insert(link);
+        }
+        match d.ask(link, API_ENDPOINT, body.clone()).await {
+            Ok(bytes) => return rmp_serde::from_slice(&bytes).map_err(|e| format!("bad answer from <{}>: {e}", hex(peer))),
+            // A cached link may have gone stale: once more on a new one.
+            Err(e) if attempt == 0 => {
+                eprintln!("remote <{}>: {e}; retrying on a new link", hex(peer));
+                d.drop_link(peer);
+            }
+            Err(e) => return Err(e),
+        }
+    }
+    unreachable!()
+}
+
 async fn handle(d: &Daemon, req: Request) -> Result<Response, String> {
     match req {
         Request::Hello { .. } => Ok(Response::Done), // the owner needs no token
 
-        Request::AppAdd { name, namespaces, write } => {
+        Request::AppAdd { name, namespaces, write, device } => {
             if name.is_empty() || namespaces.is_empty() {
                 return Err("an app needs a name and at least one namespace".into());
             }
+            let device = match device {
+                Some(addr) => Some(
+                    *parse_destination(&addr).ok_or_else(|| format!("{addr} isn't a node address (retifs ping shows it)"))?.as_bytes(),
+                ),
+                None => None,
+            };
+            // A device gets no token: its hash is of a token never issued.
             let mut raw = [0u8; 32];
             getrandom::fill(&mut raw).expect("OS entropy");
             let token = format!("rta_{}", hex(&raw));
             let token_hash: [u8; 32] = <sha2::Sha256 as sha2::Digest>::digest(token.as_bytes()).into();
             d.store
-                .put_app(&retifs_store::App { name, token_hash, namespaces, write, exe: None })
+                .put_app(&retifs_store::App { name, token_hash, namespaces, write, exe: None, device })
                 .map_err(|e| e.to_string())?;
-            Ok(Response::AppToken { token })
+            Ok(if device.is_some() { Response::Done } else { Response::AppToken { token } })
+        }
+
+        Request::Remote { node, req } => {
+            if matches!(*req, Request::Remote { .. }) {
+                return Err("one hop only".into());
+            }
+            let peer = *parse_destination(&node).ok_or_else(|| format!("{node} isn't a node address"))?.as_bytes();
+            remote_request(d, &peer, &req).await
         }
 
         Request::AppList => Ok(Response::Apps {
@@ -1057,7 +1178,7 @@ async fn handle(d: &Daemon, req: Request) -> Result<Response, String> {
                 .apps()
                 .map_err(|e| e.to_string())?
                 .into_iter()
-                .map(|a| AppInfo { name: a.name, namespaces: a.namespaces, write: a.write, exe: a.exe })
+                .map(|a| AppInfo { name: a.name, namespaces: a.namespaces, write: a.write, exe: a.exe, device: a.device.map(|d| hex(&d)) })
                 .collect(),
         }),
 
