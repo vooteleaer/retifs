@@ -2945,7 +2945,17 @@ async fn write_ops(d: &Daemon, ns: &str, mut ops: Vec<Op>) -> Result<u64, String
     let not_before = if new {
         0
     } else {
-        materialize(d, ns)?;
+        let merged = materialize(d, ns)?;
+        // Writes before this node's grant has arrived would never count (they'd
+        // be stamped before it): refuse them clearly instead of losing them.
+        let (_, own, _) = chains(d, ns, false)?;
+        let writes_data = ops.iter().any(|op| matches!(op, Op::Set(..) | Op::Unset(..) | Op::Blocks(..) | Op::Delete(_)));
+        if writes_data && !merged.writers.get(&own).is_some_and(|r| r.contains(&Right::Write)) {
+            return Err(format!(
+                "this node may not write to {ns} yet: its grant hasn't reached it (writer {}…; try again after the next sync)",
+                &hex(&own)[..12]
+            ));
+        }
         d.ns_cache.lock().unwrap().get(ns).and_then(|e| e.applied.values().map(|(_, t, _)| t + 1).max()).unwrap_or(0)
     };
     // Only a change to keep tags or rules, or a deletion, can change what's
