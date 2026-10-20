@@ -1,7 +1,7 @@
 # Open questions
 
 - **Project name.** `retifs` is a working title.
-- **Names:** petnames, community namespaces (`community/…`), or both? Zooko's triangle.
+- **Names:** proposed: petnames in contact records, display names as hints, QR links and one-use invitations ([ADR-0020](adr/0020-sharing-names-invitations.md)). Still open: community namespaces (`community/…`).
 - **Discovery:** Bloom filters in announces vs a DHT (the rnfs experience) vs a hybrid.
 - **Scaling:** regional limiting of announces, hierarchy, path requests on demand.
 - **Relationship with Prns:** upstream contributions vs fork policy, given one dominant maintainer.
