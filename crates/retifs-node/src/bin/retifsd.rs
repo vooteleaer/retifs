@@ -530,14 +530,28 @@ impl Daemon {
         let dest = parse_destination(&hex(peer)).expect("peer id");
         let mut t = self.transport.clone();
         t.path_timeout = Duration::from_secs(20);
-        t.ensure_path(dest).await?;
-        let (link, rtt) = match t.link_with_rtt(dest).await {
+        // The shared instance may know a path this client's own route table
+        // doesn't, and a client's path request for it may never settle (seen
+        // over LoRa: Python's rnpath got the path in under a second, Prns
+        // never did). So a failed path check doesn't stop the attempt: the
+        // link request goes to the shared instance, which routes it.
+        let path = t.ensure_path(dest).await;
+        let attempt = |t: &PrnsTransport| {
+            let t = t.clone();
+            async move {
+                tokio::time::timeout(Duration::from_secs(90), t.link_with_rtt(dest))
+                    .await
+                    .unwrap_or_else(|_| Err("link: timed out".into()))
+            }
+        };
+        let (link, rtt) = match attempt(&t).await {
             Ok(l) => l,
             // The known route may be stale: ask for a fresh path and try once more.
-            Err(_) => {
-                t.request_path(dest).await?;
-                t.link_with_rtt(dest).await?
+            Err(e) if path.is_ok() => {
+                t.request_path(dest).await.map_err(|p| format!("{e}; {p}"))?;
+                attempt(&t).await?
             }
+            Err(e) => return Err(format!("{}; {e}", path.unwrap_err())),
         };
         let _ = self.store.record_rtt(peer, rtt);
         self.links.lock().unwrap().insert(*peer, link);
