@@ -499,6 +499,9 @@ struct Daemon {
     ns_cache: Mutex<HashMap<String, NsCache>>,
     /// Joined namespaces still looking for a checkpoint to start from.
     ns_seeking: Mutex<std::collections::HashSet<String>>,
+    /// Peers announced since the seeker last looked (a set: each at most once).
+    announced: Mutex<std::collections::HashSet<PeerId>>,
+    announced_wake: Notify,
 }
 
 impl Daemon {
@@ -566,8 +569,11 @@ async fn serve(store: Arc<SlabStore>, identity: node::IdentitySecret, endpoint: 
         pull_wake: Notify::new(),
         stamp_cost: args.stamp_cost,
     });
-    let (heard_tx, mut heard_rx) = mpsc::unbounded_channel::<(PeerId, u8)>();
-    let (seek_tx, seek_rx) = mpsc::unbounded_channel::<PeerId>();
+    // Announces from the whole network arrive here: bounded, and an announce
+    // dropped when it's full is harmless (nodes announce again). An unbounded
+    // queue grew without limit on a busy transport node while passes waited
+    // on the network (found by the overnight soak test).
+    let (heard_tx, mut heard_rx) = mpsc::channel::<(PeerId, u8)>(4096);
     // Optionally a NomadNet node (its own identity and destination) serving a namespace.
     let nomadnet = args.nomadnet.as_ref().map(|_| {
         let id = load_or_create_identity(&store.root().join("nomadnet_identity")).expect("nomadnet identity");
@@ -587,7 +593,7 @@ async fn serve(store: Arc<SlabStore>, identity: node::IdentitySecret, endpoint: 
         on_event: move |event, _state| {
             match event {
                 PrnsEvent::Diagnostic(Diagnostic::AnnounceHeard { destination, hops, .. }) => {
-                    let _ = heard_tx.send((*destination.as_bytes(), hops));
+                    let _ = heard_tx.try_send((*destination.as_bytes(), hops));
                 }
                 // Page requests to the NomadNet destination (dynamically registered paths).
                 PrnsEvent::Message(Message::Request { destination, link_id, request_id, path_hash, rtt, .. })
@@ -624,6 +630,8 @@ async fn serve(store: Arc<SlabStore>, identity: node::IdentitySecret, endpoint: 
         ns_wake: Notify::new(),
         ns_cache: Mutex::new(HashMap::new()),
         ns_seeking: Mutex::new(std::collections::HashSet::new()),
+        announced: Mutex::new(std::collections::HashSet::new()),
+        announced_wake: Notify::new(),
     });
     println!("attached to shared instance {of}");
     println!("serving {} chunks as retifs.node <{}>", store.len().unwrap_or(0), daemon.node_hex);
@@ -647,9 +655,14 @@ async fn serve(store: Arc<SlabStore>, identity: node::IdentitySecret, endpoint: 
         // announce app data on, so recognise retifs.node by its identity.
         let mut not_retifs = std::collections::HashSet::new();
         while let Some((peer, hops)) = heard_rx.recv().await {
-            let _ = seek_tx.send(peer);
+            if watcher.announced.lock().unwrap().insert(peer) {
+                watcher.announced_wake.notify_one();
+            }
             if peer == watcher.node_id || not_retifs.contains(&peer) {
                 continue;
+            }
+            if not_retifs.len() > 100_000 {
+                not_retifs.clear(); // a very large network: forget and re-learn
             }
             let dest = parse_destination(&hex(&peer)).expect("destination hash");
             match watcher.transport.handle.destination_identity(DestinationIdentityQuery::Destination(dest)).await {
@@ -667,7 +680,7 @@ async fn serve(store: Arc<SlabStore>, identity: node::IdentitySecret, endpoint: 
             }
         }
     });
-    tokio::spawn(seeker(daemon, seek_rx));
+    tokio::spawn(seeker(daemon));
 
     // Keep within the disk budget even when other programs fill the volume (ADR-0012).
     let budget_store = store.clone();
@@ -691,7 +704,9 @@ async fn serve(store: Arc<SlabStore>, identity: node::IdentitySecret, endpoint: 
 
     let announcer = handle.clone();
     tokio::spawn(async move {
-        let mut tick = tokio::time::interval(Duration::from_secs(30));
+        // Once at start (the first tick is immediate), then every ten minutes:
+        // announces travel the whole network, LoRa links included.
+        let mut tick = tokio::time::interval(Duration::from_secs(600));
         loop {
             tick.tick().await;
             let cmd = PrnsCommand::AnnounceNow(AnnounceNow {
@@ -2963,17 +2978,22 @@ fn now_ms() -> u64 {
 
 /// Continuous seeking (ADR-0010): woken by new wants, by announces of hinted
 /// peers (which resets their back-off), and by a slow tick.
-async fn seeker(d: Arc<Daemon>, mut heard: mpsc::UnboundedReceiver<PeerId>) {
+async fn seeker(d: Arc<Daemon>) {
     let mut tick = tokio::time::interval(Duration::from_secs(30));
     loop {
-        tokio::select! {
-            _ = d.wake.notified() => {}
-            Some(peer) = heard.recv() => {
-                if !d.store.wake_peer(&peer).unwrap_or(false) {
-                    continue; // not a peer we're waiting for
-                }
-            }
-            _ = tick.tick() => {}
+        let forced = tokio::select! {
+            _ = d.wake.notified() => true,
+            _ = tick.tick() => true,
+            _ = d.announced_wake.notified() => false,
+        };
+        // Peers announced meanwhile (each once): those we wait for are tried again now.
+        let announced: Vec<PeerId> = d.announced.lock().unwrap().drain().collect();
+        let mut woke = false;
+        for peer in announced {
+            woke |= d.store.wake_peer(&peer).unwrap_or(false);
+        }
+        if !forced && !woke {
+            continue; // only peers we aren't waiting for
         }
         if let Err(e) = seek_pass(&d).await {
             eprintln!("seeker: {e}");
