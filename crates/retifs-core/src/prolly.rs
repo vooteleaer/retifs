@@ -34,6 +34,10 @@ const LABEL: &[u8] = b"retifs/v1/prolly";
 pub type Root = (Cid, Seed);
 /// Entries by key: record ID and its canonical msgpack value.
 pub type Entries = Vec<(RecordId, Vec<u8>)>;
+/// Entries with keys of another length (e.g. the blind index's 32 bytes).
+pub type KeyedEntries<const K: usize> = Vec<([u8; K], Vec<u8>)>;
+/// Entries as raw keys and values (prefix scans).
+pub type RawEntries = Vec<(Vec<u8>, Vec<u8>)>;
 /// The longest key a node may carry.
 const MAX_KEY: usize = 64;
 
@@ -114,7 +118,7 @@ fn encode_internal<const K: usize>(level: u8, children: &[([u8; K], Root)]) -> V
 pub fn build<S: Store, const K: usize>(
     store: &mut S,
     secret: &ConvergenceSecret,
-    entries: Vec<([u8; K], Vec<u8>)>,
+    entries: KeyedEntries<K>,
 ) -> Result<Option<Root>, TreeError<S::Error>> {
     if entries.is_empty() {
         return Ok(None);
@@ -261,7 +265,7 @@ pub fn get<S: Store, const K: usize>(store: &S, root: &Root, key: &[u8; K]) -> R
 }
 
 /// Every entry, by key.
-pub fn read_all<S: Store, const K: usize>(store: &S, root: &Root) -> Result<Vec<([u8; K], Vec<u8>)>, TreeError<S::Error>> {
+pub fn read_all<S: Store, const K: usize>(store: &S, root: &Root) -> Result<KeyedEntries<K>, TreeError<S::Error>> {
     let mut out = Vec::new();
     for leaf in leaves(store, root)? {
         if let Node::Leaf(entries) = read_node(store, &leaf)? {
@@ -275,7 +279,7 @@ pub fn read_all<S: Store, const K: usize>(store: &S, root: &Root) -> Result<Vec<
 
 /// Every entry whose key starts with `prefix`, by key, reading only the
 /// nodes that can hold such keys (a blind index lookup, ADR-0019).
-pub fn scan_prefix<S: Store>(store: &S, root: &Root, prefix: &[u8]) -> Result<Vec<(Vec<u8>, Vec<u8>)>, TreeError<S::Error>> {
+pub fn scan_prefix<S: Store>(store: &S, root: &Root, prefix: &[u8]) -> Result<RawEntries, TreeError<S::Error>> {
     let mut out = Vec::new();
     let mut stack = vec![*root];
     while let Some(n) = stack.pop() {
