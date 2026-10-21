@@ -35,7 +35,7 @@ Reticulum already has a discovery mechanism: the announce. NomadNet nodes, LXMF 
 - This makes sync independent of one hub: in the soak test of 2026-10-21, a member whose only peer lost its path stopped syncing although two other members had everything.
 
 ### Prns
-Prns keeps each destination's app_data (`DestinationIdentity::app_data`, as Python RNS's `Identity.recall_app_data`), but its introspection snapshot (`DestinationIdentitySnapshot`) and the announce-heard event leave it out. Exposing it is a small upstream change; until then app_data can't be read on Prns nodes (retifs recognises its storage nodes by identity for the same reason).
+Prns keeps each destination's app_data (`DestinationIdentity::app_data`, as Python RNS's `Identity.recall_app_data`), but its introspection snapshot (`DestinationIdentitySnapshot`) and the announce-heard event leave it out. Exposing it is a small upstream change (asked for in [Prns#306](https://github.com/KenAKAFrosty/Prns/issues/306), see [recon](../recon/prns-issue-app-data.md)); until then app_data can't be read on Prns nodes (retifs recognises its storage nodes by identity for the same reason).
 
 ## Impact on the threat model
 - **Who reads a public namespace** isn't visible to its owner (fetching is anonymous by default); its existence and its announce are visible to everyone, by design.
