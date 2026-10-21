@@ -103,7 +103,7 @@ impl RequestEndpoint<Arc<Shared>> for QueryEndpoint {
     const ENDPOINT_ID: &'static str = QUERY_ENDPOINT;
     const POLICY: RequestEndpointPolicy = RequestEndpointPolicy::AllowAll;
 
-    async fn handle(mut context: RequestContext<'_, Arc<Shared>>) -> Result<(), Decline> {
+    async fn handle(mut context: RequestContext<'_, Arc<Shared>>, _node: &impl PrnsNodeApi) -> Result<(), Decline> {
         let data = context.data;
         let n = data.len().saturating_sub(48) / 16;
         if data.len() < 64 || !(data.len() - 48).is_multiple_of(16) || n > MAX_QUERY_TOKENS {
@@ -193,7 +193,7 @@ impl RequestEndpoint<Arc<Shared>> for ApiEndpoint {
     const ENDPOINT_ID: &'static str = API_ENDPOINT;
     const POLICY: RequestEndpointPolicy = RequestEndpointPolicy::AllowAll;
 
-    async fn handle(context: RequestContext<'_, Arc<Shared>>) -> Result<(), Decline> {
+    async fn handle(context: RequestContext<'_, Arc<Shared>>, _node: &impl PrnsNodeApi) -> Result<(), Decline> {
         let call = ApiCall {
             requester: context.requester.map(|r| *r.as_bytes()),
             body: context.data.to_vec(),
@@ -213,7 +213,7 @@ impl RequestEndpoint<Arc<Shared>> for Get {
     /// published chunks need no proof. Anything else gets the same answer as
     /// "don't have" (holder privacy, ADR-0010). Fetched/cached chunks are never
     /// in the serving index, so they're never served.
-    async fn handle(mut context: RequestContext<'_, Arc<Shared>>) -> Result<(), Decline> {
+    async fn handle(mut context: RequestContext<'_, Arc<Shared>>, _node: &impl PrnsNodeApi) -> Result<(), Decline> {
         let Ok(items) = decode_request(context.data) else {
             return Err(Decline::Ignore);
         };
@@ -242,7 +242,7 @@ impl RequestEndpoint<Arc<Shared>> for Have {
     const ENDPOINT_ID: &'static str = HAVE_ENDPOINT;
     const POLICY: RequestEndpointPolicy = RequestEndpointPolicy::AllowAll;
 
-    async fn handle(mut context: RequestContext<'_, Arc<Shared>>) -> Result<(), Decline> {
+    async fn handle(mut context: RequestContext<'_, Arc<Shared>>, _node: &impl PrnsNodeApi) -> Result<(), Decline> {
         let Ok(items) = decode_have(context.data) else {
             return Err(Decline::Ignore);
         };
@@ -270,7 +270,7 @@ impl RequestEndpoint<Arc<Shared>> for LeaseEndpoint {
     const ENDPOINT_ID: &'static str = LEASE_ENDPOINT;
     const POLICY: RequestEndpointPolicy = RequestEndpointPolicy::AllowAll;
 
-    async fn handle(mut context: RequestContext<'_, Arc<Shared>>) -> Result<(), Decline> {
+    async fn handle(mut context: RequestContext<'_, Arc<Shared>>, _node: &impl PrnsNodeApi) -> Result<(), Decline> {
         let s = context.state.clone();
         let renew = |r: &Renewal| match s.store.held_lease(&r.id) {
             Ok(Some(_)) if s.store.renew_lease(r).unwrap_or(false) => LeaseStatus::Accepted,
@@ -310,7 +310,7 @@ impl RequestEndpoint<Arc<Shared>> for ReceiptEndpoint {
     const ENDPOINT_ID: &'static str = RECEIPT_ENDPOINT;
     const POLICY: RequestEndpointPolicy = RequestEndpointPolicy::AllowAll;
 
-    async fn handle(mut context: RequestContext<'_, Arc<Shared>>) -> Result<(), Decline> {
+    async fn handle(mut context: RequestContext<'_, Arc<Shared>>, _node: &impl PrnsNodeApi) -> Result<(), Decline> {
         let Ok(ids) = decode_receipt_request(context.data) else {
             return Err(Decline::Ignore);
         };
@@ -333,7 +333,7 @@ impl RequestEndpoint<Arc<Shared>> for ProveEndpoint {
     const ENDPOINT_ID: &'static str = PROVE_ENDPOINT;
     const POLICY: RequestEndpointPolicy = RequestEndpointPolicy::AllowAll;
 
-    async fn handle(mut context: RequestContext<'_, Arc<Shared>>) -> Result<(), Decline> {
+    async fn handle(mut context: RequestContext<'_, Arc<Shared>>, _node: &impl PrnsNodeApi) -> Result<(), Decline> {
         let Ok((id, nonce, indices)) = decode_prove(context.data) else {
             return Err(Decline::Ignore);
         };
@@ -353,7 +353,7 @@ impl RequestEndpoint<Arc<Shared>> for PutEndpoint {
     const ENDPOINT_ID: &'static str = PUT_ENDPOINT;
     const POLICY: RequestEndpointPolicy = RequestEndpointPolicy::AllowAll;
 
-    async fn handle(mut context: RequestContext<'_, Arc<Shared>>) -> Result<(), Decline> {
+    async fn handle(mut context: RequestContext<'_, Arc<Shared>>, _node: &impl PrnsNodeApi) -> Result<(), Decline> {
         let Ok((id, chunks)) = decode_put(context.data) else {
             return Err(Decline::Ignore);
         };
@@ -377,7 +377,7 @@ impl RequestEndpoint<Arc<Shared>> for HeadEndpoint {
     const ENDPOINT_ID: &'static str = HEAD_ENDPOINT;
     const POLICY: RequestEndpointPolicy = RequestEndpointPolicy::AllowAll;
 
-    async fn handle(mut context: RequestContext<'_, Arc<Shared>>) -> Result<(), Decline> {
+    async fn handle(mut context: RequestContext<'_, Arc<Shared>>, _node: &impl PrnsNodeApi) -> Result<(), Decline> {
         let store = &context.state.store;
         let head = match context.data.len() {
             16 => store.head_for(context.data.try_into().unwrap()).ok().flatten().unwrap_or_default(),
@@ -877,6 +877,7 @@ async fn serve(store: Arc<SlabStore>, identity: node::IdentitySecret, endpoint: 
         },
         interfaces: ManuallyAttached,
         persistence: NoPersistence,
+        remote_control: personal_rns::remote_control::RemoteControlService::Unavailable.into(),
     });
     let handle = node.handle();
     let of = attach(&handle).await.unwrap_or_else(|e| panic!("{e}"));

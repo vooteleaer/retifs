@@ -70,6 +70,13 @@ See the [architecture](docs/01-architecture.md) for details.
 
 retifs runs on Linux (Haiku later). The daemon, `retifsd`, attaches to the machine's Reticulum shared instance, so start [prnsd](https://github.com/KenAKAFrosty/Prns) or Python `rnsd` first.
 
+retifs builds against Prns 0.3.8, which isn't on crates.io yet. Check it out next to retifs (Cargo can't fetch the Prns repository on Windows: its paths are too long):
+
+```sh
+git clone https://github.com/KenAKAFrosty/Prns.git Prns-0.3.8
+git -C Prns-0.3.8 checkout v0.3.8-hotfix.1
+```
+
 ```sh
 cargo install --path crates/retifs-node      # retifsd and the retifs CLI
 cargo install --path crates/retifs-fuse      # retifs-mount (needs fuse3)

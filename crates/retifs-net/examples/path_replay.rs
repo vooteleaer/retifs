@@ -57,6 +57,7 @@ fn client_node() -> PrnsNodeHandle {
         on_event: |_event, _state| {},
         interfaces: ManuallyAttached,
         persistence: NoPersistence,
+        remote_control: personal_rns::remote_control::RemoteControlService::Unavailable.into(),
     });
     let handle = node.handle();
     tokio::task::spawn_local(async move { node.run().await });
@@ -106,6 +107,7 @@ async fn run() {
         on_event: |_event, _state| {},
         interfaces: ManuallyAttached,
         persistence: NoPersistence,
+        remote_control: personal_rns::remote_control::RemoteControlService::Unavailable.into(),
     });
     let sh = server.handle();
     tokio::task::spawn_local(async move { server.run().await });

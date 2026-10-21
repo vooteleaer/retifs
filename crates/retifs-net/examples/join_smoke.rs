@@ -26,7 +26,7 @@ impl RequestEndpoint for Get {
     const ENDPOINT_ID: &'static str = GET;
     const POLICY: RequestEndpointPolicy = RequestEndpointPolicy::AllowAll;
 
-    async fn handle(mut context: RequestContext<'_, ()>) -> Result<(), Decline> {
+    async fn handle(mut context: RequestContext<'_, ()>, _node: &impl PrnsNodeApi) -> Result<(), Decline> {
         let n = context.data.first().copied().unwrap_or(1) as usize;
         context.respond(body(n))
     }
@@ -88,6 +88,7 @@ async fn run() {
         on_event: |_event, _state| {},
         interfaces: ManuallyAttached,
         persistence: NoPersistence,
+        remote_control: personal_rns::remote_control::RemoteControlService::Unavailable.into(),
     });
 
     let (heard_tx, mut heard_rx) = tokio::sync::mpsc::unbounded_channel();
@@ -104,6 +105,7 @@ async fn run() {
         },
         interfaces: ManuallyAttached,
         persistence: NoPersistence,
+        remote_control: personal_rns::remote_control::RemoteControlService::Unavailable.into(),
     });
 
     for (name, handle) in [("server", server.handle()), ("client", client.handle())] {

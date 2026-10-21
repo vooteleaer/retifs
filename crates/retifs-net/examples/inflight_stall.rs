@@ -24,7 +24,7 @@ struct Blob;
 impl RequestEndpoint for Blob {
     const ENDPOINT_ID: &'static str = EP;
     const POLICY: RequestEndpointPolicy = RequestEndpointPolicy::AllowAll;
-    async fn handle(mut context: RequestContext<'_, ()>) -> Result<(), Decline> {
+    async fn handle(mut context: RequestContext<'_, ()>, _node: &impl PrnsNodeApi) -> Result<(), Decline> {
         let tag = context.data.first().copied().unwrap_or(0);
         let block_ms: u64 = std::env::args().nth(1).and_then(|a| a.parse().ok()).unwrap_or(0);
         std::thread::sleep(Duration::from_millis(block_ms));
@@ -48,6 +48,7 @@ async fn run() {
         on_event: |_e, _s| {},
         interfaces: ManuallyAttached,
         persistence: NoPersistence,
+        remote_control: personal_rns::remote_control::RemoteControlService::Unavailable.into(),
     });
     let client = PrnsNode::new(PrnsNodeRecipe {
         transport_identity: None,
@@ -58,6 +59,7 @@ async fn run() {
         on_event: |_e, _s| {},
         interfaces: ManuallyAttached,
         persistence: NoPersistence,
+        remote_control: personal_rns::remote_control::RemoteControlService::Unavailable.into(),
     });
     attach(&server.handle()).await.expect("server attach");
     attach(&client.handle()).await.expect("client attach");

@@ -9,7 +9,7 @@ publish = false
 
 [dependencies]
 hex = "0.4"
-personal-rns = { version = "=0.3.7", features = ["tokio-host", "tcp", "shared-instance"] }
+personal-rns = { path = "../../../Prns-0.3.8/personal-rns", features = ["tokio-host", "tcp", "shared-instance"] }
 retifs-core = { path = "../retifs-core" }
 tokio = { version = "1", features = ["full"] }
 

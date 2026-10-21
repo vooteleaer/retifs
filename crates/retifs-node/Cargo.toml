@@ -20,7 +20,7 @@ getrandom = "0.3"
 libretifs = { path = "../libretifs" }
 redb = "2"
 rmp-serde = "1"
-personal-rns = { version = "=0.3.7", features = ["tokio-host", "tcp", "shared-instance"] }
+personal-rns = { path = "../../../Prns-0.3.8/personal-rns", features = ["tokio-host", "tcp", "shared-instance"] }
 retifs-core = { path = "../retifs-core" }
 retifs-net = { path = "../retifs-net" }
 retifs-store = { path = "../retifs-store" }
