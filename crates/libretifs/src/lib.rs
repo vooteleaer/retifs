@@ -267,6 +267,33 @@ pub enum Request {
     /// Ends a share: deletes its definition `id` from `source`, so updates
     /// stop. What members already have stays theirs.
     ShareDelete { source: String, id: String },
+    /// Makes an invitation to write to `ns` (ADR-0020): a `retifs:invite/…`
+    /// link the first recipient redeems for a grant (`grant` too if asked,
+    /// limited to `keys` and `until` if given). It expires after
+    /// `expires_ms` (default a day). Answers with the link.
+    InviteCreate {
+        ns: String,
+        #[serde(default)]
+        grant: bool,
+        #[serde(default)]
+        keys: Vec<String>,
+        #[serde(default)]
+        until: Option<u64>,
+        #[serde(default)]
+        expires_ms: Option<u64>,
+        #[serde(default)]
+        q: Option<String>,
+        #[serde(default)]
+        label: Option<String>,
+    },
+    /// The invitations this node made for `ns`, pending and spent.
+    InviteList { ns: String },
+    /// Withdraws a pending invitation.
+    InviteCancel { ns: String, id: String },
+    /// Accepts an invitation link: joins its namespace as `ns` (reading at
+    /// once) and redeems it with the creator's node, now or, if that node
+    /// isn't reachable, on later syncs until it expires.
+    InviteAccept { ns: String, link: String },
 }
 
 /// An attribute value (ADR-0016).
@@ -370,6 +397,19 @@ pub struct NsView {
     pub lazy: bool,
 }
 
+/// An invitation this node made (ADR-0020).
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct InviteInfo {
+    /// Its ID (64 hex digits), for `InviteCancel`.
+    pub id: String,
+    pub grant: bool,
+    pub keys: Vec<String>,
+    pub until: Option<u64>,
+    pub expires: u64,
+    /// Redeemed already.
+    pub spent: bool,
+}
+
 /// One version of a namespace as seen by one record.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub struct HistoryEntry {
@@ -457,6 +497,12 @@ pub enum Response {
     Verified {
         ok: bool,
         detail: String,
+    },
+    Link {
+        link: String,
+    },
+    Invites {
+        invites: Vec<InviteInfo>,
     },
     Error {
         message: String,

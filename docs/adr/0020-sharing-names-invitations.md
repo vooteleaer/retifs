@@ -62,7 +62,15 @@ invitation = { "ns": namespace address, "node": creator's node, "secret": 32 ran
 - **Links:** `libretifs::link` parses and writes the envelope (percent-encoded; unknown kinds and parameters kept). For `ns`, `<what>` is the address without its `retifs-ch:` prefix (`1:<writer>:<read key>`), and **`from`** (repeatable) names nodes to fetch from, since a joining node needs a peer before it has any.
 - `retifs ns link NS [--name LABEL] [--q TERMS]` prints a namespace's link (with this node as `from`, and a reminder that the link reads the whole namespace); `retifs open LINK [--as NAME]` joins it under its `name` (made into a local name) and says what `q` opens on; `ns join NAME LINK` takes a link where it took an address. `share create` and Explorer's **Share with retifs…** give the share's link.
 - A namespace link is about 200 characters (two 64-digit hex keys, a node, a label): a QR code of version 10 or so.
-- Not yet: invitations (write in one step), names and contacts, fingerprint words, QR rendering.
+- **Invitations** (2026-10-21), as decided above, with these details:
+  - The encoding is canonical msgpack `{expires, limits {keys?, until?}, node, ns (writer ‖ read key, bin 64), q?, rights, secret}`, base32 (RFC 4648, lowercase, no padding) in `retifs:invite/<base32>?name=<label>`: about 330 characters.
+  - `id = SHA-256("retifs/v1/invite" ‖ secret)`. The redemption over a Link to `/retifs/invite` is `id ‖ writer key ‖ node ‖ HMAC-SHA256(secret, link id ‖ writer key ‖ node)`: the member's node is in it too (and in the proof), so the creator knows whom to sync with. The answer is a status byte and a message.
+  - The creator spends the invitation before writing the grant (two redemptions at once can't both win) and puts it back if the write fails.
+  - The recipient joins first (reading at once), then redeems; if the creator's node can't be reached, it keeps the invitation and tries every 30 s until it expires. After a redemption it syncs once, so the answer already says it may write.
+  - Vectors: `test-vectors/invite-v1.json`, verified with Python RNS's umsgpack and HMAC (`verify_invite_rns.py`).
+- CLI: `retifs invite create NS [--grant] [--keys K1,K2] [--until DATE] [--expires 1d] [--q TERMS] [--name LABEL]` prints the link; `invite list NS`, `invite cancel NS ID`; `retifs open LINK` accepts it.
+- Live (four nodes, 2026-10-21, 14 checks): the first opener writes at once and its writes reach the creator; a second use, an expired and a withdrawn invitation are refused and grant nothing; a key-limited invitation grants limited write; with the creator stopped, the recipient joins, reads, and gets its grant once the creator is back.
+- Not yet: names and contacts, fingerprint words, QR rendering.
 
 ## Impact on the threat model
 - **Anyone who sees an invitation can read the namespace** (it carries the read key, as an address does). Only the write grant is single-use. Show QR codes in person, and treat a leaked one like a leaked address: revoke and rotate.

@@ -54,6 +54,7 @@ use retifs_core::{
     checkpoint::{state_secret, Checkpoint, Frontier},
     ops::{Op, OpsFile, Right, State, WriterCommit, MAX_CLOCK_AHEAD_MS},
     prolly,
+    invite::{self, Invitation},
     record::{Record, RecordId, Snapshot, Value},
     share,
     open, ChunkToken, Cid, ConvergenceSecret, FileRef,
@@ -70,12 +71,12 @@ use retifs_net::{
         decode_request, encode_bitmap, encode_lease_request, encode_prove, encode_prove_reply,
         encode_lease_status, encode_response, LeaseRequest, LeaseStatus, ReceiptReply, GET_ENDPOINT, HAVE_ENDPOINT, LEASE_ENDPOINT,
         PROVE_ENDPOINT, RECEIPT_ENDPOINT, decode_bitmap, decode_put, encode_have, encode_put, HAVE_PREFIX, MAX_HAVE,
-        MAX_PUT, PUT_ENDPOINT, HEAD_ENDPOINT, API_ENDPOINT, MAX_QUERY_TOKENS, QUERY_ENDPOINT,
+        MAX_PUT, PUT_ENDPOINT, HEAD_ENDPOINT, API_ENDPOINT, MAX_QUERY_TOKENS, QUERY_ENDPOINT, INVITE_ENDPOINT,
     },
     seek::{pull_round, seek_round},
     transport::{PrnsTransport, Transport},
 };
-use retifs_store::{tier, Accept, OwnLease, PeerId, ProofState, Want};
+use retifs_store::{tier, Accept, MadeInvite, OwnLease, PeerId, ProofState, Want};
 use tokio::sync::{mpsc, Notify};
 use retifs_store::{CacheTier, SlabStore};
 use tokio::io::{AsyncRead, AsyncWrite};
@@ -94,6 +95,7 @@ struct Shared {
     stamp_cost: u8,
     /// Requests from own devices over a Link, answered by the daemon (ADR-0019).
     api: mpsc::UnboundedSender<ApiCall>,
+    invites: mpsc::UnboundedSender<InviteCall>,
 }
 
 /// `/retifs/query`: blind index search (ADR-0019). Answers only for an index
@@ -202,6 +204,29 @@ impl RequestEndpoint<Arc<Shared>> for ApiEndpoint {
         };
         let _ = context.state.api.send(call);
         Err(Decline::Ignore) // answered by `api_server`
+    }
+}
+
+/// An invitation redemption that arrived over a Link (ADR-0020), to answer
+/// once the grant is written.
+struct InviteCall {
+    link_id: Vec<u8>,
+    body: Vec<u8>,
+    token: RespondToken,
+}
+
+/// `/retifs/invite`: anyone may redeem an invitation; the proof (bound to
+/// this Link) is what counts.
+struct InviteEndpoint;
+impl RequestEndpoint<Arc<Shared>> for InviteEndpoint {
+    const ENDPOINT_ID: &'static str = INVITE_ENDPOINT;
+    const POLICY: RequestEndpointPolicy = RequestEndpointPolicy::AllowAll;
+
+    async fn handle(context: RequestContext<'_, Arc<Shared>>, _node: &impl PrnsNodeApi) -> Result<(), Decline> {
+        let token = context.respond_token();
+        let call = InviteCall { link_id: token.link_id.as_bytes().to_vec(), body: context.data.to_vec(), token };
+        let _ = context.state.invites.send(call);
+        Err(Decline::Ignore) // answered by `invite_server`
     }
 }
 
@@ -833,6 +858,7 @@ async fn serve(store: Arc<SlabStore>, identity: node::IdentitySecret, endpoint: 
         eprintln!("warning: node identity layout differs from RNS; receipts from this node won't verify");
     }
     let (api_tx, api_rx) = mpsc::unbounded_channel::<ApiCall>();
+    let (invite_tx, invite_rx) = mpsc::unbounded_channel::<InviteCall>();
     let shared = Arc::new(Shared {
         store: store.clone(),
         identity: identity_bytes,
@@ -840,6 +866,7 @@ async fn serve(store: Arc<SlabStore>, identity: node::IdentitySecret, endpoint: 
         pull_wake: Notify::new(),
         stamp_cost: args.stamp_cost,
         api: api_tx,
+        invites: invite_tx,
     });
     // Announces from the whole network arrive here: bounded, and an announce
     // dropped when it's full is harmless (nodes announce again). An unbounded
@@ -861,7 +888,7 @@ async fn serve(store: Arc<SlabStore>, identity: node::IdentitySecret, endpoint: 
         pre_configured_destinations: destinations,
         app_state: shared.clone(),
         storage: GrowableHeap,
-        request_endpoints: request_endpoints![Get, Have, LeaseEndpoint, ReceiptEndpoint, ProveEndpoint, PutEndpoint, HeadEndpoint, ApiEndpoint, QueryEndpoint],
+        request_endpoints: request_endpoints![Get, Have, LeaseEndpoint, ReceiptEndpoint, ProveEndpoint, PutEndpoint, HeadEndpoint, ApiEndpoint, QueryEndpoint, InviteEndpoint],
         on_event: move |event, _state| {
             match event {
                 PrnsEvent::Diagnostic(Diagnostic::AnnounceHeard { destination, hops, .. }) => {
@@ -930,11 +957,21 @@ async fn serve(store: Arc<SlabStore>, identity: node::IdentitySecret, endpoint: 
     tokio::spawn(local_api(endpoint, daemon.clone(), false));
     tokio::spawn(local_api(libretifs::app_endpoint(&args.store), daemon.clone(), true));
     tokio::spawn(api_server(daemon.clone(), handle.clone(), api_rx));
+    tokio::spawn(invite_server(daemon.clone(), handle.clone(), invite_rx));
     tokio::spawn(lease_puller(daemon.clone(), shared.clone()));
     tokio::spawn(lease_upkeep(daemon.clone()));
     tokio::spawn(follower(daemon.clone()));
     tokio::spawn(ns_sync(daemon.clone()));
     tokio::spawn(share_keeper(daemon.clone()));
+    let redeemer = daemon.clone();
+    tokio::spawn(async move {
+        // Invitations whose creator's node wasn't reachable (ADR-0020).
+        let mut tick = tokio::time::interval(Duration::from_secs(30));
+        loop {
+            tick.tick().await;
+            redeem_pending(&redeemer).await;
+        }
+    });
     let watcher = daemon.clone();
     tokio::spawn(async move {
         // Every retifs node is a storage node (ADR-0014). Prns doesn't pass
@@ -1198,6 +1235,96 @@ async fn api_server(d: Arc<Daemon>, handle: PrnsNodeHandle, mut calls: mpsc::Unb
             let bytes = rmp_serde::to_vec_named(&resp).unwrap_or_default();
             handle.respond_owned_packed(call.token, bytes);
         });
+    }
+}
+
+/// Answers invitation redemptions (ADR-0020).
+async fn invite_server(d: Arc<Daemon>, handle: PrnsNodeHandle, mut calls: mpsc::UnboundedReceiver<InviteCall>) {
+    while let Some(call) = calls.recv().await {
+        let d = d.clone();
+        let handle = handle.clone();
+        tokio::spawn(async move {
+            let out = match redeem_here(&d, &call.link_id, &call.body).await {
+                Ok(msg) => [&[0u8][..], msg.as_bytes()].concat(),
+                Err(e) => {
+                    eprintln!("invitation: refused: {e}");
+                    [&[1u8][..], e.as_bytes()].concat()
+                }
+            };
+            handle.respond_owned_packed(call.token, out);
+        });
+    }
+}
+
+/// Redeems one of this node's invitations: pending, unexpired, the proof
+/// good for this Link; then the grant is written and the invitation spent.
+async fn redeem_here(d: &Daemon, link_id: &[u8], body: &[u8]) -> Result<String, String> {
+    let invite::Redemption { id, writer, node, proof } = invite::parse_redeem(body).ok_or("malformed redemption")?;
+    let made = d.store.invite(&id).map_err(|e| e.to_string())?.ok_or("no such invitation here")?;
+    let inv = &made.invitation;
+    if !invite::verify(&inv.secret, link_id, &writer, &node, &proof) {
+        return Err("the proof doesn't match".into());
+    }
+    if made.spent {
+        return Err("this invitation was used already".into());
+    }
+    if inv.expires < now_ms() {
+        return Err("this invitation has expired".into());
+    }
+    // Spent before the grant, so two redemptions at once can't both win.
+    d.store.put_invite(&MadeInvite { spent: true, ..made.clone() }).map_err(|e| e.to_string())?;
+    let rights = if inv.grant { vec![Right::Write, Right::Grant] } else { vec![Right::Write] };
+    let limits = retifs_core::ops::Limits { keys: (!inv.keys.is_empty()).then(|| inv.keys.iter().cloned().collect()), until: inv.until };
+    let op = if limits.is_none() { Op::Grant(writer, rights) } else { Op::GrantLimited(writer, rights, limits) };
+    if let Err(e) = write_ops(d, &made.ns, vec![op]).await {
+        d.store.put_invite(&made).map_err(|e| e.to_string())?;
+        return Err(e);
+    }
+    d.store.add_ns_peers(&made.ns, &[node]).map_err(|e| e.to_string())?;
+    d.ns_wake.notify_one();
+    eprintln!("invitation to {}: granted to writer {}… (node <{}>)", made.ns, &hex(&writer)[..12], hex(&node));
+    Ok(format!("granted: you may write to {}", made.ns))
+}
+
+/// Redeems an invitation this node was given, with its creator's node over
+/// a Link. Done: the invitation is forgotten; refused for good (used,
+/// expired, unknown): too; unreachable: kept for the next sync.
+async fn redeem_there(d: &Daemon, ns: &str, inv: &Invitation) -> Result<String, String> {
+    let (_, writer, _) = chains(d, ns, false)?;
+    let node: [u8; 16] = parse_peers(std::slice::from_ref(&d.node_hex))?[0];
+    let link = d.link_to(&inv.node).await?;
+    let body = invite::redeem_request(&inv.secret, link.as_bytes(), &writer, &node);
+    let answer = match d.ask(link, INVITE_ENDPOINT, body).await {
+        Ok(a) => a,
+        Err(e) => {
+            d.drop_link(&inv.node);
+            return Err(e);
+        }
+    };
+    let message = String::from_utf8_lossy(answer.get(1..).unwrap_or_default()).into_owned();
+    d.store.remove_redeem(ns).map_err(|e| e.to_string())?;
+    match answer.first() {
+        Some(0) => {
+            d.ns_wake.notify_one();
+            Ok(message)
+        }
+        _ => Err(format!("the invitation was refused: {message}")),
+    }
+}
+
+/// Retries the invitations this node still has to redeem (their creators
+/// were unreachable), forgetting expired ones.
+async fn redeem_pending(d: &Daemon) {
+    for (ns, inv) in d.store.redeems().unwrap_or_default() {
+        if inv.expires < now_ms() {
+            eprintln!("invitation to {ns}: expired before its creator's node could be reached");
+            let _ = d.store.remove_redeem(&ns);
+            continue;
+        }
+        match redeem_there(d, &ns, &inv).await {
+            Ok(m) => eprintln!("invitation to {ns}: {m}"),
+            Err(e) => eprintln!("invitation to {ns}: {e}"),
+        }
     }
 }
 
@@ -1734,6 +1861,98 @@ async fn handle(d: &Daemon, req: Request) -> Result<Response, String> {
             }
             transaction(d, &source, vec![TxStep::Delete { id }]).await?;
             Ok(Response::Done)
+        }
+
+        Request::InviteCreate { ns, grant, keys, until, expires_ms, q, label } => {
+            writable(&ns)?;
+            if d.store.ns_info(&ns).map_err(|e| e.to_string())?.is_none() {
+                return Err(format!("no namespace {ns}"));
+            }
+            let merged = materialize(d, &ns)?;
+            let (_, own, _) = chains(d, &ns, false)?;
+            if !merged.writers.get(&own).is_some_and(|r| r.contains(&Right::Grant)) {
+                return Err(format!("this node may not grant in {ns}, so it can't invite"));
+            }
+            let mut secret = [0u8; 32];
+            getrandom::fill(&mut secret).expect("OS entropy");
+            let inv = Invitation {
+                ns: current_addr(d, &ns)?,
+                node: parse_peers(std::slice::from_ref(&d.node_hex))?[0],
+                secret,
+                grant,
+                keys,
+                until,
+                expires: now_ms() + expires_ms.unwrap_or(24 * 3600 * 1000),
+                q,
+            };
+            d.store.put_invite(&MadeInvite { ns: ns.clone(), invitation: inv.clone(), spent: false }).map_err(|e| e.to_string())?;
+            let link = libretifs::link::Link { kind: "invite".into(), what: inv.to_text(), params: vec![("name".into(), label.unwrap_or(ns))] };
+            Ok(Response::Link { link: link.to_string() })
+        }
+
+        Request::InviteList { ns } => {
+            writable(&ns)?;
+            let invites = d
+                .store
+                .invites()
+                .map_err(|e| e.to_string())?
+                .into_iter()
+                .filter(|m| m.ns == ns)
+                .map(|m| libretifs::InviteInfo {
+                    id: hex(&m.invitation.id()),
+                    grant: m.invitation.grant,
+                    keys: m.invitation.keys.clone(),
+                    until: m.invitation.until,
+                    expires: m.invitation.expires,
+                    spent: m.spent,
+                })
+                .collect();
+            Ok(Response::Invites { invites })
+        }
+
+        Request::InviteCancel { ns, id } => {
+            writable(&ns)?;
+            let id = parse_writer(&id).map_err(|_| "an invitation ID is 64 hex digits".to_string())?;
+            match d.store.invite(&id).map_err(|e| e.to_string())? {
+                Some(m) if m.ns == ns => {
+                    d.store.remove_invite(&id).map_err(|e| e.to_string())?;
+                    Ok(Response::Done)
+                }
+                _ => Err(format!("no such invitation for {ns}")),
+            }
+        }
+
+        Request::InviteAccept { ns, link } => {
+            writable(&ns)?;
+            let l = libretifs::link::Link::parse(&link)?;
+            if l.kind != "invite" {
+                return Err(format!("a retifs:{} link isn't an invitation", l.kind));
+            }
+            let inv = Invitation::from_text(&l.what).map_err(|e| format!("not a valid invitation: {e}"))?;
+            if inv.expires < now_ms() {
+                return Err("this invitation has expired".into());
+            }
+            // Joined first: the address reads at once, whatever the grant does.
+            if d.store.ns_info(&ns).map_err(|e| e.to_string())?.is_none() {
+                let join = Request::NsJoin { ns: ns.clone(), address: inv.ns.to_string(), from: vec![hex(&inv.node)], lazy: false };
+                Box::pin(handle(d, join)).await?;
+            } else if current_addr(d, &ns)?.writer != inv.ns.writer {
+                return Err(format!("{ns} here is another namespace"));
+            }
+            d.store.put_redeem(&ns, &inv).map_err(|e| e.to_string())?;
+            match redeem_there(d, &ns, &inv).await {
+                Ok(m) => {
+                    eprintln!("invitation to {ns}: {m}");
+                    // The grant is in the creator's chain: fetched now, so the
+                    // answer can say this node may write.
+                    if let Err(e) = sync_ns(d, &ns).await {
+                        eprintln!("ns {ns}: {e}");
+                    }
+                }
+                Err(e) if e.starts_with("the invitation was refused") => return Err(e),
+                Err(e) => eprintln!("invitation to {ns}: {e}; trying again on the next sync"),
+            }
+            Ok(Response::Namespace(ns_view(d, &ns)?))
         }
 
         Request::NsCheckpoint { ns } => {

@@ -1,0 +1,50 @@
+{
+  "about": "ADR-0020: an invitation is canonical msgpack {expires, limits {keys?, until?}, node, ns (writer || read key), q?, rights, secret}, base32 (RFC 4648, lowercase, no padding) in retifs:invite/ links; id = SHA-256(\"retifs/v1/invite\" || secret); a redemption is id || writer || node || HMAC-SHA256(secret, link id || writer || node)",
+  "cases": [
+    {
+      "encoded": "86a765787069726573cf000001a15f494600a66c696d69747380a46e6f6465c4109ad7e8497cfef414d3c3ee471f727654a26e73c440c86b8e82d64ff7ec813d314d40d2660291ac95316cebb78b9acd4454221818c3ac1133688a70ade6727df77bdb512a06e5501d3d90114894818bc18845cf4235a672696768747391a57772697465a6736563726574c4204cb92a0e1786543d1ced7cf7a376bd787a6dfe42f1ed6218b3c1d1d38e25fa31",
+      "fields": {
+        "expires": 1792600000000,
+        "grant": false,
+        "keys": [],
+        "node": "9ad7e8497cfef414d3c3ee471f727654",
+        "ns": "c86b8e82d64ff7ec813d314d40d2660291ac95316cebb78b9acd4454221818c3ac1133688a70ade6727df77bdb512a06e5501d3d90114894818bc18845cf4235",
+        "q": null,
+        "secret": "4cb92a0e1786543d1ced7cf7a376bd787a6dfe42f1ed6218b3c1d1d38e25fa31",
+        "until": null
+      },
+      "id": "2810655096d91b010e15ca95735d1c20d5321ab9690ad0ed96eb08bfb4cb8a0d",
+      "redeem": {
+        "link_id": "04e709a9a8142064f6e870370e52d8be",
+        "node": "e7fd85b121b7a77b65e3feda57ad4c64",
+        "request": "2810655096d91b010e15ca95735d1c20d5321ab9690ad0ed96eb08bfb4cb8a0dff0a61e4ea16d48ec7bebc6b048da44accf9ac95a4bd0763e40f02c3f4579b05e7fd85b121b7a77b65e3feda57ad4c6449d51d7aae1a747ffa1c016ae8e907f5a044d428ce74c7618ce18dbe14e21754",
+        "writer": "ff0a61e4ea16d48ec7bebc6b048da44accf9ac95a4bd0763e40f02c3f4579b05"
+      },
+      "text": "q2twk6dqnfzgk46paaaadik7jfdabjtmnfwws5dtqcsg433emxcbbgwx5bexz7xuctj4h3shd5zhmvfcnzz4iqginohifvsp67wicpjrjvanezqcsgwjkmlm5o3yxgwnirkcegayyowbcm3irjyk3ztspx3xxw2rfidokua5hwibcseuqgf4dccfz5bdljtsnftwq5dtsgsxo4tjors2m43fmnzgk5geebglskqoc6dfipi45v6ppi3wxv4hu3p6ily62yqywpa5du4oex5dc"
+    },
+    {
+      "encoded": "87a765787069726573cf000001a1646fa200a66c696d69747382a46b65797392a57469746c65a840636f6e74656e74a5756e74696ccf000001a3185c5000a46e6f6465c410a2571092ead5cd6ca953ffa4981b51a9a26e73c440371c9d645a546b483e66515d7a7776af376a84251f4602b38b2134c4dc55bfedc012af6024dab226e45bb5be783c1453f1e93d8ab3cd6492e141ca1ea3459e9da171bb747970653d6576656e742c2063616c656e6461723d66616d696c79a672696768747392a56772616e74a57772697465a6736563726574c420dfa8676eed207d46b3355a87807c367b73dc2529c1da9fa4079678884e6d009e",
+      "fields": {
+        "expires": 1792686400000,
+        "grant": true,
+        "keys": [
+          "title",
+          "@content"
+        ],
+        "node": "a2571092ead5cd6ca953ffa4981b51a9",
+        "ns": "371c9d645a546b483e66515d7a7776af376a84251f4602b38b2134c4dc55bfedc012af6024dab226e45bb5be783c1453f1e93d8ab3cd6492e141ca1ea3459e9d",
+        "q": "type=event, calendar=family",
+        "secret": "dfa8676eed207d46b3355a87807c367b73dc2529c1da9fa4079678884e6d009e",
+        "until": 1800000000000
+      },
+      "id": "d2077c813e757344c0bd2cf8ea0c62d586e4886186f86ec81cf7fc7007e1fe1c",
+      "redeem": {
+        "link_id": "0b1410f01bcbdac164ac6c412f34c0c6",
+        "node": "d1e47d3bbb5150bbafcef6fd0f2bf6cd",
+        "request": "d2077c813e757344c0bd2cf8ea0c62d586e4886186f86ec81cf7fc7007e1fe1c59889a15a11b26572456c2f36d81480b314b3f5e8b353de2d47ba5ee64f26e08d1e47d3bbb5150bbafcef6fd0f2bf6cd4e98cec6bdcc92e57499ec76d0266faaa64f6dfd51fdec2311bb02d709421c1f",
+        "writer": "59889a15a11b26572456c2f36d81480b314b3f5e8b353de2d47ba5ee64f26e08"
+      },
+      "text": "q6twk6dqnfzgk46paaaadilen6rabjtmnfwws5dtqksgwzlzoojkk5djorwglkcamnxw45dfnz2kk5looruwztyaaaa2ggc4kaaki3tpmrs4iefck4ijf2wvzvwksu77usmbwunjujxhhrcag4oj2zc2krvuqptgkfoxu53wv43wvbbfd5dafm4lee2mjxcvx7w4aevpmasnvmrg4rn3lptyhqkfh4pjhwflhtleslqudsq6uncz5hnbog5xi6lqmu6wk5tfnz2cyiddmfwgk3temfzd2ztbnvuwy6ngojuwo2duoojkkz3smfxhjjlxojuxizngonswg4tfotccbx5im5xo2id5i2ztkwuhqb6dm63t3qsstqo2t6sapftyrbhg2ae6"
+    }
+  ]
+}

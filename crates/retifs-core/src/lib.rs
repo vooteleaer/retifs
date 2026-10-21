@@ -10,6 +10,7 @@ pub mod chunk;
 pub mod chunker;
 pub mod cid;
 pub mod index;
+pub mod invite;
 pub mod keywrap;
 pub mod lease;
 pub mod ops;

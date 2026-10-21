@@ -30,6 +30,7 @@
 //!     retifs [--store DIR] ns grant NS WRITER [--grant] [--keys K1,K2,@content,@delete] [--until YYYY-MM-DD|+30d] [--from NODE]... | ns revoke NS WRITER
 //!     retifs [--store DIR] share create NAME --from NS [TERM]... [--id ID]... [--omit KEY]... | share list NS | share rm NS ID
 //!     retifs [--store DIR] ns link NS [--name LABEL] [--q TERMS] | open LINK [--as NAME]
+//!     retifs [--store DIR] invite create NS [--grant] [--keys K1,K2] [--until DATE] [--expires 1d] [--q TERMS] [--name LABEL] | invite list NS | invite cancel NS ID
 //!
 //! Several writers per namespace (ADR-0017): a member joins with the address
 //! and shows its writer key; the creator grants it; members sync each other.
@@ -73,7 +74,8 @@ fn usage() -> ! {
          retifs [--store DIR] ns address NS | ns info NS | ns checkpoint NS | ns search NS | ns verify NS | ns keep NS all|rules | ns join NAME ADDRESS [--from NODE]... [--lazy]\n\
          retifs [--store DIR] ns grant NS WRITER [--grant] [--from NODE]... | ns revoke NS WRITER\n\
          retifs [--store DIR] share create NAME --from NS [TERM]... [--id ID]... [--omit KEY]... | share list NS | share rm NS ID\n\
-         retifs [--store DIR] ns link NS [--name LABEL] [--q TERMS] | open LINK [--as NAME] | ns join NAME LINK"
+         retifs [--store DIR] ns link NS [--name LABEL] [--q TERMS] | open LINK [--as NAME] | ns join NAME LINK\n\
+         retifs [--store DIR] invite create NS [--grant] [--keys K1,K2] [--until DATE] [--expires 1d] [--q TERMS] [--name LABEL] | invite list NS | invite cancel NS ID"
     );
     std::process::exit(2);
 }
@@ -506,12 +508,69 @@ async fn main() {
                 _ => usage(),
             }
         }
+        "invite" => {
+            let sub = it.next().unwrap_or_else(|| usage());
+            let ns = it.next().unwrap_or_else(|| usage());
+            let rest: Vec<String> = it.collect();
+            let opt = |flag: &str| rest.windows(2).find(|w| w[0] == flag).map(|w| w[1].clone());
+            let req = match sub.as_str() {
+                "create" => libretifs::Request::InviteCreate {
+                    ns: ns.clone(),
+                    grant: rest.iter().any(|a| a == "--grant"),
+                    keys: opt("--keys").map(|k| k.split(',').map(|k| k.trim().to_string()).filter(|k| !k.is_empty()).collect()).unwrap_or_default(),
+                    until: opt("--until").map(|u| parse_time(&u).unwrap_or_else(|e| fail(e))),
+                    expires_ms: opt("--expires").map(|e| parse_duration_ms(&e).unwrap_or_else(|| fail(format!("--expires takes e.g. 30m, 2h or 7d, not {e}")))),
+                    q: opt("--q"),
+                    label: opt("--name"),
+                },
+                "list" => libretifs::Request::InviteList { ns: ns.clone() },
+                "cancel" => libretifs::Request::InviteCancel { ns: ns.clone(), id: rest.first().cloned().unwrap_or_else(|| usage()) },
+                _ => usage(),
+            };
+            match client.call(req).await.unwrap_or_else(|e| fail(e)) {
+                libretifs::Response::Link { link } => {
+                    println!("{link}");
+                    eprintln!("(the first to open it may write to {ns}; anyone who sees it can read {ns}: pass it in person or end to end)");
+                }
+                libretifs::Response::Invites { invites } => {
+                    let now = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map(|d| d.as_millis() as u64).unwrap_or(0);
+                    for i in &invites {
+                        let state = if i.spent { "used".to_string() } else if i.expires < now { "expired".to_string() } else { format!("pending, {} min left", (i.expires - now) / 60_000) };
+                        let mut rights = if i.grant { "write+grant".to_string() } else { "write".to_string() };
+                        if !i.keys.is_empty() {
+                            rights.push_str(&format!(" keys {}", i.keys.join(",")));
+                        }
+                        println!("{}  {rights}  {state}", i.id);
+                    }
+                    println!("{} invitation(s)", invites.len());
+                }
+                libretifs::Response::Done => println!("invitation withdrawn"),
+                libretifs::Response::Error { message } => fail(message),
+                _ => fail("unexpected response"),
+            }
+        }
         "open" => {
             // Opens a retifs: link (ADR-0020). A namespace link joins the
             // namespace (reading) under the link's name or --as NAME.
             let text = it.next().unwrap_or_else(|| usage());
             let rest: Vec<String> = it.collect();
             let link = libretifs::link::Link::parse(&text).unwrap_or_else(|e| fail(e));
+            let name = rest
+                .windows(2)
+                .find(|w| w[0] == "--as")
+                .map(|w| w[1].clone())
+                .unwrap_or_else(|| libretifs::link::suggest_name(link.param("name").unwrap_or("shared")));
+            if link.kind == "invite" {
+                match client.call(libretifs::Request::InviteAccept { ns: name.clone(), link: text.clone() }).await.unwrap_or_else(|e| fail(e)) {
+                    libretifs::Response::Namespace(v) => {
+                        let can_write = v.writers.iter().any(|(w, r)| *w == v.own_writer && r.iter().any(|r| r == "write"));
+                        println!("joined {name}: {}", if can_write { "you may write to it" } else { "reading now; writing once the invitation's node grants it (on its own, when reachable)" });
+                    }
+                    libretifs::Response::Error { message } => fail(message),
+                    _ => fail("unexpected response"),
+                }
+                return;
+            }
             let Some(address) = link.ns_address() else {
                 println!("a retifs:{} link ({}); this version of retifs opens namespace links", link.kind, link.what);
                 for (k, v) in &link.params {
@@ -519,11 +578,6 @@ async fn main() {
                 }
                 return;
             };
-            let name = rest
-                .windows(2)
-                .find(|w| w[0] == "--as")
-                .map(|w| w[1].clone())
-                .unwrap_or_else(|| libretifs::link::suggest_name(link.param("name").unwrap_or("shared")));
             let req = libretifs::Request::NsJoin { ns: name.clone(), address, from: link.params_named("from").map(String::from).collect(), lazy: false };
             match client.call(req).await.unwrap_or_else(|e| fail(e)) {
                 libretifs::Response::Namespace(_) | libretifs::Response::Done => {}
@@ -703,6 +757,20 @@ fn attr(arg: &str) -> (String, libretifs::AttrValue) {
 
 /// A point in time for `--until`: `YYYY-MM-DD` (UTC midnight), `+30d` /
 /// `+12h` / `+90m` from now, or milliseconds since the epoch.
+/// `30m`, `2h`, `7d` (or plain seconds) as milliseconds.
+fn parse_duration_ms(s: &str) -> Option<u64> {
+    let (n, unit) = s.trim().split_at(s.trim().find(|c: char| !c.is_ascii_digit()).unwrap_or(s.trim().len()));
+    let n: u64 = n.parse().ok()?;
+    let secs = match unit {
+        "" | "s" => 1,
+        "m" => 60,
+        "h" => 3600,
+        "d" => 86_400,
+        _ => return None,
+    };
+    Some(n * secs * 1000)
+}
+
 fn parse_time(s: &str) -> Result<u64, String> {
     let now = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map(|d| d.as_millis() as u64).unwrap_or(0);
     if let Some(rel) = s.strip_prefix('+') {

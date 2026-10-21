@@ -66,6 +66,9 @@ pub const API_ENDPOINT: &str = "/retifs/api";
 /// token (16)*`; the answer is empty unless this node holds that index and
 /// the proof of its search secret is good for this link.
 pub const QUERY_ENDPOINT: &str = "/retifs/query";
+/// Redeems an invitation (ADR-0020): `id ‖ writer ‖ node ‖ proof` in, a
+/// status byte (0 granted) and a message out.
+pub const INVITE_ENDPOINT: &str = "/retifs/invite";
 /// At most this many tokens per query.
 pub const MAX_QUERY_TOKENS: usize = 16;
 /// 16 chunks of up to 16 KiB: one resource of about 256 KiB.

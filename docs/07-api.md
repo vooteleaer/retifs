@@ -15,7 +15,7 @@ The implemented local API is the `Request`/`Response` enums in `crates/libretifs
 | §9 Live queries | `Watch { ns, since, timeout_ms }`: a long poll per namespace | no per-query events; clients re-query |
 | §10 Transactions, history | `Transaction` (create, set, delete steps, one commit), `RecordHistory`, `Query { at }` | |
 | §11 Availability | `Status`, `Want`, `NsKeep`, keep rules as records | a miss waits up to the client's wait, then fails (`EIO` in the mount), not `Unavailable` at once |
-| §12 Sharing | `NsGrant` (rights, `keys`, `until`), `NsRevoke`, channels (`ChannelCreate`, `Follow`, …), shares (`ShareCreate`, `ShareDelete`) | a filtered share is a namespace filled by the owner's nodes, not a projection with re-wrapped keys ([ADR-0021](adr/0021-shares.md)) |
+| §12 Sharing | `NsGrant` (rights, `keys`, `until`), `NsRevoke`, channels (`ChannelCreate`, `Follow`, …), shares (`ShareCreate`, `ShareDelete`), invitations (`InviteCreate`, `InviteList`, `InviteCancel`, `InviteAccept`, [ADR-0020](adr/0020-sharing-names-invitations.md)) | a filtered share is a namespace filled by the owner's nodes, not a projection with re-wrapped keys ([ADR-0021](adr/0021-shares.md)) |
 | §14 Wire protocol | the same requests over an RNS Link (`/retifs/api`) for the user's own devices; `/retifs/query` for search nodes ([ADR-0019](adr/0019-remote-query-and-blind-index.md)) | own nodes get the full API; search nodes only blind index lookups |
 | §15 C ABI | not yet | |
 | §16 POSIX mapping | `retifs-mount` ([ADR-0002](adr/0002-os-integration.md)) | |
