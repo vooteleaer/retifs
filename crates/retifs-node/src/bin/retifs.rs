@@ -29,6 +29,7 @@
 //!     retifs [--store DIR] ns join NAME ADDRESS [--from NODE]... [--lazy]
 //!     retifs [--store DIR] ns grant NS WRITER [--grant] [--keys K1,K2,@content,@delete] [--until YYYY-MM-DD|+30d] [--from NODE]... | ns revoke NS WRITER
 //!     retifs [--store DIR] share create NAME --from NS [TERM]... [--id ID]... [--omit KEY]... | share list NS | share rm NS ID
+//!     retifs [--store DIR] ns link NS [--name LABEL] [--q TERMS] | open LINK [--as NAME]
 //!
 //! Several writers per namespace (ADR-0017): a member joins with the address
 //! and shows its writer key; the creator grants it; members sync each other.
@@ -71,7 +72,8 @@ fn usage() -> ! {
          retifs [--store DIR] rec get NS ID | rec rm NS ID | rec history NS ID | rec import NS < LINES | query NS[,NS]... [--at VERSION] [TERM]... [--search NODE]\n\
          retifs [--store DIR] ns address NS | ns info NS | ns checkpoint NS | ns search NS | ns verify NS | ns keep NS all|rules | ns join NAME ADDRESS [--from NODE]... [--lazy]\n\
          retifs [--store DIR] ns grant NS WRITER [--grant] [--from NODE]... | ns revoke NS WRITER\n\
-         retifs [--store DIR] share create NAME --from NS [TERM]... [--id ID]... [--omit KEY]... | share list NS | share rm NS ID"
+         retifs [--store DIR] share create NAME --from NS [TERM]... [--id ID]... [--omit KEY]... | share list NS | share rm NS ID\n\
+         retifs [--store DIR] ns link NS [--name LABEL] [--q TERMS] | open LINK [--as NAME] | ns join NAME LINK"
     );
     std::process::exit(2);
 }
@@ -365,12 +367,36 @@ async fn main() {
                 "keep" => libretifs::Request::NsKeep { ns, mode: rest.first().cloned().unwrap_or_else(|| usage()) },
                 "verify" => libretifs::Request::NsVerify { ns },
                 "search" => libretifs::Request::NsSearch { ns },
-                "join" => libretifs::Request::NsJoin {
-                    ns,
-                    address: rest.first().cloned().unwrap_or_else(|| usage()),
-                    from: froms(&rest),
-                    lazy: rest.iter().any(|a| a == "--lazy"),
-                },
+                "link" => {
+                    // A read link (ADR-0020): the address, this node to fetch from, a label, a query.
+                    let address = match client.call(libretifs::Request::NsAddress { ns: ns.clone() }).await.unwrap_or_else(|e| fail(e)) {
+                        libretifs::Response::Channel { address } => address,
+                        libretifs::Response::Error { message } => fail(message),
+                        _ => fail("unexpected response"),
+                    };
+                    let (node, _, _) = client.ping().await.unwrap_or_else(|e| fail(e));
+                    let opt = |flag: &str| rest.windows(2).find(|w| w[0] == flag).map(|w| w[1].clone());
+                    let label = opt("--name").unwrap_or_else(|| ns.clone());
+                    let mut link = libretifs::link::Link::namespace(&address, &[node], Some(&label));
+                    if let Some(q) = opt("--q") {
+                        link.params.push(("q".into(), q));
+                    }
+                    println!("{link}");
+                    eprintln!("(anyone with this link can read all of {ns}; to give only part of it, make a share)");
+                    return;
+                }
+                "join" => {
+                    let what = rest.first().cloned().unwrap_or_else(|| usage());
+                    let (address, mut from) = match libretifs::link::Link::parse(&what) {
+                        Ok(link) => (
+                            link.ns_address().unwrap_or_else(|| fail(format!("a retifs:{} link isn't a namespace", link.kind))),
+                            link.params_named("from").map(String::from).collect::<Vec<_>>(),
+                        ),
+                        Err(_) => (what, Vec::new()),
+                    };
+                    from.extend(froms(&rest));
+                    libretifs::Request::NsJoin { ns, address, from, lazy: rest.iter().any(|a| a == "--lazy") }
+                }
                 "grant" => libretifs::Request::NsGrant {
                     ns,
                     writer: rest.first().cloned().unwrap_or_else(|| usage()),
@@ -435,9 +461,10 @@ async fn main() {
                     let req = libretifs::Request::ShareCreate { source, name, terms, ids: opt("--id"), omit: opt("--omit") };
                     match client.call(req).await.unwrap_or_else(|e| fail(e)) {
                         libretifs::Response::Namespace(v) => {
+                            let (node, _, _) = client.ping().await.unwrap_or_else(|e| fail(e));
                             println!("share {}: {} record(s)", v.name, v.records);
-                            println!("  address {}", v.address);
-                            println!("  members join it with: retifs ns join {} {} --from <this node>", v.name, v.address);
+                            println!("  link {}", libretifs::link::Link::namespace(&v.address, &[node], Some(&v.name)));
+                            println!("  (whoever has the link reads the share: retifs open LINK)");
                         }
                         libretifs::Response::Error { message } => fail(message),
                         _ => fail("unexpected response"),
@@ -477,6 +504,35 @@ async fn main() {
                     }
                 }
                 _ => usage(),
+            }
+        }
+        "open" => {
+            // Opens a retifs: link (ADR-0020). A namespace link joins the
+            // namespace (reading) under the link's name or --as NAME.
+            let text = it.next().unwrap_or_else(|| usage());
+            let rest: Vec<String> = it.collect();
+            let link = libretifs::link::Link::parse(&text).unwrap_or_else(|e| fail(e));
+            let Some(address) = link.ns_address() else {
+                println!("a retifs:{} link ({}); this version of retifs opens namespace links", link.kind, link.what);
+                for (k, v) in &link.params {
+                    println!("  {k} = {v}");
+                }
+                return;
+            };
+            let name = rest
+                .windows(2)
+                .find(|w| w[0] == "--as")
+                .map(|w| w[1].clone())
+                .unwrap_or_else(|| libretifs::link::suggest_name(link.param("name").unwrap_or("shared")));
+            let req = libretifs::Request::NsJoin { ns: name.clone(), address, from: link.params_named("from").map(String::from).collect(), lazy: false };
+            match client.call(req).await.unwrap_or_else(|e| fail(e)) {
+                libretifs::Response::Namespace(_) | libretifs::Response::Done => {}
+                libretifs::Response::Error { message } => fail(message),
+                _ => {}
+            }
+            println!("joined {name}: it fills in as it syncs (retifs query {name})");
+            if let Some(q) = link.param("q") {
+                println!("the link opens on: retifs query {name} {}", q.split(',').map(|t| format!("'{}'", t.trim())).collect::<Vec<_>>().join(" "));
             }
         }
         "app" => {

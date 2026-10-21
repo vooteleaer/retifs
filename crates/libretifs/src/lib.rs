@@ -14,6 +14,7 @@
 
 #[cfg(unix)]
 pub mod fdpass;
+pub mod link;
 
 use std::{
     io,

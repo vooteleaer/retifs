@@ -93,21 +93,6 @@ fn sync_root_of(path: &Path) -> Option<(String, PathBuf)> {
     Some((account.to_string_lossy(), root))
 }
 
-/// A namespace name from a file or folder name: lowercase letters, digits
-/// and dashes.
-fn share_name(base: &str) -> String {
-    let mut out = String::new();
-    for c in base.chars().flat_map(char::to_lowercase) {
-        if c.is_alphanumeric() {
-            out.push(c);
-        } else if !out.ends_with('-') {
-            out.push('-');
-        }
-    }
-    let out = out.trim_matches('-').to_string();
-    if out.is_empty() { "share".into() } else { out }
-}
-
 /// Shares the file or folder at `path`: what "Share with retifs…" runs.
 /// Shows the outcome in a message box (or prints it, with
 /// `RETIFS_NO_DIALOG` set).
@@ -161,7 +146,7 @@ fn make_share(store: &Path, path: &Path, within: Option<(String, PathBuf)>) -> R
             Response::Names { names } => names,
             _ => Vec::new(),
         };
-        let wanted = share_name(&base);
+        let wanted = libretifs::link::suggest_name(&base);
         let name = (1..).map(|i| if i == 1 { wanted.clone() } else { format!("{wanted}-{i}") }).find(|n| !taken.contains(n)).unwrap();
         let req = Request::ShareCreate { source: ns.clone(), name: name.clone(), terms, ids, omit: vec![] };
         let view = match client.call(req).await.map_err(|e| e.to_string())? {
@@ -173,12 +158,12 @@ fn make_share(store: &Path, path: &Path, within: Option<(String, PathBuf)>) -> R
             Response::Pong { node, .. } => node,
             _ => String::new(),
         };
-        let join = format!("retifs ns join {name} {} --from {node}", view.address);
-        let copied = copy_to_clipboard(&join).is_ok();
+        let link = libretifs::link::Link::namespace(&view.address, &[node], Some(&base)).to_string();
+        let copied = copy_to_clipboard(&link).is_ok();
         Ok(format!(
             "\u{201c}{base}\u{201d} is shared as {name} ({} record{}), kept up to date while it changes.\n\n\
-             To give it to someone, send them this{}:\n\n{join}\n\n\
-             They can read it; nothing else of {ns} is in it.",
+             To give it to someone, send them this link{}:\n\n{link}\n\n\
+             They open it with retifs (retifs open LINK). They can read it; nothing else of {ns} is in it.",
             view.records,
             if view.records == 1 { "" } else { "s" },
             if copied { " (it's on the clipboard)" } else { "" },
@@ -193,15 +178,4 @@ fn copy_to_clipboard(text: &str) -> std::io::Result<()> {
     clip.stdin.take().unwrap().write_all(text.as_bytes())?;
     clip.wait()?;
     Ok(())
-}
-
-#[cfg(test)]
-mod tests {
-    #[test]
-    fn share_names() {
-        assert_eq!(super::share_name("Prangli 2026"), "prangli-2026");
-        assert_eq!(super::share_name("Boat (1).jpg"), "boat-1-jpg");
-        assert_eq!(super::share_name("---"), "share");
-        assert_eq!(super::share_name("Õunad"), "õunad");
-    }
 }

@@ -106,12 +106,12 @@ On Windows the tree is a folder in Explorer, with files fetched when opened and 
 As websites, one origin per namespace, read-only: `systemctl --user enable --now retifs-gateway`, then open <http://localhost:8740/>.
 
 **Sharing a namespace** with another machine:
-1. On your machine: `retifs ns address photos`.
-2. On theirs: `retifs ns join photos <address> --from <your node>`. This prints their writer key.
+1. On your machine: `retifs ns link photos` prints a `retifs:ns/…` link (the address and your node).
+2. On theirs: `retifs open <link>` joins it, reading. To write too, they show their writer key (`retifs ns info photos`).
 3. On yours: `retifs ns grant photos <their key> --from <their node>`.
 4. Both now write and sync. Each node pulls everything by default; for a small device, `retifs ns keep photos rules` and tag what it should keep: `keep:<device>=true`, or a keep-rule record.
 
-**Sharing part of a namespace** (an album, a folder): `retifs share create prangli --from photos 'album=Prangli 2026' --omit geo` makes a namespace `prangli` holding just those records (without `geo`), kept up to date by your nodes; give its address to whoever should read it (`retifs ns join prangli <address> --from <your node>`). `retifs share list photos` and `share rm` list and end shares.
+**Sharing part of a namespace** (an album, a folder): `retifs share create prangli --from photos 'album=Prangli 2026' --omit geo` makes a namespace `prangli` holding just those records (without `geo`), kept up to date by your nodes, and prints its link for whoever should read it (`retifs open <link>`). `retifs share list photos` and `share rm` list and end shares.
 
 ## Roadmap
 

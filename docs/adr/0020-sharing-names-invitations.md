@@ -58,6 +58,12 @@ invitation = { "ns": namespace address, "node": creator's node, "secret": 32 ran
 - **Bound to the link:** the proof can't be replayed on another link, and it names the writer key, so a relay can't swap in its own.
 - **Read-only shares** need no invitation: `retifs:ns/…` is enough.
 
+## Implementation status (2026-10-21)
+- **Links:** `libretifs::link` parses and writes the envelope (percent-encoded; unknown kinds and parameters kept). For `ns`, `<what>` is the address without its `retifs-ch:` prefix (`1:<writer>:<read key>`), and **`from`** (repeatable) names nodes to fetch from, since a joining node needs a peer before it has any.
+- `retifs ns link NS [--name LABEL] [--q TERMS]` prints a namespace's link (with this node as `from`, and a reminder that the link reads the whole namespace); `retifs open LINK [--as NAME]` joins it under its `name` (made into a local name) and says what `q` opens on; `ns join NAME LINK` takes a link where it took an address. `share create` and Explorer's **Share with retifs…** give the share's link.
+- A namespace link is about 200 characters (two 64-digit hex keys, a node, a label): a QR code of version 10 or so.
+- Not yet: invitations (write in one step), names and contacts, fingerprint words, QR rendering.
+
 ## Impact on the threat model
 - **Anyone who sees an invitation can read the namespace** (it carries the read key, as an address does). Only the write grant is single-use. Show QR codes in person, and treat a leaked one like a leaked address: revoke and rotate.
 - **Display names are claims:** a node can call itself anything. Petnames and fingerprint words are what to rely on.
