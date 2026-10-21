@@ -68,7 +68,7 @@ See the [architecture](docs/01-architecture.md) for details.
 
 ## Try it
 
-retifs runs on Linux (Haiku later). The daemon, `retifsd`, attaches to the machine's Reticulum shared instance, so start [prnsd](https://github.com/KenAKAFrosty/Prns) or Python `rnsd` first.
+retifs runs on Linux and Windows (Haiku later). The daemon, `retifsd`, attaches to the machine's Reticulum shared instance, so start [prnsd](https://github.com/KenAKAFrosty/Prns) or Python `rnsd` first.
 
 retifs builds against Prns 0.3.8, which isn't on crates.io yet. Check it out next to retifs (Cargo can't fetch the Prns repository on Windows: its paths are too long):
 
@@ -81,6 +81,7 @@ git -C Prns-0.3.8 checkout v0.3.8-hotfix.1
 cargo install --path crates/retifs-node      # retifsd and the retifs CLI
 cargo install --path crates/retifs-fuse      # retifs-mount (needs fuse3)
 cargo install --path crates/retifs-gateway   # retifs-gateway
+cargo install --path crates/retifs-cloudfiles   # on Windows: retifs-cloudfiles
 cp packaging/systemd/*.service ~/.config/systemd/user/
 systemctl --user enable --now retifsd
 ```
@@ -99,6 +100,8 @@ As a file tree (attributes are `user.retifs.*` xattrs; `.query/<terms>/` lists m
 systemctl --user enable --now retifs-mount@photos   # ~/retifs/photos
 ls ~/retifs/photos/.query/album=Prangli\ 2026/
 ```
+
+On Windows the tree is a folder in Explorer, with files fetched when opened and "Always keep on this device" setting this device's keep tag (read-only for now): `retifs-cloudfiles photos %USERPROFILE%\retifs\photos`.
 
 As websites, one origin per namespace, read-only: `systemctl --user enable --now retifs-gateway`, then open <http://localhost:8740/>.
 

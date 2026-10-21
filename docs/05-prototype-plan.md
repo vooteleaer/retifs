@@ -99,7 +99,9 @@ Prototypes are throwaway. They're for learning, not for locking in the format. T
   - music player: library from audio tags, playback over range reads, offline by keep rules per device, playlists as records holding queries.
 
 ## Windows client
-- [ ] Cloud Files provider (`retifs-cloudfiles`): a namespace as a sync root, placeholders on demand, keep tags as "Always keep on this device" / "Free up space", local changes as writes ([ADR-0002](adr/0002-os-integration.md)).
+- [x] Cloud Files provider (`retifs-cloudfiles`), read-only: a namespace as a sync root, placeholders hydrated on demand, remote changes followed, keep tags as "Always keep on this device" / "Free up space" ([ADR-0002](adr/0002-os-integration.md)).
+- [ ] Local changes as writes: new and edited files, deletes and renames in the folder.
+- [ ] Share with retifs… in Explorer's context menu ([ADR-0021](adr/0021-shares.md)); attributes as properties and columns.
 
 ## Phase 5: thin client
 - [ ] USB stick: UKI + EROFS/dm-verity + LUKS/F2FS cache + YubiKey.

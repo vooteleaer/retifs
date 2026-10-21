@@ -1,0 +1,12 @@
+[package]
+name = "retifs-tree"
+version = "0.0.1"
+description = "The file-tree view of a namespace, shared by the FUSE and Cloud Files frontends (ADR-0002), prototype"
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+publish = false
+
+[dependencies]
+libretifs = { path = "../libretifs" }
+serde_json = "1"

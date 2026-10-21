@@ -17,7 +17,7 @@
 //!     retifs [--store DIR] channels
 //!
 //!     retifs [--store DIR] rec add NS [KEY=VALUE]... [--file PATH]
-//!     retifs [--store DIR] rec set NS ID [KEY=VALUE]... [--unset KEY]...
+//!     retifs [--store DIR] rec set NS ID [KEY=VALUE]... [--unset KEY]... [--file PATH]
 //!     retifs [--store DIR] rec get NS ID | rec rm NS ID
 //!     retifs [--store DIR] rec import NS < LINES   (one record per line of KEY=VALUE, 500 per transaction)
 //!     retifs [--store DIR] rec history NS ID
@@ -66,7 +66,7 @@ fn usage() -> ! {
          retifs [--store DIR] forget READ-CAP\n\
          retifs [--store DIR] channel create NAME | channel publish NAME FILE [--compress] | channel publish-ns NAME NS\n\
          retifs [--store DIR] follow ADDRESS [--from NODE]... | channels\n\
-         retifs [--store DIR] rec add NS [KEY=VALUE]... [--file PATH] | rec set NS ID [KEY=VALUE]... [--unset KEY]...\n\
+         retifs [--store DIR] rec add NS [KEY=VALUE]... [--file PATH] | rec set NS ID [KEY=VALUE]... [--unset KEY]... [--file PATH]\n\
          retifs [--store DIR] rec get NS ID | rec rm NS ID | rec history NS ID | rec import NS < LINES | query NS[,NS]... [--at VERSION] [TERM]... [--search NODE]\n\
          retifs [--store DIR] ns address NS | ns info NS | ns checkpoint NS | ns search NS | ns verify NS | ns keep NS all|rules | ns join NAME ADDRESS [--from NODE]... [--lazy]\n\
          retifs [--store DIR] ns grant NS WRITER [--grant] [--from NODE]... | ns revoke NS WRITER"
@@ -300,18 +300,22 @@ async fn main() {
                 }
                 "set" => {
                     let id = rest.first().cloned().unwrap_or_else(|| usage());
-                    let (mut attrs, mut unset) = (Vec::new(), Vec::new());
+                    let (mut attrs, mut unset, mut data) = (Vec::new(), Vec::new(), None);
                     let mut i = 1;
                     while i < rest.len() {
                         if rest[i] == "--unset" {
                             unset.push(rest.get(i + 1).cloned().unwrap_or_else(|| usage()));
+                            i += 2;
+                        } else if rest[i] == "--file" {
+                            let path = std::path::PathBuf::from(rest.get(i + 1).cloned().unwrap_or_else(|| usage()));
+                            data = Some(std::fs::read(&path).unwrap_or_else(|e| fail(format!("{}: {e}", path.display()))));
                             i += 2;
                         } else {
                             attrs.push(attr(&rest[i]));
                             i += 1;
                         }
                     }
-                    libretifs::Request::RecordSet { ns, id, attrs, unset, data: None }
+                    libretifs::Request::RecordSet { ns, id, attrs, unset, data }
                 }
                 "get" => libretifs::Request::RecordGet { ns, id: rest.first().cloned().unwrap_or_else(|| usage()) },
                 "rm" => libretifs::Request::RecordDelete { ns, id: rest.first().cloned().unwrap_or_else(|| usage()) },

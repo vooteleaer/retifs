@@ -1,6 +1,6 @@
 //! The file-tree view of a namespace (ADR-0002): which record sits at which
-//! path, and how attribute values read and write as text (xattrs). No FUSE
-//! here, so it builds and is tested on every platform.
+//! path, and how attribute values read and write as text (xattrs). Shared by
+//! the FUSE mount and the Windows Cloud Files provider; builds everywhere.
 //!
 //! - A record with a `path` attribute (`/a/b.txt`) is the file at that path;
 //!   its content block is the file's content.

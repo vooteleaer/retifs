@@ -92,6 +92,15 @@ The mount exposes plaintext to processes in the user's session, and root on the 
 - The mount writes through a session per open file. A save that renames over a file now gives the target the source's content by reference (`TxStep::Set` with `blocks`), without copying it.
 - Live (WSL2): a 200 MiB file written through the mount in 4.4 s, with the mount's peak memory at 3 MiB and the daemon's at 50 MiB. Overwriting 1 MiB in its middle in place matches the same change made locally.
 
+**Windows, first step (2026-10-21):** `retifs-cloudfiles [--store DIR] [--wait SECONDS] NS FOLDER` (crate `retifs-cloudfiles`, over the `cloud-filter` crate's CfApi bindings) registers the folder as a sync root (`retifs!<user SID>!<namespace>`) and keeps it matching the namespace; `--unregister NS` removes the registration. The tree view is the FUSE mount's, now its own crate (`retifs-tree`).
+- Every record with a path is a placeholder, made up front (population "always full"; directories don't ask for children). A placeholder's identity is the record ID and the content's read-cap, so a changed record is seen by comparing identities.
+- Opening a placeholder makes Windows ask for its data; the provider reads the required range from the daemon (`ReadRange`) in 4 MiB pieces, with the mount's `--wait`, and reports progress to Explorer.
+- `Watch` wakes it on changes (and it re-reads every 60 s): new records become placeholders, deleted ones are removed, a record with new content gets a new placeholder (deleted and made again: `CfUpdatePlaceholder` kept the old size, and a superseding create read back zeros where the old content had been hydrated).
+- **Keeping:** "Always keep on this device" (pin) sets `keep:<device>=true` and hydrates the file; "Free up space" (unpin) unsets it and dehydrates. A record tagged `keep:<device>` elsewhere is pinned here. The daemon's keep logic is unchanged: the tag also makes it hold the content.
+- Not shown: `.query/` (queries stay in apps and the utility), and paths that can't be Windows names (`:`, `?`, trailing dots, `CON`…). Directories differing only in case are one folder; of two files differing only in case, the one whose path sorts first is shown. Both are logged.
+- **Read-only for now:** deleting and renaming in the folder are refused (only the provider's own process may); files changed or added in the folder stay local. Writing back is the next step.
+- Live (Windows 11, 2026-10-21, 16 checks): placeholders with sizes, reads (a 10 MiB file hashes the same), a remote deletion, addition and content change showing up, deleting refused, `attrib +P` / `attrib -P +U` (the command-line forms of Explorer's two commands) setting and clearing the tag and hydrating and dehydrating, and a tag set through the CLI pinning the file. Other processes (the indexer or the virus scanner) sometimes hydrate new placeholders on their own.
+
 **Not yet:**
 - FUSE passthrough for cached reads.
 - **Permissions:** the mounting user owns everything. Modes aren't stored.

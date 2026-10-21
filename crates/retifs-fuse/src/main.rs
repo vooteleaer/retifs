@@ -1,8 +1,8 @@
 //! `retifs-mount NS MOUNTPOINT [--store DIR]`: a namespace as a directory
 //! tree (ADR-0002), through `retifsd`'s local API. Linux (FUSE) only.
 
-#[cfg_attr(not(target_os = "linux"), allow(dead_code))]
-mod tree;
+#[cfg(target_os = "linux")]
+use retifs_tree as tree;
 
 #[cfg(target_os = "linux")]
 mod fs;
