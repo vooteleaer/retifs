@@ -2,7 +2,7 @@
 
 - **Project name.** `retifs` is a working title.
 - **Names:** proposed: petnames in contact records, display names as hints, QR links and one-use invitations ([ADR-0020](adr/0020-sharing-names-invitations.md)). Still open: community namespaces (`community/…`).
-- **Discovery:** Bloom filters in announces vs a DHT (the rnfs experience) vs a hybrid.
+- **Discovery:** proposed for public namespaces: standard RNS announces near, directory channels and public search nodes further ([ADR-0022](adr/0022-public-namespaces-discovery.md)). Still open for content in general: Bloom filters in announces vs a DHT (the rnfs experience) vs a hybrid.
 - **Scaling:** regional limiting of announces, hierarchy, path requests on demand.
 - **Relationship with Prns:** upstream contributions vs fork policy, given one dominant maintainer.
 - **Pinning economics:** reciprocity vs an exchange mechanism, for volunteer storage ([ADR-0011](adr/0011-redundancy-by-default.md)).
