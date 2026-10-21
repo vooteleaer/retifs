@@ -96,6 +96,9 @@ Prototypes are throwaway. They're for learning, not for locking in the format. T
   - photo suite in the spirit of Immich: albums as queries, thumbnail blocks, phone backup via the own node, timeline and map from range queries, faces and tags computed on own devices, shared albums as namespaces or grants;
   - music player: library from audio tags, playback over range reads, offline by keep rules per device, playlists as records holding queries.
 
+## Windows client
+- [ ] Cloud Files provider (`retifs-cloudfiles`): a namespace as a sync root, placeholders on demand, keep tags as "Always keep on this device" / "Free up space", local changes as writes ([ADR-0002](adr/0002-os-integration.md)).
+
 ## Phase 5: thin client
 - [ ] USB stick: UKI + EROFS/dm-verity + LUKS/F2FS cache + YubiKey.
 - [ ] Bootstrap → system manifest from the namespace → root.

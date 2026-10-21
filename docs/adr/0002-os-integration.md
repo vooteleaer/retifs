@@ -24,13 +24,20 @@ Option 2.
   - Queries appear as virtual directories, e.g. `.query/album=Prangli 2026/`.
   - Cached reads use FUSE passthrough (kernel 6.9+).
 - **Haiku (later):** userlandfs with the native Haiku FS interface. Attributes, indexes and live queries are native, so they work in Tracker and `query` like on BFS.
+- **Windows (decided 2026-10-21): the Cloud Files API**, the sync-provider interface OneDrive and the Nextcloud desktop client use, rather than a virtual drive (WinFsp, which needs its own driver installed) or ProjFS (an optional Windows feature).
+  - Each mounted namespace is a *sync root*: an ordinary NTFS folder (e.g. `%USERPROFILE%etifs\photos`) registered with Windows. Records with a `path` appear in it as placeholder files, with sizes and times but no content.
+  - Opening a placeholder makes Windows ask the provider for its data, which it reads from the daemon on demand (`ReadRange`, as the FUSE mount's reads do).
+  - Explorer's own commands map onto keep tags ([ADR-0005](0005-local-store-offline.md)): **Always keep on this device** sets `keep:<device>` (the content is pulled and pinned); **Free up space** clears it and turns the file back into a placeholder. Explorer shows each file's state with its own icons (in sync, available offline, online only).
+  - Changes made in the folder (new files, edits, renames, deletes) go to the daemon as writes, write sessions and transactions, like the FUSE mount's. Remote changes update the placeholders, woken by `Watch`.
+  - Attributes are shown where Windows has room for them (custom columns and properties are possible later); queries stay in apps and the desktop utility.
+  - A provider program (`retifs-cloudfiles`, Rust over the Win32 `CfApi` bindings) runs alongside the daemon; the desktop utility turns it on and off per namespace.
 
 ## Impact on the threat model
 The mount exposes plaintext to processes in the user's session, and root on the client machine sees everything mounted. This matches the existing "foreign machine" row in the [threat model](../04-threat-model.md): exposure is limited to what the session capability allows, for the session's duration.
 
 ## Consequences
 - Easier: no kernel code; Linux works in phase 4; the later Haiku frontend gets real attributes and queries.
-- Harder: two frontends to maintain. Linux has no native queries, so the `.query/` convention is ours. Booting from retifs (phase 5) still needs a kernel-side path.
+- Harder: three frontends to maintain (FUSE, userlandfs, Cloud Files). Linux has no native queries, so the `.query/` convention is ours. Booting from retifs (phase 5) still needs a kernel-side path.
 
 ## Implementation status (2026-10-19)
 `retifs-mount [--store DIR] NS MOUNTPOINT` (crate `retifs-fuse`, the `fuser` crate without libfuse) mounts one namespace. It is a client of the local API like any app: it holds no keys and no store. On other platforms it builds but refuses to mount.
