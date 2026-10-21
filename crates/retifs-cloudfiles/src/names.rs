@@ -109,6 +109,20 @@ fn valid_name(c: &str) -> bool {
         && !RESERVED.iter().any(|r| r.eq_ignore_ascii_case(stem))
 }
 
+/// A path relative to the sync root (`a\b.txt`) as a tree path (`/a/b.txt`).
+pub fn tree_path(rel: &str) -> String {
+    let parts: Vec<&str> = rel.split(['\\', '/']).filter(|c| !c.is_empty()).collect();
+    format!("/{}", parts.join("/"))
+}
+
+/// Files applications keep beside documents for themselves (Office's lock
+/// files, editors' temporary files, Explorer's folder settings): they stay
+/// in the folder and aren't written to retifs.
+pub fn is_scratch(name: &str) -> bool {
+    let lower = name.to_lowercase();
+    lower.starts_with("~$") || lower.starts_with(".~lock.") || lower.ends_with(".tmp") || lower.ends_with('~') || lower == "desktop.ini" || lower == "thumbs.db"
+}
+
 /// A placeholder's identity (its file blob, at most 4 KiB): the record ID
 /// and the content's read-cap. A new version has a new cap, so a changed
 /// identity means the placeholder's content is stale.
@@ -136,6 +150,16 @@ mod tests {
     }
     fn s(x: &str) -> AttrValue {
         AttrValue::Str(x.into())
+    }
+
+    #[test]
+    fn local_paths() {
+        assert_eq!(tree_path("docs\\a b.txt"), "/docs/a b.txt");
+        assert_eq!(tree_path("x"), "/x");
+        for scratch in ["~$Report.docx", "x.TMP", ".~lock.a.odt#", "notes.txt~", "Desktop.ini", "Thumbs.db"] {
+            assert!(is_scratch(scratch), "{scratch}");
+        }
+        assert!(!is_scratch("Report.docx"));
     }
 
     #[test]

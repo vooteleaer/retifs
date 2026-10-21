@@ -19,4 +19,4 @@ tokio = { version = "1", features = ["rt"] }
 [target.'cfg(windows)'.dependencies]
 cloud-filter = "0.0.6"
 nt-time = "0.8"
-windows = { version = "0.58", features = ["Win32_Foundation", "Win32_Storage_CloudFilters"] }
+windows = { version = "0.58", features = ["Win32_Foundation", "Win32_Storage_CloudFilters", "Win32_Storage_FileSystem", "Win32_System_IO"] }

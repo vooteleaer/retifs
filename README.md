@@ -101,7 +101,7 @@ systemctl --user enable --now retifs-mount@photos   # ~/retifs/photos
 ls ~/retifs/photos/.query/album=Prangli\ 2026/
 ```
 
-On Windows the tree is a folder in Explorer, with files fetched when opened and "Always keep on this device" setting this device's keep tag (read-only for now): `retifs-cloudfiles photos %USERPROFILE%\retifs\photos`.
+On Windows the tree is a folder in Explorer, with files fetched when opened and "Always keep on this device" setting this device's keep tag: `retifs-cloudfiles photos %USERPROFILE%\retifs\photos`.
 
 As websites, one origin per namespace, read-only: `systemctl --user enable --now retifs-gateway`, then open <http://localhost:8740/>.
 
