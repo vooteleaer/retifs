@@ -248,6 +248,24 @@ pub enum Request {
     /// Fetches the namespace's whole history and checks the checkpoint this
     /// node started from against it (ADR-0018).
     NsVerify { ns: String },
+    /// Makes a new namespace `name` a share of `source` (ADR-0021): the
+    /// records matching `terms` (or the records `ids`), without the
+    /// attributes `omit` names (`exif:gps*` for a prefix), kept up to date by
+    /// the owner's nodes that hold both. The definition is a
+    /// `type = retifs.share` record in `source`; members of the share don't
+    /// see it. Answers with the share namespace.
+    ShareCreate {
+        source: String,
+        name: String,
+        terms: Vec<String>,
+        #[serde(default)]
+        ids: Vec<String>,
+        #[serde(default)]
+        omit: Vec<String>,
+    },
+    /// Ends a share: deletes its definition `id` from `source`, so updates
+    /// stop. What members already have stays theirs.
+    ShareDelete { source: String, id: String },
 }
 
 /// An attribute value (ADR-0016).

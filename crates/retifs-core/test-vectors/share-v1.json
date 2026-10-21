@@ -1,0 +1,29 @@
+{
+  "about": "ADR-0021: a share copy's record ID = HKDF-SHA256(ikm = source record ID, salt = \"retifs/v1/share-record\", info = ns_id of the share)[0..16]; ns_id = SHA-256(\"retifs/v1/ns\" || share writer)[0..16]",
+  "cases": [
+    {
+      "share_ns_id": "f8b3895e3b70d1b575b6f622723b6545",
+      "share_record": "cf019cf7aa93c19e04e09ea568f540ee",
+      "share_writer": "c86b8e82d64ff7ec813d314d40d2660291ac95316cebb78b9acd4454221818c3",
+      "source_record": "2687130feb5bcfb04c8c1dc786789861"
+    },
+    {
+      "share_ns_id": "f8b3895e3b70d1b575b6f622723b6545",
+      "share_record": "6119b7e17df7a2b462ab3eac2047cf75",
+      "share_writer": "c86b8e82d64ff7ec813d314d40d2660291ac95316cebb78b9acd4454221818c3",
+      "source_record": "36a301f0cbf26f296ac4a031ff967d5c"
+    },
+    {
+      "share_ns_id": "99d30dec6930aa349b379224c0ba3612",
+      "share_record": "b2ec84ee9d6be7a5c82bfb3f82840db3",
+      "share_writer": "371c9d645a546b483e66515d7a7776af376a84251f4602b38b2134c4dc55bfed",
+      "source_record": "aad4606bac1654ec07724d76943dbf89"
+    },
+    {
+      "share_ns_id": "99d30dec6930aa349b379224c0ba3612",
+      "share_record": "d46635cde327a27137b92f8522237eb9",
+      "share_writer": "371c9d645a546b483e66515d7a7776af376a84251f4602b38b2134c4dc55bfed",
+      "source_record": "e4731fca22e4167ae0956f96066cfd57"
+    }
+  ]
+}

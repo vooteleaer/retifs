@@ -55,6 +55,7 @@ use retifs_core::{
     ops::{Op, OpsFile, Right, State, WriterCommit, MAX_CLOCK_AHEAD_MS},
     prolly,
     record::{Record, RecordId, Snapshot, Value},
+    share,
     open, ChunkToken, Cid, ConvergenceSecret, FileRef,
 };
 use personal_rns::node_introspection::DestinationIdentityQuery;
@@ -933,6 +934,7 @@ async fn serve(store: Arc<SlabStore>, identity: node::IdentitySecret, endpoint: 
     tokio::spawn(lease_upkeep(daemon.clone()));
     tokio::spawn(follower(daemon.clone()));
     tokio::spawn(ns_sync(daemon.clone()));
+    tokio::spawn(share_keeper(daemon.clone()));
     let watcher = daemon.clone();
     tokio::spawn(async move {
         // Every retifs node is a storage node (ADR-0014). Prns doesn't pass
@@ -1652,7 +1654,13 @@ async fn handle(d: &Daemon, req: Request) -> Result<Response, String> {
             Ok(Response::Namespace(ns_view(d, &ns)?))
         }
 
-        Request::NsInfo { ns } => Ok(Response::Namespace(ns_view(d, &ns)?)),
+        Request::NsInfo { ns } => {
+            // Asking about a name isn't making a namespace of it.
+            if d.store.ns_info(&ns).map_err(|e| e.to_string())?.is_none() {
+                return Err(format!("no namespace {ns}"));
+            }
+            Ok(Response::Namespace(ns_view(d, &ns)?))
+        }
 
         Request::NsVerify { ns } => {
             if d.store.ns_lazy(&ns).map_err(|e| e.to_string())? {
@@ -1674,6 +1682,58 @@ async fn handle(d: &Daemon, req: Request) -> Result<Response, String> {
             materialize(d, &ns)?;
             apply_keep(d, &ns, &d.store.records(&ns).map_err(|e| e.to_string())?)?;
             Ok(Response::Namespace(ns_view(d, &ns)?))
+        }
+
+        Request::ShareCreate { source, name, terms, ids, omit } => {
+            writable(&source)?;
+            writable(&name)?;
+            if source == name {
+                return Err("a share is a namespace of its own".into());
+            }
+            if d.store.ns_info(&name).map_err(|e| e.to_string())?.is_some() {
+                return Err(format!("{name} already exists here"));
+            }
+            if terms.is_empty() && ids.is_empty() {
+                return Err("a share needs a selection: query terms or record IDs".into());
+            }
+            for t in &terms {
+                retifs_store::Term::parse(t)?;
+            }
+            for id in &ids {
+                parse_record_id(id)?;
+            }
+            if d.store.ns_info(&source).map_err(|e| e.to_string())?.is_none() {
+                return Err(format!("no namespace {source}"));
+            }
+            ensure_namespace(d, &name)?;
+            let mut attrs = vec![
+                ("type".to_string(), AttrValue::Str(share::DEFINITION_TYPE.into())),
+                ("name".to_string(), AttrValue::Str(name.clone())),
+                ("share".to_string(), AttrValue::Str(current_addr(d, &name)?.to_string())),
+            ];
+            if !terms.is_empty() {
+                attrs.push(("select".to_string(), AttrValue::Str(terms.join(", "))));
+            }
+            if !ids.is_empty() {
+                attrs.push(("ids".to_string(), AttrValue::List(ids.into_iter().map(AttrValue::Str).collect())));
+            }
+            if !omit.is_empty() {
+                attrs.push(("omit".to_string(), AttrValue::List(omit.into_iter().map(AttrValue::Str).collect())));
+            }
+            let def = transaction(d, &source, vec![TxStep::Create { attrs, data: None }]).await?;
+            let def = d.store.get_record(&source, &parse_record_id(&def[0].id)?).map_err(|e| e.to_string())?.ok_or("the share's definition isn't visible")?;
+            sync_share(d, &source, &def).await?;
+            Ok(Response::Namespace(ns_view(d, &name)?))
+        }
+
+        Request::ShareDelete { source, id } => {
+            writable(&source)?;
+            let rec = d.store.get_record(&source, &parse_record_id(&id)?).map_err(|e| e.to_string())?.ok_or_else(|| format!("no such record {id}"))?;
+            if rec.attrs.get("type") != Some(&Value::Str(share::DEFINITION_TYPE.into())) {
+                return Err(format!("{id} isn't a share of {source}"));
+            }
+            transaction(d, &source, vec![TxStep::Delete { id }]).await?;
+            Ok(Response::Done)
         }
 
         Request::NsCheckpoint { ns } => {
@@ -3008,6 +3068,123 @@ fn keep_rules(records: &[Record], device: &str) -> Vec<Vec<retifs_store::Term>> 
             (!terms.is_empty()).then_some(terms)
         })
         .collect()
+}
+
+/// A share's definition (ADR-0021), from its record in the source namespace.
+struct ShareDef {
+    addr: ChannelAddr,
+    terms: Vec<retifs_store::Term>,
+    ids: Vec<RecordId>,
+    omit: Vec<String>,
+}
+
+fn share_def(r: &Record) -> Option<ShareDef> {
+    let strs = |k: &str| match r.attrs.get(k) {
+        Some(Value::List(items)) => items.iter().filter_map(|v| if let Value::Str(s) = v { Some(s.clone()) } else { None }).collect(),
+        _ => Vec::new(),
+    };
+    let addr = match r.attrs.get("share") {
+        Some(Value::Str(a)) => a.parse().ok()?,
+        _ => return None,
+    };
+    let terms = match r.attrs.get("select") {
+        Some(Value::Str(q)) => q.split(',').map(str::trim).filter(|t| !t.is_empty()).map(retifs_store::Term::parse).collect::<Result<_, _>>().ok()?,
+        _ => Vec::new(),
+    };
+    let ids: Vec<RecordId> = strs("ids").iter().filter_map(|i| parse_record_id(i).ok()).collect();
+    (!terms.is_empty() || !ids.is_empty()).then_some(ShareDef { addr, terms, ids, omit: strs("omit") })
+}
+
+/// Brings a share up to date with its source (ADR-0021): every selected
+/// record copied (attributes but the omitted ones, content by reference)
+/// under its derived ID, changed copies changed, copies no longer selected
+/// deleted, in one commit. Does nothing on a node that doesn't hold the
+/// share namespace or may not write to it yet. Returns how many records
+/// changed.
+async fn sync_share(d: &Daemon, source: &str, def: &Record) -> Result<usize, String> {
+    let Some(sd) = share_def(def) else { return Ok(0) };
+    let mut target = None;
+    for ns in d.store.ns_names().map_err(|e| e.to_string())? {
+        if d.store.ns_info(&ns).map_err(|e| e.to_string())?.is_some_and(|(creator, _)| creator == sd.addr.writer) {
+            target = Some(ns);
+        }
+    }
+    let Some(target) = target else { return Ok(0) };
+    let ns_id = sd.addr.ns_id();
+    let skip = |r: &Record| matches!(r.attrs.get("type"), Some(Value::Str(t)) if t == share::DEFINITION_TYPE || t == "keep-rule");
+    let selected: Vec<Record> = if sd.ids.is_empty() {
+        d.store.query(source, &sd.terms).map_err(|e| e.to_string())?
+    } else {
+        sd.ids.iter().filter_map(|id| d.store.get_record(source, id).ok().flatten()).collect()
+    };
+    let mut want: HashMap<RecordId, (std::collections::BTreeMap<String, Value>, Vec<FileRef>)> = HashMap::new();
+    for r in selected.iter().filter(|r| !skip(r)) {
+        want.insert(share::record_id(&r.id, &ns_id), (share::copy_attrs(&r.attrs, &sd.omit), r.blocks.clone()));
+    }
+    let have: HashMap<RecordId, Record> = d.store.records(&target).map_err(|e| e.to_string())?.into_iter().map(|r| (r.id, r)).collect();
+    let mut ops = Vec::new();
+    let mut changed = 0;
+    for (id, (attrs, blocks)) in &want {
+        let before = have.get(id);
+        let n = ops.len();
+        if let Some(b) = before {
+            ops.extend(b.attrs.keys().filter(|k| !attrs.contains_key(*k)).map(|k| Op::Unset(*id, k.clone())));
+        }
+        for (k, v) in attrs {
+            if before.and_then(|b| b.attrs.get(k)) != Some(v) {
+                ops.push(Op::Set(*id, k.clone(), v.clone()));
+            }
+        }
+        let roots = |bs: &[FileRef]| bs.iter().map(|b| b.root).collect::<Vec<_>>();
+        if !blocks.is_empty() && before.is_none_or(|b| roots(&b.blocks) != roots(blocks)) {
+            ops.push(Op::Blocks(*id, blocks.clone()));
+        }
+        changed += usize::from(ops.len() > n);
+    }
+    for id in have.keys().filter(|id| !want.contains_key(*id)) {
+        ops.push(Op::Delete(*id));
+        changed += 1;
+    }
+    if ops.is_empty() {
+        return Ok(0);
+    }
+    match write_ops(d, &target, ops).await {
+        Ok(_) => Ok(changed),
+        // Another owner node's share, its grant not here yet: next time.
+        Err(e) if e.contains("may not write") => Ok(0),
+        Err(e) => Err(e),
+    }
+}
+
+/// Keeps every share whose source changed here up to date (ADR-0021), and
+/// all of them once a minute (for shares whose namespace or grant arrived
+/// later).
+async fn share_keeper(d: Arc<Daemon>) {
+    let mut seen: HashMap<String, u64> = HashMap::new();
+    let mut tick = tokio::time::interval(Duration::from_secs(60));
+    let def_term = retifs_store::Term::parse(&format!("type={}", share::DEFINITION_TYPE)).expect("a valid term");
+    loop {
+        tokio::select! {
+            _ = d.changed.notified() => {}
+            _ = tick.tick() => seen.clear(),
+        }
+        // A burst of writes (an import) is one update.
+        tokio::time::sleep(Duration::from_secs(1)).await;
+        let counts = d.changes.lock().unwrap().clone();
+        for ns in d.store.ns_names().unwrap_or_default() {
+            let count = counts.get(&ns).copied().unwrap_or(0);
+            if seen.insert(ns.clone(), count) == Some(count) {
+                continue;
+            }
+            for def in d.store.query(&ns, std::slice::from_ref(&def_term)).unwrap_or_default() {
+                match sync_share(&d, &ns, &def).await {
+                    Ok(0) => {}
+                    Ok(n) => eprintln!("share of {ns}: {n} record(s) updated"),
+                    Err(e) => eprintln!("share of {ns}: {e}"),
+                }
+            }
+        }
+    }
 }
 
 /// Content kept here for a namespace is served to its members, like the

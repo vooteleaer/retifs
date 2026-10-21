@@ -28,6 +28,7 @@
 //!     retifs [--store DIR] ns address NS | ns info NS
 //!     retifs [--store DIR] ns join NAME ADDRESS [--from NODE]... [--lazy]
 //!     retifs [--store DIR] ns grant NS WRITER [--grant] [--keys K1,K2,@content,@delete] [--until YYYY-MM-DD|+30d] [--from NODE]... | ns revoke NS WRITER
+//!     retifs [--store DIR] share create NAME --from NS [TERM]... [--id ID]... [--omit KEY]... | share list NS | share rm NS ID
 //!
 //! Several writers per namespace (ADR-0017): a member joins with the address
 //! and shows its writer key; the creator grants it; members sync each other.
@@ -69,7 +70,8 @@ fn usage() -> ! {
          retifs [--store DIR] rec add NS [KEY=VALUE]... [--file PATH] | rec set NS ID [KEY=VALUE]... [--unset KEY]... [--file PATH]\n\
          retifs [--store DIR] rec get NS ID | rec rm NS ID | rec history NS ID | rec import NS < LINES | query NS[,NS]... [--at VERSION] [TERM]... [--search NODE]\n\
          retifs [--store DIR] ns address NS | ns info NS | ns checkpoint NS | ns search NS | ns verify NS | ns keep NS all|rules | ns join NAME ADDRESS [--from NODE]... [--lazy]\n\
-         retifs [--store DIR] ns grant NS WRITER [--grant] [--from NODE]... | ns revoke NS WRITER"
+         retifs [--store DIR] ns grant NS WRITER [--grant] [--from NODE]... | ns revoke NS WRITER\n\
+         retifs [--store DIR] share create NAME --from NS [TERM]... [--id ID]... [--omit KEY]... | share list NS | share rm NS ID"
     );
     std::process::exit(2);
 }
@@ -409,6 +411,72 @@ async fn main() {
                 }
                 libretifs::Response::Error { message } => fail(message),
                 _ => fail("unexpected response"),
+            }
+        }
+        "share" => {
+            let sub = it.next().unwrap_or_else(|| usage());
+            let rest: Vec<String> = it.collect();
+            let opt = |flag: &str| -> Vec<String> { rest.windows(2).filter(|w| w[0] == flag).map(|w| w[1].clone()).collect() };
+            match sub.as_str() {
+                "create" => {
+                    let name = rest.first().cloned().unwrap_or_else(|| usage());
+                    let source = opt("--from").pop().unwrap_or_else(|| usage());
+                    // Terms: what isn't a flag or a flag's value.
+                    let mut terms = Vec::new();
+                    let mut i = 1;
+                    while i < rest.len() {
+                        if rest[i].starts_with("--") {
+                            i += 2;
+                        } else {
+                            terms.push(rest[i].clone());
+                            i += 1;
+                        }
+                    }
+                    let req = libretifs::Request::ShareCreate { source, name, terms, ids: opt("--id"), omit: opt("--omit") };
+                    match client.call(req).await.unwrap_or_else(|e| fail(e)) {
+                        libretifs::Response::Namespace(v) => {
+                            println!("share {}: {} record(s)", v.name, v.records);
+                            println!("  address {}", v.address);
+                            println!("  members join it with: retifs ns join {} {} --from <this node>", v.name, v.address);
+                        }
+                        libretifs::Response::Error { message } => fail(message),
+                        _ => fail("unexpected response"),
+                    }
+                }
+                "list" => {
+                    let source = rest.first().cloned().unwrap_or_else(|| usage());
+                    let req = libretifs::Request::Query { ns: source, terms: vec!["type=retifs.share".into()], at: None };
+                    let records = client.records(req).await.unwrap_or_else(|e| fail(e));
+                    for r in &records {
+                        let get = |k: &str| r.attrs.iter().find(|(key, _)| key == k).map(|(_, v)| v);
+                        let text = |v: Option<&libretifs::AttrValue>| match v {
+                            Some(libretifs::AttrValue::Str(s)) => s.clone(),
+                            Some(libretifs::AttrValue::List(items)) => items
+                                .iter()
+                                .filter_map(|i| if let libretifs::AttrValue::Str(s) = i { Some(s.as_str()) } else { None })
+                                .collect::<Vec<_>>()
+                                .join(", "),
+                            _ => String::new(),
+                        };
+                        let select = match (text(get("select")), text(get("ids"))) {
+                            (q, _) if !q.is_empty() => q,
+                            (_, ids) => format!("records {ids}"),
+                        };
+                        let omit = text(get("omit"));
+                        println!("{}  {}  {select}{}", r.id, text(get("name")), if omit.is_empty() { String::new() } else { format!("  (without {omit})") });
+                    }
+                    println!("{} share(s)", records.len());
+                }
+                "rm" => {
+                    let source = rest.first().cloned().unwrap_or_else(|| usage());
+                    let id = rest.get(1).cloned().unwrap_or_else(|| usage());
+                    match client.call(libretifs::Request::ShareDelete { source, id }).await.unwrap_or_else(|e| fail(e)) {
+                        libretifs::Response::Done => println!("share ended: its updates stop"),
+                        libretifs::Response::Error { message } => fail(message),
+                        _ => fail("unexpected response"),
+                    }
+                }
+                _ => usage(),
             }
         }
         "app" => {

@@ -86,8 +86,18 @@ impl Daemon {
         self.records_of(Request::Query { ns: ns.to_string(), terms, at: None })
     }
 
+    /// This device's name in `ns`; makes `ns` if there's none of that name
+    /// yet (a new, empty folder to fill).
     fn device(&mut self, ns: &str) -> Result<String, String> {
-        match self.call(Request::NsInfo { ns: ns.to_string() })? {
+        let info = match self.call(Request::NsInfo { ns: ns.to_string() }) {
+            Err(e) if e.starts_with("no namespace") => {
+                self.call(Request::NsAddress { ns: ns.to_string() })?;
+                eprintln!("retifs-cloudfiles: made a new namespace {ns}");
+                self.call(Request::NsInfo { ns: ns.to_string() })?
+            }
+            r => r?,
+        };
+        match info {
             Response::Namespace(v) => Ok(v.device),
             _ => Err("unexpected answer to NsInfo".into()),
         }

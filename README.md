@@ -111,6 +111,8 @@ As websites, one origin per namespace, read-only: `systemctl --user enable --now
 3. On yours: `retifs ns grant photos <their key> --from <their node>`.
 4. Both now write and sync. Each node pulls everything by default; for a small device, `retifs ns keep photos rules` and tag what it should keep: `keep:<device>=true`, or a keep-rule record.
 
+**Sharing part of a namespace** (an album, a folder): `retifs share create prangli --from photos 'album=Prangli 2026' --omit geo` makes a namespace `prangli` holding just those records (without `geo`), kept up to date by your nodes; give its address to whoever should read it (`retifs ns join prangli <address> --from <your node>`). `retifs share list photos` and `share rm` list and end shares.
+
 ## Roadmap
 
 Prototypes are throwaway. They're for learning, not for locking in the format, and every phase ends in a usable system.

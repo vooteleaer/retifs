@@ -17,6 +17,7 @@ pub mod prolly;
 pub mod record;
 pub mod manifest;
 pub mod secret;
+pub mod share;
 pub mod stamp;
 
 pub use access::ChunkToken;
