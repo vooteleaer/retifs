@@ -101,7 +101,8 @@ Prototypes are throwaway. They're for learning, not for locking in the format. T
 ## Windows client
 - [x] Cloud Files provider (`retifs-cloudfiles`): a namespace as a sync root, placeholders hydrated on demand, remote changes followed, keep tags as "Always keep on this device" / "Free up space" ([ADR-0002](adr/0002-os-integration.md)).
 - [x] Local changes as writes: new and edited files and folders, deletes (and the Recycle Bin), renames, saves that rename aside.
-- [ ] Share with retifs… in Explorer's context menu ([ADR-0021](adr/0021-shares.md)); attributes as properties and columns.
+- [x] Share with retifs… in Explorer's context menu ([ADR-0021](adr/0021-shares.md)): a classic verb ("Show more options" on Windows 11), the recipient's command on the clipboard.
+- [ ] In Windows 11's top-level menu (a packaged `IExplorerCommand`), a share dialog (in the desktop utility); attributes as properties and columns.
 
 ## Phase 5: thin client
 - [ ] USB stick: UKI + EROFS/dm-verity + LUKS/F2FS cache + YubiKey.

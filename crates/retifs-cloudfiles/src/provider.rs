@@ -425,6 +425,7 @@ fn register(id: &SyncRootId, ns: &str, folder: &Path) -> Result<(), String> {
 pub fn unregister(ns: &str) -> Result<(), String> {
     // Not `is_registered` first: it says no once the folder is gone, though
     // the registration is still there.
+    crate::share_menu::unregister(ns);
     root_id(ns)?.unregister().map_err(|e| format!("no sync root for namespace {ns}? {e}"))?;
     eprintln!("retifs-cloudfiles: unregistered namespace {ns}");
     Ok(())
@@ -454,6 +455,9 @@ pub fn run(store: &Path, ns: &str, folder: &Path, wait: Duration) -> Result<(), 
     let device = daemon.device(ns)?;
     let id = root_id(ns)?;
     register(&id, ns, &folder)?;
+    if let Err(e) = crate::share_menu::register(ns, &folder) {
+        eprintln!("retifs-cloudfiles: {e}");
+    }
 
     let (hydrate_tx, hydrate_rx) = mpsc::channel::<PathBuf>();
     let shared = Arc::new(Shared {
@@ -827,6 +831,12 @@ impl Sync {
 
 /// All of the file's content is here (no `RECALL_ON_DATA_ACCESS`): written
 /// to, or hydrated. (`OnDiskDataSize` doesn't count what was written here.)
+/// A placeholder's identity (record ID and read-cap), for "Share with
+/// retifs".
+pub fn identity_of(ph: &Placeholder) -> Option<Vec<u8>> {
+    info(ph).map(|i| i.blob)
+}
+
 fn is_local(abs: &Path) -> bool {
     use std::os::windows::fs::MetadataExt;
     const FILE_ATTRIBUTE_RECALL_ON_DATA_ACCESS: u32 = 0x0040_0000;
