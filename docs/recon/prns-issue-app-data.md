@@ -1,6 +1,8 @@
 # Upstream issue for Prns: announce app_data
 
 > Posted 2026-10-21 as [KenAKAFrosty/Prns#306](https://github.com/KenAKAFrosty/Prns/issues/306). The text below is what was submitted.
+>
+> **Correction (same day):** the issue was written against 0.3.7 from crates.io. Prns 0.3.8 (a GitHub release, not on crates.io yet) already passes `app_data` in `Diagnostic::AnnounceHeard`. A comment on the issue said so, and its title was narrowed to the remaining part: app_data in `DestinationIdentitySnapshot` (the `recall_app_data` equivalent).
 
 **Title:** Expose announce app_data to applications (AnnounceHeard event and DestinationIdentitySnapshot)
 
