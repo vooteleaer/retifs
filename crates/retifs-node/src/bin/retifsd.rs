@@ -2698,6 +2698,12 @@ async fn ensure_local(d: &Daemon, file: &FileRef, range: std::ops::Range<u64>, n
                 break; // look again: fetched nodes may reveal more chunks
             }
         }
+        // Nobody has it yet (a member may still be pulling it from its
+        // writer): look again within the wait, as the mount promises.
+        if !progressed && !too_slow && Instant::now() + Duration::from_secs(2) < deadline {
+            tokio::time::sleep(Duration::from_secs(2)).await;
+            continue;
+        }
         if !progressed {
             return Err(if Instant::now() >= deadline {
                 format!("{}: timed out fetching {} chunk(s)", file.root, missing.len())
@@ -3003,6 +3009,27 @@ fn keep_rules(records: &[Record], device: &str) -> Vec<Vec<retifs_store::Term>> 
         .collect()
 }
 
+/// Content kept here for a namespace is served to its members, like the
+/// namespace's commits and operations: a member whose only peer is another
+/// member gets content a third member wrote through it (the four-node soak:
+/// reads of RTR-2's files failed on rtr-4, whose only peer was cafa-cloud,
+/// which held them but wouldn't serve them). Requests still prove the
+/// content's seed, which only members have; the cache tier (reading
+/// history) stays unserved.
+fn serve_if_kept(d: &Daemon, file: &FileRef) -> Result<(), String> {
+    let kept = d
+        .store
+        .ns_names()
+        .map_err(|e| e.to_string())?
+        .iter()
+        .any(|ns| d.store.ns_kept(ns).map(|k| k.iter().any(|f| f.root == file.root)).unwrap_or(false));
+    if kept {
+        let chunks = file_chunks(&d.store, file)?;
+        d.store.register_serving(&chunks).map_err(|e| e.to_string())?;
+    }
+    Ok(())
+}
+
 /// Pulls the content of the records this device keeps and pins it; content it
 /// pulled for records no longer kept (or for replaced versions) becomes
 /// evictable again. Content this node wrote is never released here.
@@ -3035,6 +3062,7 @@ fn apply_keep(d: &Daemon, ns: &str, records: &[Record]) -> Result<(), String> {
                     }
                 }
                 d.store.need_file(b).map_err(|e| e.to_string())?;
+                serve_if_kept(d, b)?;
             } else if !d.store.is_wanted(&b.root).unwrap_or(false) {
                 d.store.want_file(b, &peers).map_err(|e| e.to_string())?;
                 d.wake.notify_one();
@@ -4347,6 +4375,7 @@ async fn seek_pass(d: &Daemon) -> Result<(), String> {
             store.finish_file(&root).map_err(|e| e.to_string())?;
             d.deferred.lock().unwrap().remove(&root);
             store.need_file(&file).map_err(|e| e.to_string())?;
+            serve_if_kept(d, &file)?;
             d.upkeep_wake.notify_one();
             println!("seeker: {root} complete");
             continue;
@@ -4414,6 +4443,7 @@ async fn seek_pass(d: &Daemon) -> Result<(), String> {
                 store.finish_file(&root).map_err(|e| e.to_string())?;
                 d.deferred.lock().unwrap().remove(&root);
                 store.need_file(&file).map_err(|e| e.to_string())?;
+                serve_if_kept(d, &file)?;
                 d.upkeep_wake.notify_one();
                 println!("seeker: {root} complete");
                 break;
