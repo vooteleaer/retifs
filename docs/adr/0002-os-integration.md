@@ -25,7 +25,7 @@ Option 2.
   - Cached reads use FUSE passthrough (kernel 6.9+).
 - **Haiku (later):** userlandfs with the native Haiku FS interface. Attributes, indexes and live queries are native, so they work in Tracker and `query` like on BFS.
 - **Windows (decided 2026-10-21): the Cloud Files API**, the sync-provider interface OneDrive and the Nextcloud desktop client use, rather than a virtual drive (WinFsp, which needs its own driver installed) or ProjFS (an optional Windows feature).
-  - Each mounted namespace is a *sync root*: an ordinary NTFS folder (e.g. `%USERPROFILE%etifs\photos`) registered with Windows. Records with a `path` appear in it as placeholder files, with sizes and times but no content.
+  - Each mounted namespace is a *sync root*: an ordinary NTFS folder (e.g. `%USERPROFILE%\retifs\photos`) registered with Windows. Records with a `path` appear in it as placeholder files, with sizes and times but no content.
   - Opening a placeholder makes Windows ask the provider for its data, which it reads from the daemon on demand (`ReadRange`, as the FUSE mount's reads do).
   - Explorer's own commands map onto keep tags ([ADR-0005](0005-local-store-offline.md)): **Always keep on this device** sets `keep:<device>` (the content is pulled and pinned); **Free up space** clears it and turns the file back into a placeholder. Explorer shows each file's state with its own icons (in sync, available offline, online only).
   - Changes made in the folder (new files, edits, renames, deletes) go to the daemon as writes, write sessions and transactions, like the FUSE mount's. Remote changes update the placeholders, woken by `Watch`.
