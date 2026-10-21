@@ -37,7 +37,7 @@ ch      a channel address                         follow a store or a site
 cap     a read-cap (+ attributes)                 one file, nothing else
 ```
 - **`q`** is a query in the CLI's terms (URL-encoded): what the recipient's app opens on. An album, a playlist, one record and a whole namespace are all a namespace plus a query (or none).
-- **A query is a view, not a limit.** The address carries the read key, so whoever has the link can read the whole namespace. Sharing only an album means the album is its own namespace (a share namespace, or albums kept as namespaces). Apps must say so ("this shares your whole Photos library") rather than let a query look like a limit.
+- **A query is a view, not a limit.** The address carries the read key, so whoever has the link can read the whole namespace. Sharing only an album means the album is its own namespace: a share ([ADR-0021](0021-shares.md)). Apps must say so ("this shares your whole Photos library") rather than let a query look like a limit.
 - **`view`** hints which app opens it (`photos`, `music`, `calendar`, `store`). Without one, the record type decides, the way Android routes intents to apps.
 - **Unknown kinds and parameters** are shown for what they are (with a generic action: open in the gateway, save the file), never an error. New kinds can be added without breaking printed codes.
 - **QR** is the main in-person channel: shown on one screen, scanned by the other. A namespace address or an invitation is a few hundred characters, well within an easily scanned code.

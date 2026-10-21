@@ -76,6 +76,7 @@ Prototypes are throwaway. They're for learning, not for locking in the format. T
 ## Phase 3: identity and permissions
 - [x] Group namespaces, validate-on-read (every reader checks grants on merge), key rotation on removal, limited grants narrowed on delegation ([ADR-0017](adr/0017-multi-writer-namespaces.md)).
 - [ ] Capability chains between people beyond grants.
+- [ ] Shares: a selection (records, a folder, a query) as its own namespace kept up to date by the owner's node, content by reference, attributes optionally left out; started from the file manager's context menu ([ADR-0021](adr/0021-shares.md)).
 - [ ] Sharing: `retifs:` links and QR codes, one-use invitations (`/retifs/invite`), profiles, contacts as petnames, fingerprint words ([ADR-0020](adr/0020-sharing-names-invitations.md)).
 - [ ] YubiKey-backed Prns `IdentitySigner` (upstream: fallible `sign()`, X25519 exchange through a trait).
 - [x] Per-app capabilities on the local socket: an app socket with tokens scoped to namespaces and read/write, pinned to the executable on Linux ([ADR-0004](adr/0004-native-record-api.md)).
