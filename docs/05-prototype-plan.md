@@ -77,8 +77,10 @@ Prototypes are throwaway. They're for learning, not for locking in the format. T
 - [x] Group namespaces, validate-on-read (every reader checks grants on merge), key rotation on removal, limited grants narrowed on delegation ([ADR-0017](adr/0017-multi-writer-namespaces.md)).
 - [ ] Capability chains between people beyond grants.
 - [ ] Public namespaces announced with standard RNS announces (`retifs.public`, app_data with name, about, tags, address), heard into a local list; members' node addresses in the namespace so every member syncs with every member ([ADR-0022](adr/0022-public-namespaces-discovery.md)); needs Prns to expose announce app_data.
-- [ ] Shares: a selection (records, a folder, a query) as its own namespace kept up to date by the owner's node, content by reference, attributes optionally left out; started from the file manager's context menu ([ADR-0021](adr/0021-shares.md)).
-- [ ] Sharing: `retifs:` links and QR codes, one-use invitations (`/retifs/invite`), profiles, contacts as petnames, fingerprint words ([ADR-0020](adr/0020-sharing-names-invitations.md)).
+- [x] Shares: a selection (records, a folder, a query) as its own namespace kept up to date by the owner's nodes, content by reference, attributes optionally left out; started from Explorer's context menu ([ADR-0021](adr/0021-shares.md)).
+- [ ] Shares, continued: write-back from members, resharing, default attribute filters (location in photos); Nautilus and Dolphin menus.
+- [x] Sharing: `retifs:` links and QR codes, one-use invitations (`/retifs/invite`), contacts as petnames in `me`, fingerprint words ([ADR-0020](adr/0020-sharing-names-invitations.md)).
+- [ ] Sharing, continued: profiles (`/retifs/profile`), sending links over LXMF.
 - [ ] YubiKey-backed Prns `IdentitySigner` (upstream: fallible `sign()`, X25519 exchange through a trait).
 - [x] Per-app capabilities on the local socket: an app socket with tokens scoped to namespaces and read/write, pinned to the executable on Linux ([ADR-0004](adr/0004-native-record-api.md)).
 - [ ] Session capabilities; app scopes as capability chains (record filters, keys).
