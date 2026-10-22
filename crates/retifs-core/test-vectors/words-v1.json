@@ -1,0 +1,49 @@
+{
+  "about": "ADR-0020: fingerprint words = BIP-39 English words for consecutive 11-bit groups of SHA-256(key), most significant bit first; 6 words by default",
+  "cases": [
+    {
+      "key": "861619e8c3dca62e9b55b4a8ab7d672f1d7469ad9b33a6a5e8ddec3026dc2924",
+      "words": [
+        "cloud",
+        "inspire",
+        "rather",
+        "lock",
+        "ribbon",
+        "peace"
+      ]
+    },
+    {
+      "key": "1d37e792ea438884cefb731a93aef72a",
+      "words": [
+        "home",
+        "liar",
+        "neither",
+        "over",
+        "negative",
+        "phrase"
+      ]
+    },
+    {
+      "key": "b5d154bc5ea34852bcc61812076d502a6dc6df285b6faad8503ae224d7967736",
+      "words": [
+        "hawk",
+        "eye",
+        "sea",
+        "fork",
+        "wood",
+        "tourist"
+      ]
+    },
+    {
+      "key": "b8dad147a45e52de2510e824ec92496f",
+      "words": [
+        "foam",
+        "boss",
+        "quick",
+        "expose",
+        "street",
+        "odor"
+      ]
+    }
+  ]
+}

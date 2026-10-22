@@ -20,6 +20,7 @@ pub mod manifest;
 pub mod secret;
 pub mod share;
 pub mod stamp;
+pub mod words;
 
 pub use access::ChunkToken;
 pub use chunk::{open, seal, seal_with, ChunkError, Compression, Sealed, Seed};

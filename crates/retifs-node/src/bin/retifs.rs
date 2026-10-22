@@ -30,6 +30,7 @@
 //!     retifs [--store DIR] ns grant NS WRITER [--grant] [--keys K1,K2,@content,@delete] [--until YYYY-MM-DD|+30d] [--from NODE]... | ns revoke NS WRITER
 //!     retifs [--store DIR] share create NAME --from NS [TERM]... [--id ID]... [--omit KEY]... [--qr] | share list NS | share rm NS ID
 //!     retifs [--store DIR] ns link NS [--name LABEL] [--q TERMS] [--qr] | open LINK [--as NAME]
+//!     retifs [--store DIR] me | me link [--name LABEL] [--qr] | contact add NAME NODE|LINK | contact list | contact rm NAME
 //!     retifs [--store DIR] invite create NS [--grant] [--keys K1,K2] [--until DATE] [--expires 1d] [--q TERMS] [--name LABEL] [--qr] | invite list NS | invite cancel NS ID
 //!
 //! Several writers per namespace (ADR-0017): a member joins with the address
@@ -75,6 +76,7 @@ fn usage() -> ! {
          retifs [--store DIR] ns grant NS WRITER [--grant] [--from NODE]... | ns revoke NS WRITER\n\
          retifs [--store DIR] share create NAME --from NS [TERM]... [--id ID]... [--omit KEY]... [--qr] | share list NS | share rm NS ID\n\
          retifs [--store DIR] ns link NS [--name LABEL] [--q TERMS] [--qr] | open LINK [--as NAME] | ns join NAME LINK\n\
+         retifs [--store DIR] me | me link [--name LABEL] [--qr] | contact add NAME NODE|LINK | contact list | contact rm NAME\n\
          retifs [--store DIR] invite create NS [--grant] [--keys K1,K2] [--until DATE] [--expires 1d] [--q TERMS] [--name LABEL] [--qr] | invite list NS | invite cancel NS ID"
     );
     std::process::exit(2);
@@ -358,7 +360,7 @@ async fn main() {
         "ns" => {
             let sub = it.next().unwrap_or_else(|| usage());
             let ns = it.next().unwrap_or_else(|| usage());
-            let rest: Vec<String> = it.collect();
+            let rest = resolve_froms(&mut client, it.collect()).await;
             let froms = |rest: &[String]| -> Vec<String> {
                 rest.windows(2).filter(|w| w[0] == "--from").map(|w| w[1].clone()).collect()
             };
@@ -517,6 +519,68 @@ async fn main() {
                 _ => usage(),
             }
         }
+        "me" => {
+            // This node, to give to others as a contact (ADR-0020).
+            let rest: Vec<String> = it.collect();
+            let (node, _, _) = client.ping().await.unwrap_or_else(|e| fail(e));
+            let words = node_words(&node);
+            if rest.first().map(String::as_str) == Some("link") {
+                let name = rest.windows(2).find(|w| w[0] == "--name").map(|w| w[1].clone());
+                let link = libretifs::link::Link {
+                    kind: "node".into(),
+                    what: node.clone(),
+                    params: name.map(|n| vec![("name".to_string(), n)]).unwrap_or_default(),
+                };
+                println!("{link}");
+                if rest.iter().any(|a| a == "--qr") {
+                    print_qr(&link.to_string());
+                }
+                eprintln!("(they add you with retifs open LINK; read these words to each other to be sure: {words})");
+            } else {
+                println!("node   {node}");
+                println!("words  {words}");
+            }
+        }
+        "contact" => {
+            // Petnames (ADR-0020): records in this user's own namespace `me`,
+            // so every device of the user has the same address book.
+            let sub = it.next().unwrap_or_else(|| usage());
+            let rest: Vec<String> = it.collect();
+            match sub.as_str() {
+                "add" => {
+                    let name = rest.first().cloned().unwrap_or_else(|| usage());
+                    let what = rest.get(1).cloned().unwrap_or_else(|| usage());
+                    let node = match libretifs::link::Link::parse(&what) {
+                        Ok(l) if l.kind == "node" => l.what,
+                        Ok(l) => fail(format!("a retifs:{} link isn't a node", l.kind)),
+                        Err(_) => what,
+                    };
+                    add_contact(&mut client, &name, &node).await;
+                }
+                "list" => {
+                    let contacts = contacts(&mut client).await;
+                    for (name, node, _) in &contacts {
+                        println!("{name:<16} {node}  {}", node_words(node));
+                    }
+                    println!("{} contact(s)", contacts.len());
+                }
+                "rm" => {
+                    let name = rest.first().cloned().unwrap_or_else(|| usage());
+                    let found: Vec<_> = contacts(&mut client).await.into_iter().filter(|(n, _, _)| n.eq_ignore_ascii_case(&name)).collect();
+                    if found.is_empty() {
+                        fail(format!("no contact {name}"));
+                    }
+                    for (_, _, id) in found {
+                        let req = libretifs::Request::RecordDelete { ns: ME.into(), id };
+                        if let libretifs::Response::Error { message } = client.call(req).await.unwrap_or_else(|e| fail(e)) {
+                            fail(message);
+                        }
+                    }
+                    println!("removed {name}");
+                }
+                _ => usage(),
+            }
+        }
         "invite" => {
             let sub = it.next().unwrap_or_else(|| usage());
             let ns = it.next().unwrap_or_else(|| usage());
@@ -572,6 +636,17 @@ async fn main() {
                 .find(|w| w[0] == "--as")
                 .map(|w| w[1].clone())
                 .unwrap_or_else(|| libretifs::link::suggest_name(link.param("name").unwrap_or("shared")));
+            if link.kind == "node" {
+                // A contact: the name as written (a petname), --as first.
+                let petname = rest
+                    .windows(2)
+                    .find(|w| w[0] == "--as")
+                    .map(|w| w[1].clone())
+                    .or_else(|| link.param("name").map(String::from))
+                    .unwrap_or_else(|| fail("this node link has no name: give one with --as NAME"));
+                add_contact(&mut client, &petname, &link.what).await;
+                return;
+            }
             if link.kind == "invite" {
                 match client.call(libretifs::Request::InviteAccept { ns: name.clone(), link: text.clone() }).await.unwrap_or_else(|e| fail(e)) {
                     libretifs::Response::Namespace(v) => {
@@ -769,6 +844,80 @@ fn attr(arg: &str) -> (String, libretifs::AttrValue) {
 
 /// A point in time for `--until`: `YYYY-MM-DD` (UTC midnight), `+30d` /
 /// `+12h` / `+90m` from now, or milliseconds since the epoch.
+/// The user's own namespace: contacts, saved queries, settings (ADR-0020).
+const ME: &str = "me";
+
+/// A node address as fingerprint words, to read aloud when it matters.
+fn node_words(node: &str) -> String {
+    let bytes: Vec<u8> = (0..node.len()).step_by(2).filter_map(|i| node.get(i..i + 2).and_then(|h| u8::from_str_radix(h, 16).ok())).collect();
+    retifs_core::words::fingerprint(&bytes, retifs_core::words::DEFAULT_WORDS).join(" ")
+}
+
+fn is_node(s: &str) -> bool {
+    s.len() == 32 && s.bytes().all(|b| b.is_ascii_hexdigit())
+}
+
+/// The contacts in `me`: (name, node, record ID). None yet: no `me` yet.
+async fn contacts(client: &mut libretifs::Client) -> Vec<(String, String, String)> {
+    let req = libretifs::Request::Query { ns: ME.into(), terms: vec!["type=contact".into()], at: None };
+    let Ok(libretifs::Response::Records { records }) = client.call(req).await else { return Vec::new() };
+    let s = |r: &libretifs::RecordView, k: &str| {
+        r.attrs.iter().find_map(|(key, v)| match v {
+            libretifs::AttrValue::Str(s) if key == k => Some(s.clone()),
+            _ => None,
+        })
+    };
+    let mut out: Vec<_> = records.iter().filter_map(|r| Some((s(r, "name")?, s(r, "retifs:node")?, r.id.clone()))).collect();
+    out.sort();
+    out
+}
+
+/// Adds (or renames) a contact for `node` in `me`.
+async fn add_contact(client: &mut libretifs::Client, name: &str, node: &str) {
+    if !is_node(node) {
+        fail(format!("{node} isn't a node address (32 hex digits) or a retifs:node link"));
+    }
+    if is_node(name) {
+        fail("a contact's name can't look like a node address");
+    }
+    let existing = contacts(client).await;
+    if existing.iter().any(|(n, other, _)| n.eq_ignore_ascii_case(name) && other != node) {
+        fail(format!("you already have a contact {name}; remove it first or choose another name"));
+    }
+    let attrs = vec![("name".to_string(), libretifs::AttrValue::Str(name.into()))];
+    let req = match existing.iter().find(|(_, n, _)| n == node) {
+        Some((_, _, id)) => libretifs::Request::RecordSet { ns: ME.into(), id: id.clone(), attrs, unset: vec![], data: None },
+        None => {
+            let mut attrs = attrs;
+            attrs.push(("type".into(), libretifs::AttrValue::Str("contact".into())));
+            attrs.push(("retifs:node".into(), libretifs::AttrValue::Str(node.into())));
+            libretifs::Request::RecordCreate { ns: ME.into(), attrs, data: None }
+        }
+    };
+    if let libretifs::Response::Error { message } = client.call(req).await.unwrap_or_else(|e| fail(e)) {
+        fail(message);
+    }
+    println!("contact {name}: {node}");
+    println!("  words {}  (compare them with what {name}'s retifs me shows)", node_words(node));
+}
+
+/// `--from NAME` with a contact's name: its node.
+async fn resolve_froms(client: &mut libretifs::Client, mut rest: Vec<String>) -> Vec<String> {
+    let mut known: Option<Vec<(String, String, String)>> = None;
+    for i in 1..rest.len() {
+        if rest[i - 1] == "--from" && !is_node(&rest[i]) {
+            if known.is_none() {
+                known = Some(contacts(client).await);
+            }
+            match known.as_ref().unwrap().iter().find(|(n, _, _)| n.eq_ignore_ascii_case(&rest[i])) {
+                Some((_, node, _)) => rest[i] = node.clone(),
+                None => fail(format!("--from {}: not a node address, and no contact of that name", rest[i])),
+            }
+        }
+    }
+    rest
+}
+
 /// A link as a QR code in the terminal (two rows per line), for showing
 /// on one screen and scanning with another (ADR-0020). Error correction L:
 /// the smallest code, for screens rather than print.

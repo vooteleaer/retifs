@@ -71,7 +71,13 @@ invitation = { "ns": namespace address, "node": creator's node, "secret": 32 ran
 - CLI: `retifs invite create NS [--grant] [--keys K1,K2] [--until DATE] [--expires 1d] [--q TERMS] [--name LABEL]` prints the link; `invite list NS`, `invite cancel NS ID`; `retifs open LINK` accepts it.
 - Live (four nodes, 2026-10-21, 14 checks): the first opener writes at once and its writes reach the creator; a second use, an expired and a withdrawn invitation are refused and grant nothing; a key-limited invitation grants limited write; with the creator stopped, the recipient joins, reads, and gets its grant once the creator is back.
 - **QR (2026-10-22):** `--qr` on `ns link`, `invite create` and `share create` draws the link as a QR code in the terminal (error correction L, light modules drawn, for dark terminals). An invitation is a version 13 code.
-- Not yet: names and contacts, fingerprint words.
+- **Fingerprint words (decided 2026-10-22: BIP-39 English):** consecutive 11-bit groups of SHA-256(key), most significant bit first, as words from the BIP-39 English list (the file, SHA-256 `2f5eed53…dbda`, is in `retifs-core`); six words (66 bits) by default. Vectors: `test-vectors/words-v1.json` (`verify_words.py`).
+- **Contacts (decided 2026-10-22: in the user's own namespace `me`):** a contact is a record `type=contact`, `name` (the petname), `retifs:node` in `me`, which the user's devices share like any namespace (and which will hold saved queries and other personal settings).
+  - `retifs me` shows this node and its words; `retifs me link [--name LABEL] [--qr]` gives a `retifs:node/<node>?name=<label>` link; `retifs open` on one adds the contact (the label as its name, or `--as NAME`) and shows its words to compare with the other side's `retifs me`.
+  - `retifs contact add NAME NODE|LINK`, `contact list` (with words), `contact rm NAME`. Adding a known node again renames it; a name already used for another node is refused.
+  - A contact's name works where a node goes (`--from Mom`).
+  - Live (two nodes, 11 checks).
+- Not yet: display names published by nodes (`/retifs/profile`), writer keys in contacts, sending links over LXMF.
 
 ## Impact on the threat model
 - **Anyone who sees an invitation can read the namespace** (it carries the read key, as an address does). Only the write grant is single-use. Show QR codes in person, and treat a leaked one like a leaked address: revoke and rotate.
