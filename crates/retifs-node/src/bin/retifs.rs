@@ -30,6 +30,7 @@
 //!     retifs [--store DIR] ns grant NS WRITER [--grant] [--keys K1,K2,@content,@delete] [--until YYYY-MM-DD|+30d] [--from NODE]... | ns revoke NS WRITER
 //!     retifs [--store DIR] share create NAME --from NS [TERM]... [--id ID]... [--omit KEY]... [--qr] | share list NS | share rm NS ID
 //!     retifs [--store DIR] ns link NS [--name LABEL] [--q TERMS] [--qr] | open LINK [--as NAME]
+//!     retifs [--store DIR] mount [NS [DIR] [--foreground]] | unmount NS [--forget]
 //!     retifs [--store DIR] me | me link [--name LABEL] [--qr] | contact add NAME NODE|LINK | contact list | contact rm NAME
 //!     retifs [--store DIR] invite create NS [--grant] [--keys K1,K2] [--until DATE] [--expires 1d] [--q TERMS] [--name LABEL] [--qr] | invite list NS | invite cancel NS ID
 //!
@@ -76,11 +77,15 @@ fn usage() -> ! {
          retifs [--store DIR] ns grant NS WRITER [--grant] [--from NODE]... | ns revoke NS WRITER\n\
          retifs [--store DIR] share create NAME --from NS [TERM]... [--id ID]... [--omit KEY]... [--qr] | share list NS | share rm NS ID\n\
          retifs [--store DIR] ns link NS [--name LABEL] [--q TERMS] [--qr] | open LINK [--as NAME] | ns join NAME LINK\n\
+         retifs [--store DIR] mount [NS [DIR] [--foreground]] | unmount NS [--forget]
          retifs [--store DIR] me | me link [--name LABEL] [--qr] | contact add NAME NODE|LINK | contact list | contact rm NAME\n\
          retifs [--store DIR] invite create NS [--grant] [--keys K1,K2] [--until DATE] [--expires 1d] [--q TERMS] [--name LABEL] [--qr] | invite list NS | invite cancel NS ID"
     );
     std::process::exit(2);
 }
+
+#[path = "retifs/mounts.rs"]
+mod mounts;
 
 #[tokio::main(flavor = "current_thread")]
 async fn main() {
@@ -110,6 +115,13 @@ async fn main() {
     }
     let mut it = args.into_iter();
     let command = it.next().unwrap_or_else(|| usage());
+    // These start and stop the file tree's frontend; no daemon connection
+    // of their own.
+    match command.as_str() {
+        "mount" => return mounts::mount(&store, &it.collect::<Vec<_>>()),
+        "unmount" => return mounts::unmount(&store, &it.collect::<Vec<_>>()),
+        _ => {}
+    }
 
     let mut client = match &app_token {
         Some(token) => Client::connect_app(&store, token).await,

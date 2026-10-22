@@ -94,14 +94,15 @@ retifs query photos 'album=Prangli 2026'
 retifs rec history photos <id>
 ```
 
-As a file tree (attributes are `user.retifs.*` xattrs; `.query/<terms>/` lists matches):
+As a file tree, on Linux and Windows alike:
 
 ```sh
-systemctl --user enable --now retifs-mount@photos   # ~/retifs/photos
-ls ~/retifs/photos/.query/album=Prangli\ 2026/
+retifs mount photos            # ~/retifs/photos (or give a folder)
+retifs mount                   # what's mounted where
+retifs unmount photos
 ```
 
-On Windows the tree is a folder in Explorer, with files fetched when opened and "Always keep on this device" setting this device's keep tag: `retifs-cloudfiles photos %USERPROFILE%\retifs\photos`.
+On Linux it's a FUSE mount (attributes are `user.retifs.*` xattrs; `.query/<terms>/` lists matches, e.g. `ls ~/retifs/photos/.query/album=Prangli\ 2026/`); `systemctl --user enable --now retifs-mount@photos` mounts it at login. On Windows it's a folder in Explorer: files are fetched when opened, "Always keep on this device" sets this device's keep tag, and **Share with retifs…** is in the context menu; `retifs unmount photos --forget` also removes it from Explorer.
 
 As websites, one origin per namespace, read-only: `systemctl --user enable --now retifs-gateway`, then open <http://localhost:8740/>.
 
