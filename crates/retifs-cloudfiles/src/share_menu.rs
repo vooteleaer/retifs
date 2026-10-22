@@ -50,7 +50,7 @@ fn create(path: &str) -> windows::core::Result<HKEY> {
 }
 
 /// Adds the verb for files and folders under `root` (namespace `ns`).
-pub fn register(ns: &str, root: &Path) -> Result<(), String> {
+pub fn register(ns: &str, root: &Path, via: Option<&str>) -> Result<(), String> {
     let exe = std::env::current_exe().map_err(|e| e.to_string())?;
     let exe = exe.to_string_lossy().trim_start_matches(r"\\?\").to_string();
     let root = root.to_string_lossy();
@@ -62,7 +62,8 @@ pub fn register(ns: &str, root: &Path) -> Result<(), String> {
             set(key, Some("Icon"), &format!("\"{exe}\",0"))?;
             set(key, Some("AppliesTo"), &applies)?;
             let cmd = create(&format!(r"{path}\command"))?;
-            set(cmd, None, &format!("\"{exe}\" --share-in \"{ns}\" \"{root}\" \"%1\""))
+            let via = via.map(|v| format!(" --via {v}")).unwrap_or_default();
+            set(cmd, None, &format!("\"{exe}\"{via} --share-in \"{ns}\" \"{root}\" \"%1\""))
         })();
         result.map_err(|e| format!("adding {VERB} to Explorer: {e}"))?;
     }
@@ -99,12 +100,12 @@ fn sync_root_of(path: &Path) -> Option<(String, PathBuf)> {
 /// `within`: the namespace and sync root, as the verb passes them; None
 /// asks the folder (which fails for folders Windows' storage API won't
 /// open, e.g. under the hidden AppData).
-pub fn share(store: &Path, path: &Path, within: Option<(String, PathBuf)>) -> Result<(), String> {
+pub fn share(store: &Path, path: &Path, within: Option<(String, PathBuf)>, via: Option<String>) -> Result<(), String> {
     let quiet = std::env::var_os("RETIFS_NO_DIALOG").is_some();
     if !quiet {
         unsafe { _ = FreeConsole() }; // started by Explorer: no console window
     }
-    let result = make_share(store, path, within);
+    let result = make_share(store, path, within, via);
     let (title, text, icon) = match &result {
         Ok(text) => ("Shared with retifs", text.clone(), MB_ICONINFORMATION),
         Err(e) => ("Not shared", e.clone(), MB_ICONERROR),
@@ -117,7 +118,7 @@ pub fn share(store: &Path, path: &Path, within: Option<(String, PathBuf)>) -> Re
     result.map(|_| ())
 }
 
-fn make_share(store: &Path, path: &Path, within: Option<(String, PathBuf)>) -> Result<String, String> {
+fn make_share(store: &Path, path: &Path, within: Option<(String, PathBuf)>, via: Option<String>) -> Result<String, String> {
     let path = std::fs::canonicalize(path).map_err(|e| format!("{}: {e}", path.display()))?;
     let path = PathBuf::from(path.to_string_lossy().trim_start_matches(r"\\?\"));
     let (ns, root) = match within {
@@ -141,7 +142,7 @@ fn make_share(store: &Path, path: &Path, within: Option<(String, PathBuf)>) -> R
 
     let rt = tokio::runtime::Builder::new_current_thread().enable_all().build().map_err(|e| e.to_string())?;
     rt.block_on(async {
-        let mut client = Client::connect(store).await.map_err(|e| format!("retifsd isn't running ({e})"))?;
+        let mut client = Client::connect(store).await.map_err(|e| format!("retifsd isn't running ({e})"))?.via(via);
         let taken = match client.call(Request::Namespaces).await.map_err(|e| e.to_string())? {
             Response::Names { names } => names,
             _ => Vec::new(),

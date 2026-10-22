@@ -35,6 +35,8 @@ struct Mounted {
     ns: String,
     pid: u32,
     dir: PathBuf,
+    /// The node holding the namespace, when it isn't this one.
+    via: Option<String>,
 }
 
 fn read(store: &Path, ns: &str) -> Option<Mounted> {
@@ -42,7 +44,8 @@ fn read(store: &Path, ns: &str) -> Option<Mounted> {
     let mut lines = text.lines();
     let pid = lines.next()?.parse().ok()?;
     let dir = PathBuf::from(lines.next()?);
-    Some(Mounted { ns: ns.to_string(), pid, dir })
+    let via = lines.next().filter(|v| !v.is_empty()).map(String::from);
+    Some(Mounted { ns: ns.to_string(), pid, dir, via })
 }
 
 fn all(store: &Path) -> Vec<Mounted> {
@@ -110,15 +113,17 @@ fn log_tail(path: &Path, lines: usize) -> String {
     all[all.len().saturating_sub(lines)..].join("\n")
 }
 
-/// `retifs mount`: with no namespace, lists the mounts.
-pub fn mount(store: &Path, args: &[String]) {
+/// `retifs mount`: with no namespace, lists the mounts. `via`: the
+/// namespace is on another of the user's nodes (ADR-0019).
+pub fn mount(store: &Path, args: &[String], via: Option<&str>) {
     let foreground = args.iter().any(|a| a == "--foreground");
     let rest: Vec<&String> = args.iter().filter(|a| *a != "--foreground").collect();
     let Some(ns) = rest.first() else {
         let mounts = all(store);
         for m in &mounts {
             let state = if alive(m.pid) { "" } else { "  (not running: retifs unmount to clean up)" };
-            println!("{:<16} {}{state}", m.ns, m.dir.display());
+            let on = m.via.as_deref().map(|v| format!("  (on node {v})")).unwrap_or_default();
+            println!("{:<16} {}{on}{state}", m.ns, m.dir.display());
         }
         println!("{} mount(s)", mounts.len());
         return;
@@ -134,7 +139,11 @@ pub fn mount(store: &Path, args: &[String]) {
     let dir = std::fs::canonicalize(&dir).unwrap_or(dir);
     let dir = PathBuf::from(dir.to_string_lossy().trim_start_matches(r"\\?\"));
     let mut cmd = Command::new(frontend());
-    cmd.arg("--store").arg(store).arg(ns.as_str()).arg(&dir);
+    cmd.arg("--store").arg(store);
+    if let Some(v) = via {
+        cmd.arg("--via").arg(v);
+    }
+    cmd.arg(ns.as_str()).arg(&dir);
     if foreground {
         let status = cmd.status().unwrap_or_else(|e| super::fail(format!("{FRONTEND}: {e}")));
         std::process::exit(status.code().unwrap_or(1));
@@ -161,7 +170,7 @@ pub fn mount(store: &Path, args: &[String]) {
     #[allow(clippy::zombie_processes)]
     let mut child = cmd.spawn().unwrap_or_else(|e| super::fail(format!("{}: {e}", frontend().display())));
     let pid = child.id();
-    std::fs::write(mounts_dir(store).join(ns.as_str()), format!("{pid}\n{}\n", dir.display())).unwrap_or_else(|e| super::fail(e));
+    std::fs::write(mounts_dir(store).join(ns.as_str()), format!("{pid}\n{}\n{}\n", dir.display(), via.unwrap_or(""))).unwrap_or_else(|e| super::fail(e));
     // Up once the frontend says so; a frontend that stops has failed.
     let ready = if cfg!(windows) { "retifs-cloudfiles: namespace" } else { "retifs-mount: namespace" };
     let started = Instant::now();
@@ -177,7 +186,8 @@ pub fn mount(store: &Path, args: &[String]) {
             break;
         }
     }
-    println!("{ns} mounted at {}", dir.display());
+    let on = via.map(|v| format!(" (on node {v})")).unwrap_or_default();
+    println!("{ns}{on} mounted at {}", dir.display());
     println!("  log {}; retifs unmount {ns} to stop", log.display());
 }
 

@@ -35,6 +35,8 @@ const PROVIDER: &str = "retifs";
 /// Content moves in pieces this large (a multiple of 4 KiB, as Cloud Files
 /// wants every piece but the last).
 const PIECE: u64 = 4 << 20;
+/// Through another node (`--via`), a range read answers at most 1 MiB.
+const PIECE_VIA: u64 = 1 << 20;
 /// Without a change notice, the namespace is re-read at least this often.
 const RESYNC: Duration = Duration::from_secs(60);
 /// After a delete or rename in the folder, its records are left alone this
@@ -49,20 +51,26 @@ const GENERIC_READ_WRITE: u32 = 0x8000_0000 | 0x4000_0000;
 /// A blocking client of the local API that reconnects after errors.
 struct Daemon {
     store: PathBuf,
+    /// Another of the user's nodes that holds the namespace (ADR-0019).
+    via: Option<String>,
     rt: tokio::runtime::Runtime,
     client: Option<Client>,
 }
 
 impl Daemon {
-    fn new(store: &Path) -> Result<Daemon, String> {
+    fn new(store: &Path, via: Option<String>) -> Result<Daemon, String> {
         let rt = tokio::runtime::Builder::new_current_thread().enable_all().build().map_err(|e| e.to_string())?;
-        Ok(Daemon { store: store.to_path_buf(), rt, client: None })
+        Ok(Daemon { store: store.to_path_buf(), via, rt, client: None })
+    }
+
+    fn piece(&self) -> u64 {
+        if self.via.is_some() { PIECE_VIA } else { PIECE }
     }
 
     fn call(&mut self, req: Request) -> Result<Response, String> {
         if self.client.is_none() {
             let c = self.rt.block_on(Client::connect(&self.store)).map_err(|e| format!("can't reach retifsd at {}: {e}", self.store.display()))?;
-            self.client = Some(c);
+            self.client = Some(c.via(self.via.clone()));
         }
         match self.rt.block_on(self.client.as_mut().unwrap().call(req)) {
             Ok(Response::Error { message }) => Err(message),
@@ -290,8 +298,9 @@ impl SyncFilter for Filter {
         eprintln!("retifs-cloudfiles: {}: fetching {}..{} of {size} for process {}", req.path().display(), range.start, range.end, req.process().id());
         let end = (range.end.div_ceil(4096) * 4096).min(size);
         let mut pos = range.start;
+        let piece = self.daemon.lock().unwrap().piece();
         while pos < end {
-            let len = PIECE.min(end - pos);
+            let len = piece.min(end - pos);
             let read = Request::ReadRange { cap: cap.to_string(), ns: Some(self.shared.ns.clone()), offset: pos, len, wait_ms: self.wait.as_millis() as u64 };
             let data = match self.daemon.lock().unwrap().call(read) {
                 Ok(Response::Range { data }) if data.len() as u64 == len => data,
@@ -444,18 +453,18 @@ fn metadata(w: &Want) -> Metadata {
     base.written(t).changed(t).created(t).accessed(t)
 }
 
-pub fn run(store: &Path, ns: &str, folder: &Path, wait: Duration) -> Result<(), String> {
+pub fn run(store: &Path, ns: &str, folder: &Path, wait: Duration, via: Option<String>) -> Result<(), String> {
     if !cloud_filter::root::is_supported().unwrap_or(false) {
         return Err("Cloud Files isn't supported on this Windows".into());
     }
     fs::create_dir_all(folder).map_err(|e| format!("{}: {e}", folder.display()))?;
     let folder = fs::canonicalize(folder).map_err(|e| e.to_string())?;
     let folder = PathBuf::from(folder.to_string_lossy().trim_start_matches(r"\\?\"));
-    let mut daemon = Daemon::new(store)?;
+    let mut daemon = Daemon::new(store, via.clone())?;
     let device = daemon.device(ns)?;
     let id = root_id(ns)?;
     register(&id, ns, &folder)?;
-    if let Err(e) = crate::share_menu::register(ns, &folder) {
+    if let Err(e) = crate::share_menu::register(ns, &folder, via.as_deref()) {
         eprintln!("retifs-cloudfiles: {e}");
     }
 
@@ -469,7 +478,7 @@ pub fn run(store: &Path, ns: &str, folder: &Path, wait: Duration) -> Result<(), 
         pinning: Mutex::new(HashMap::new()),
         hydrate: Mutex::new(hydrate_tx.clone()),
     });
-    let filter = Filter { shared: shared.clone(), wait, daemon: Mutex::new(Daemon::new(store)?) };
+    let filter = Filter { shared: shared.clone(), wait, daemon: Mutex::new(Daemon::new(store, via.clone())?) };
     let _connection = Session::new().connect(&folder, filter).map_err(|e| format!("connecting the sync root: {e}"))?;
     // Pinned files are hydrated one at a time, off the callback threads.
     std::thread::spawn(move || {
@@ -481,10 +490,11 @@ pub fn run(store: &Path, ns: &str, folder: &Path, wait: Duration) -> Result<(), 
             }
         }
     });
-    eprintln!("retifs-cloudfiles: namespace {ns} in {} (device {device}; Ctrl+C stops it, --unregister removes it)", folder.display());
+    let on = via.as_deref().map(|v| format!(" on node {v}")).unwrap_or_default();
+    eprintln!("retifs-cloudfiles: namespace {ns}{on} in {} (device {device}; Ctrl+C stops it, --unregister removes it)", folder.display());
 
     let (wake_tx, wake) = mpsc::channel();
-    watch(store, ns, wake_tx.clone());
+    watch(store, ns, via, wake_tx.clone());
     watch_folder(&folder, wake_tx);
     let sync = Sync { shared: shared.clone(), hydrate: hydrate_tx };
     loop {
@@ -513,16 +523,17 @@ fn is_kept(r: &RecordView, device: &str) -> bool {
 
 /// Watches namespace `ns` on a thread of its own (a long poll on the local
 /// API) and wakes the sync loop on every change.
-fn watch(store: &Path, ns: &str, wake: mpsc::Sender<()>) {
+fn watch(store: &Path, ns: &str, via: Option<String>, wake: mpsc::Sender<()>) {
     let (store, ns) = (store.to_path_buf(), ns.to_string());
     std::thread::spawn(move || {
         let Ok(rt) = tokio::runtime::Builder::new_current_thread().enable_all().build() else { return };
         let mut since = 0;
         loop {
-            let Ok(mut client) = rt.block_on(Client::connect(&store)) else {
+            let Ok(client) = rt.block_on(Client::connect(&store)) else {
                 std::thread::sleep(Duration::from_secs(5)); // the daemon restarting
                 continue;
             };
+            let mut client = client.via(via.clone());
             while let Ok(Response::Changed { count }) = rt.block_on(client.call(Request::Watch { ns: ns.clone(), since, timeout_ms: 30_000 })) {
                 if count != since {
                     since = count;
@@ -723,7 +734,8 @@ impl Sync {
         let name = path.rsplit('/').next().unwrap_or("").to_string();
         let result: Result<RecordView, String> = (|| {
             let first = |rs: Vec<RecordView>| rs.into_iter().next().ok_or_else(|| "no record in the answer".to_string());
-            if size <= PIECE {
+            let piece_len = d.piece();
+            if size <= piece_len {
                 let mut data = Vec::with_capacity(size as usize);
                 file.read_to_end(&mut data).map_err(|e| e.to_string())?;
                 let mtime = ("mtime".to_string(), AttrValue::Int(mtime));
@@ -748,7 +760,7 @@ impl Sync {
                 _ => return Err("unexpected answer to WriteBegin".into()),
             };
             let mut offset = 0;
-            let mut piece = vec![0u8; PIECE as usize];
+            let mut piece = vec![0u8; piece_len as usize];
             loop {
                 let n = file.read(&mut piece).map_err(|e| e.to_string())?;
                 if n == 0 {

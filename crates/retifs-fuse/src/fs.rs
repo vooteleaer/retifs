@@ -68,9 +68,11 @@ pub struct RetifsFs {
     changed: Arc<AtomicBool>,
 }
 
-pub fn mount(store: &Path, ns: &str, mountpoint: &Path, wait: Duration) -> Result<(), String> {
+/// `via`: the namespace is on another of the user's nodes; every request
+/// goes there over a Link (ADR-0019).
+pub fn mount(store: &Path, ns: &str, mountpoint: &Path, wait: Duration, via: Option<String>) -> Result<(), String> {
     let rt = tokio::runtime::Builder::new_current_thread().enable_all().build().map_err(|e| e.to_string())?;
-    let client = rt.block_on(Client::connect(store)).map_err(|e| format!("can't reach retifsd at {}: {e}", store.display()))?;
+    let client = rt.block_on(Client::connect(store)).map_err(|e| format!("can't reach retifsd at {}: {e}", store.display()))?.via(via.clone());
     let fs = RetifsFs {
         rt,
         client,
@@ -87,7 +89,7 @@ pub fn mount(store: &Path, ns: &str, mountpoint: &Path, wait: Duration) -> Resul
         gid: unsafe { libc::getgid() },
         started: SystemTime::now(),
         wait,
-        changed: watch(store, ns),
+        changed: watch(store, ns, via),
     };
     let opts = [MountOption::FSName(format!("retifs:{ns}")), MountOption::Subtype("retifs".into()), MountOption::DefaultPermissions];
     fuser::mount2(fs, mountpoint, &opts).map_err(|e| e.to_string())
@@ -96,17 +98,18 @@ pub fn mount(store: &Path, ns: &str, mountpoint: &Path, wait: Duration) -> Resul
 /// Watches namespace `ns` on a thread of its own (a long poll on the local
 /// API) and raises the flag on every change, so the mount re-reads it only
 /// when something changed: a local write, or another member's merged in.
-fn watch(store: &Path, ns: &str) -> Arc<AtomicBool> {
+fn watch(store: &Path, ns: &str, via: Option<String>) -> Arc<AtomicBool> {
     let flag = Arc::new(AtomicBool::new(true));
     let (store, ns, out) = (store.to_path_buf(), ns.to_string(), flag.clone());
     std::thread::spawn(move || {
         let Ok(rt) = tokio::runtime::Builder::new_current_thread().enable_all().build() else { return };
         let mut since = 0;
         loop {
-            let Ok(mut client) = rt.block_on(Client::connect(&store)) else {
+            let Ok(client) = rt.block_on(Client::connect(&store)) else {
                 std::thread::sleep(Duration::from_secs(5)); // the daemon restarting
                 continue;
             };
+            let mut client = client.via(via.clone());
             // Until the connection fails (then reconnect).
             while let Ok(Response::Changed { count }) = rt.block_on(client.call(Request::Watch { ns: ns.clone(), since, timeout_ms: 30_000 })) {
                 if count != since {

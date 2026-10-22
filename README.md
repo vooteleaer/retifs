@@ -100,7 +100,10 @@ As a file tree, on Linux and Windows alike:
 retifs mount photos            # ~/retifs/photos (or give a folder)
 retifs mount                   # what's mounted where
 retifs unmount photos
+retifs mount photos --via home # a namespace your home node holds, nothing of it kept here
 ```
+
+(For `--via`, the home node admits this one first: `retifs app add laptop --ns photos --write --device <this node>`; `home` is a contact or a node address.) To read a namespace someone shared with you, join it (`retifs open LINK`, or `ns join --lazy` to fetch only what's opened) and mount it like your own.
 
 On Linux it's a FUSE mount (attributes are `user.retifs.*` xattrs; `.query/<terms>/` lists matches, e.g. `ls ~/retifs/photos/.query/album=Prangli\ 2026/`); `systemctl --user enable --now retifs-mount@photos` mounts it at login. On Windows it's a folder in Explorer: files are fetched when opened, "Always keep on this device" sets this device's keep tag, and **Share with retifs…** is in the context menu; `retifs unmount photos --forget` also removes it from Explorer.
 

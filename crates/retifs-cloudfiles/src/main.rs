@@ -10,11 +10,12 @@ mod provider;
 mod share_menu;
 
 fn usage() -> ! {
-    eprintln!("retifs-cloudfiles [--store DIR] [--wait SECONDS] NS FOLDER");
+    eprintln!("retifs-cloudfiles [--store DIR] [--wait SECONDS] [--via NODE] NS FOLDER");
     eprintln!("retifs-cloudfiles --unregister NS");
     eprintln!("retifs-cloudfiles [--store DIR] --share PATH");
     eprintln!("retifs-cloudfiles [--store DIR] --share-in NS ROOT PATH   (what Explorer's Share with retifs runs)");
     eprintln!("  --wait: how long opening a file waits for content that isn't here yet (default 30)");
+    eprintln!("  --via: the namespace is on another of your nodes (ADR-0019), not this one");
     std::process::exit(2)
 }
 
@@ -24,6 +25,7 @@ fn main() {
     let mut unregister = false;
     let mut share = None;
     let mut within = None;
+    let mut via = None;
     let mut rest = Vec::new();
     let mut args = std::env::args().skip(1);
     while let Some(a) = args.next() {
@@ -31,6 +33,7 @@ fn main() {
             "--store" => store = args.next().unwrap_or_else(|| usage()).into(),
             "--wait" => wait = std::time::Duration::from_secs(args.next().and_then(|v| v.parse().ok()).unwrap_or_else(|| usage())),
             "--unregister" => unregister = true,
+            "--via" => via = Some(args.next().unwrap_or_else(|| usage())),
             "--share" => share = Some(args.next().unwrap_or_else(|| usage())),
             "--share-in" => {
                 let ns = args.next().unwrap_or_else(|| usage());
@@ -43,9 +46,9 @@ fn main() {
         }
     }
     let result = match (unregister, rest.as_slice()) {
-        _ if share.is_some() => run_share(&store, std::path::Path::new(share.as_deref().unwrap()), within),
+        _ if share.is_some() => run_share(&store, std::path::Path::new(share.as_deref().unwrap()), within, via),
         (true, [ns]) => run_unregister(ns),
-        (false, [ns, folder]) => run(&store, ns, std::path::Path::new(folder), wait),
+        (false, [ns, folder]) => run(&store, ns, std::path::Path::new(folder), wait, via),
         _ => usage(),
     };
     if let Err(e) = result {
@@ -55,8 +58,8 @@ fn main() {
 }
 
 #[cfg(windows)]
-fn run(store: &std::path::Path, ns: &str, folder: &std::path::Path, wait: std::time::Duration) -> Result<(), String> {
-    provider::run(store, ns, folder, wait)
+fn run(store: &std::path::Path, ns: &str, folder: &std::path::Path, wait: std::time::Duration, via: Option<String>) -> Result<(), String> {
+    provider::run(store, ns, folder, wait, via)
 }
 
 #[cfg(windows)]
@@ -65,17 +68,17 @@ fn run_unregister(ns: &str) -> Result<(), String> {
 }
 
 #[cfg(windows)]
-fn run_share(store: &std::path::Path, path: &std::path::Path, within: Option<(String, std::path::PathBuf)>) -> Result<(), String> {
-    share_menu::share(store, path, within)
+fn run_share(store: &std::path::Path, path: &std::path::Path, within: Option<(String, std::path::PathBuf)>, via: Option<String>) -> Result<(), String> {
+    share_menu::share(store, path, within, via)
 }
 
 #[cfg(not(windows))]
-fn run_share(_: &std::path::Path, _: &std::path::Path, _: Option<(String, std::path::PathBuf)>) -> Result<(), String> {
-    run(std::path::Path::new(""), "", std::path::Path::new(""), Default::default())
+fn run_share(_: &std::path::Path, _: &std::path::Path, _: Option<(String, std::path::PathBuf)>, _: Option<String>) -> Result<(), String> {
+    run(std::path::Path::new(""), "", std::path::Path::new(""), Default::default(), None)
 }
 
 #[cfg(not(windows))]
-fn run(_: &std::path::Path, _: &str, _: &std::path::Path, _: std::time::Duration) -> Result<(), String> {
+fn run(_: &std::path::Path, _: &str, _: &std::path::Path, _: std::time::Duration, _: Option<String>) -> Result<(), String> {
     Err("the Cloud Files provider is Windows only; on Linux use retifs-mount (ADR-0002)".into())
 }
 
