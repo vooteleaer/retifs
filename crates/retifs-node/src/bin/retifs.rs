@@ -28,9 +28,9 @@
 //!     retifs [--store DIR] ns address NS | ns info NS
 //!     retifs [--store DIR] ns join NAME ADDRESS [--from NODE]... [--lazy]
 //!     retifs [--store DIR] ns grant NS WRITER [--grant] [--keys K1,K2,@content,@delete] [--until YYYY-MM-DD|+30d] [--from NODE]... | ns revoke NS WRITER
-//!     retifs [--store DIR] share create NAME --from NS [TERM]... [--id ID]... [--omit KEY]... | share list NS | share rm NS ID
-//!     retifs [--store DIR] ns link NS [--name LABEL] [--q TERMS] | open LINK [--as NAME]
-//!     retifs [--store DIR] invite create NS [--grant] [--keys K1,K2] [--until DATE] [--expires 1d] [--q TERMS] [--name LABEL] | invite list NS | invite cancel NS ID
+//!     retifs [--store DIR] share create NAME --from NS [TERM]... [--id ID]... [--omit KEY]... [--qr] | share list NS | share rm NS ID
+//!     retifs [--store DIR] ns link NS [--name LABEL] [--q TERMS] [--qr] | open LINK [--as NAME]
+//!     retifs [--store DIR] invite create NS [--grant] [--keys K1,K2] [--until DATE] [--expires 1d] [--q TERMS] [--name LABEL] [--qr] | invite list NS | invite cancel NS ID
 //!
 //! Several writers per namespace (ADR-0017): a member joins with the address
 //! and shows its writer key; the creator grants it; members sync each other.
@@ -73,9 +73,9 @@ fn usage() -> ! {
          retifs [--store DIR] rec get NS ID | rec rm NS ID | rec history NS ID | rec import NS < LINES | query NS[,NS]... [--at VERSION] [TERM]... [--search NODE]\n\
          retifs [--store DIR] ns address NS | ns info NS | ns checkpoint NS | ns search NS | ns verify NS | ns keep NS all|rules | ns join NAME ADDRESS [--from NODE]... [--lazy]\n\
          retifs [--store DIR] ns grant NS WRITER [--grant] [--from NODE]... | ns revoke NS WRITER\n\
-         retifs [--store DIR] share create NAME --from NS [TERM]... [--id ID]... [--omit KEY]... | share list NS | share rm NS ID\n\
-         retifs [--store DIR] ns link NS [--name LABEL] [--q TERMS] | open LINK [--as NAME] | ns join NAME LINK\n\
-         retifs [--store DIR] invite create NS [--grant] [--keys K1,K2] [--until DATE] [--expires 1d] [--q TERMS] [--name LABEL] | invite list NS | invite cancel NS ID"
+         retifs [--store DIR] share create NAME --from NS [TERM]... [--id ID]... [--omit KEY]... [--qr] | share list NS | share rm NS ID\n\
+         retifs [--store DIR] ns link NS [--name LABEL] [--q TERMS] [--qr] | open LINK [--as NAME] | ns join NAME LINK\n\
+         retifs [--store DIR] invite create NS [--grant] [--keys K1,K2] [--until DATE] [--expires 1d] [--q TERMS] [--name LABEL] [--qr] | invite list NS | invite cancel NS ID"
     );
     std::process::exit(2);
 }
@@ -384,6 +384,9 @@ async fn main() {
                         link.params.push(("q".into(), q));
                     }
                     println!("{link}");
+                    if rest.iter().any(|a| a == "--qr") {
+                        print_qr(&link.to_string());
+                    }
                     eprintln!("(anyone with this link can read all of {ns}; to give only part of it, make a share)");
                     return;
                 }
@@ -453,7 +456,9 @@ async fn main() {
                     let mut terms = Vec::new();
                     let mut i = 1;
                     while i < rest.len() {
-                        if rest[i].starts_with("--") {
+                        if rest[i] == "--qr" {
+                            i += 1;
+                        } else if rest[i].starts_with("--") {
                             i += 2;
                         } else {
                             terms.push(rest[i].clone());
@@ -465,7 +470,11 @@ async fn main() {
                         libretifs::Response::Namespace(v) => {
                             let (node, _, _) = client.ping().await.unwrap_or_else(|e| fail(e));
                             println!("share {}: {} record(s)", v.name, v.records);
-                            println!("  link {}", libretifs::link::Link::namespace(&v.address, &[node], Some(&v.name)));
+                            let link = libretifs::link::Link::namespace(&v.address, &[node], Some(&v.name)).to_string();
+                            println!("  link {link}");
+                            if rest.iter().any(|a| a == "--qr") {
+                                print_qr(&link);
+                            }
                             println!("  (whoever has the link reads the share: retifs open LINK)");
                         }
                         libretifs::Response::Error { message } => fail(message),
@@ -530,6 +539,9 @@ async fn main() {
             match client.call(req).await.unwrap_or_else(|e| fail(e)) {
                 libretifs::Response::Link { link } => {
                     println!("{link}");
+                    if rest.iter().any(|a| a == "--qr") {
+                        print_qr(&link);
+                    }
                     eprintln!("(the first to open it may write to {ns}; anyone who sees it can read {ns}: pass it in person or end to end)");
                 }
                 libretifs::Response::Invites { invites } => {
@@ -757,6 +769,17 @@ fn attr(arg: &str) -> (String, libretifs::AttrValue) {
 
 /// A point in time for `--until`: `YYYY-MM-DD` (UTC midnight), `+30d` /
 /// `+12h` / `+90m` from now, or milliseconds since the epoch.
+/// A link as a QR code in the terminal (two rows per line), for showing
+/// on one screen and scanning with another (ADR-0020). Error correction L:
+/// the smallest code, for screens rather than print.
+fn print_qr(text: &str) {
+    use qrcode::{render::unicode::Dense1x2, EcLevel, QrCode};
+    match QrCode::with_error_correction_level(text, EcLevel::L) {
+        Ok(code) => eprintln!("{}", code.render::<Dense1x2>().dark_color(Dense1x2::Light).light_color(Dense1x2::Dark).quiet_zone(true).build()),
+        Err(e) => eprintln!("(no QR code: {e})"),
+    }
+}
+
 /// `30m`, `2h`, `7d` (or plain seconds) as milliseconds.
 fn parse_duration_ms(s: &str) -> Option<u64> {
     let (n, unit) = s.trim().split_at(s.trim().find(|c: char| !c.is_ascii_digit()).unwrap_or(s.trim().len()));

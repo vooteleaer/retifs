@@ -18,6 +18,7 @@ path = "src/bin/retifs.rs"
 [dependencies]
 getrandom = "0.3"
 libretifs = { path = "../libretifs" }
+qrcode = { version = "0.14", default-features = false }
 redb = "2"
 rmp-serde = "1"
 personal-rns = { path = "../../../Prns-0.3.8/personal-rns", features = ["tokio-host", "tcp", "shared-instance"] }

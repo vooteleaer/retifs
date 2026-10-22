@@ -70,7 +70,8 @@ invitation = { "ns": namespace address, "node": creator's node, "secret": 32 ran
   - Vectors: `test-vectors/invite-v1.json`, verified with Python RNS's umsgpack and HMAC (`verify_invite_rns.py`).
 - CLI: `retifs invite create NS [--grant] [--keys K1,K2] [--until DATE] [--expires 1d] [--q TERMS] [--name LABEL]` prints the link; `invite list NS`, `invite cancel NS ID`; `retifs open LINK` accepts it.
 - Live (four nodes, 2026-10-21, 14 checks): the first opener writes at once and its writes reach the creator; a second use, an expired and a withdrawn invitation are refused and grant nothing; a key-limited invitation grants limited write; with the creator stopped, the recipient joins, reads, and gets its grant once the creator is back.
-- Not yet: names and contacts, fingerprint words, QR rendering.
+- **QR (2026-10-22):** `--qr` on `ns link`, `invite create` and `share create` draws the link as a QR code in the terminal (error correction L, light modules drawn, for dark terminals). An invitation is a version 13 code.
+- Not yet: names and contacts, fingerprint words.
 
 ## Impact on the threat model
 - **Anyone who sees an invitation can read the namespace** (it carries the read key, as an address does). Only the write grant is single-use. Show QR codes in person, and treat a leaked one like a leaked address: revoke and rotate.
