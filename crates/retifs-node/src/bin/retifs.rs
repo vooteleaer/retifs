@@ -310,12 +310,12 @@ async fn main() {
             let req = match sub.as_str() {
                 "add" => {
                     let mut attrs = Vec::new();
-                    let mut data = None;
+                    let mut file: Option<PathBuf> = None;
                     let mut i = 0;
                     while i < rest.len() {
                         if rest[i] == "--file" {
                             let path: PathBuf = rest.get(i + 1).cloned().unwrap_or_else(|| usage()).into();
-                            data = Some(std::fs::read(&path).unwrap_or_else(|e| fail(format!("{}: {e}", path.display()))));
+                            file = Some(path.clone());
                             if !rest.iter().any(|a| a.starts_with("name=")) {
                                 let name = path.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default();
                                 attrs.push(("name".to_string(), libretifs::AttrValue::Str(name)));
@@ -326,26 +326,57 @@ async fn main() {
                             i += 1;
                         }
                     }
-                    libretifs::Request::RecordCreate { ns, attrs, data }
+                    match file {
+                        // Large: the record first, then its content through a write session.
+                        Some(path) if file_len(&path) > STREAM_OVER => {
+                            let id = match client.call(libretifs::Request::RecordCreate { ns: ns.clone(), attrs, data: None }).await.unwrap_or_else(|e| fail(e)) {
+                                libretifs::Response::Records { records } if !records.is_empty() => records[0].id.clone(),
+                                libretifs::Response::Error { message } => fail(message),
+                                _ => fail("unexpected response"),
+                            };
+                            write_file(&mut client, &ns, &id, &path, via_set).await;
+                            libretifs::Request::RecordGet { ns, id }
+                        }
+                        Some(path) => {
+                            let data = std::fs::read(&path).unwrap_or_else(|e| fail(format!("{}: {e}", path.display())));
+                            libretifs::Request::RecordCreate { ns, attrs, data: Some(data) }
+                        }
+                        None => libretifs::Request::RecordCreate { ns, attrs, data: None },
+                    }
                 }
                 "set" => {
                     let id = rest.first().cloned().unwrap_or_else(|| usage());
-                    let (mut attrs, mut unset, mut data) = (Vec::new(), Vec::new(), None);
+                    let (mut attrs, mut unset, mut file) = (Vec::new(), Vec::new(), None);
                     let mut i = 1;
                     while i < rest.len() {
                         if rest[i] == "--unset" {
                             unset.push(rest.get(i + 1).cloned().unwrap_or_else(|| usage()));
                             i += 2;
                         } else if rest[i] == "--file" {
-                            let path = std::path::PathBuf::from(rest.get(i + 1).cloned().unwrap_or_else(|| usage()));
-                            data = Some(std::fs::read(&path).unwrap_or_else(|e| fail(format!("{}: {e}", path.display()))));
+                            file = Some(std::path::PathBuf::from(rest.get(i + 1).cloned().unwrap_or_else(|| usage())));
                             i += 2;
                         } else {
                             attrs.push(attr(&rest[i]));
                             i += 1;
                         }
                     }
-                    libretifs::Request::RecordSet { ns, id, attrs, unset, data }
+                    match file {
+                        Some(path) if file_len(&path) > STREAM_OVER => {
+                            if !attrs.is_empty() || !unset.is_empty() {
+                                let req = libretifs::Request::RecordSet { ns: ns.clone(), id: id.clone(), attrs, unset, data: None };
+                                if let libretifs::Response::Error { message } = client.call(req).await.unwrap_or_else(|e| fail(e)) {
+                                    fail(message);
+                                }
+                            }
+                            write_file(&mut client, &ns, &id, &path, via_set).await;
+                            libretifs::Request::RecordGet { ns, id }
+                        }
+                        Some(path) => {
+                            let data = std::fs::read(&path).unwrap_or_else(|e| fail(format!("{}: {e}", path.display())));
+                            libretifs::Request::RecordSet { ns, id, attrs, unset, data: Some(data) }
+                        }
+                        None => libretifs::Request::RecordSet { ns, id, attrs, unset, data: None },
+                    }
                 }
                 "get" => libretifs::Request::RecordGet { ns, id: rest.first().cloned().unwrap_or_else(|| usage()) },
                 "rm" => libretifs::Request::RecordDelete { ns, id: rest.first().cloned().unwrap_or_else(|| usage()) },
@@ -802,20 +833,29 @@ async fn main() {
             let rest: Vec<String> = it.collect();
             let opt = |name: &str| rest.windows(2).find(|w| w[0] == name).map(|w| w[1].clone());
             let num = |name: &str, default: u64| opt(name).map_or(default, |v| v.parse().unwrap_or_else(|_| usage()));
-            let req = libretifs::Request::ReadRange {
-                cap,
-                ns: opt("--ns"),
-                offset: num("--offset", 0),
-                len: num("--len", u64::MAX),
-                wait_ms: num("--wait", 30) * 1000,
-            };
-            match client.call(req).await.unwrap_or_else(|e| fail(e)) {
-                libretifs::Response::Range { data } => {
-                    use std::io::Write;
-                    std::io::stdout().write_all(&data).unwrap_or_else(|e| fail(e.to_string()));
+            // In pieces, each written out as it comes: a whole large file in one
+            // answer would exceed the local API's message limit (and memory).
+            let piece: u64 = if via_set { 512 << 10 } else { 4 << 20 };
+            let mut offset = num("--offset", 0);
+            let mut left = num("--len", u64::MAX);
+            let ns = opt("--ns");
+            let wait_ms = num("--wait", 30) * 1000;
+            use std::io::Write;
+            let mut stdout = std::io::stdout().lock();
+            while left > 0 {
+                let len = piece.min(left);
+                let req = libretifs::Request::ReadRange { cap: cap.clone(), ns: ns.clone(), offset, len, wait_ms };
+                let data = match client.call(req).await.unwrap_or_else(|e| fail(e)) {
+                    libretifs::Response::Range { data } => data,
+                    libretifs::Response::Error { message } => fail(message),
+                    _ => fail("unexpected response"),
+                };
+                stdout.write_all(&data).unwrap_or_else(|e| fail(e.to_string()));
+                if (data.len() as u64) < len {
+                    break; // the end of the file
                 }
-                libretifs::Response::Error { message } => fail(message),
-                _ => fail("unexpected response"),
+                offset += len;
+                left -= len;
             }
         }
         _ => usage(),
@@ -866,6 +906,49 @@ fn attr(arg: &str) -> (String, libretifs::AttrValue) {
 
 /// A point in time for `--until`: `YYYY-MM-DD` (UTC midnight), `+30d` /
 /// `+12h` / `+90m` from now, or milliseconds since the epoch.
+/// A file larger than this is written through a write session, a piece at
+/// a time, not read whole into one message (which can't exceed MAX_FRAME).
+const STREAM_OVER: u64 = 4 << 20;
+
+fn file_len(path: &std::path::Path) -> u64 {
+    std::fs::metadata(path).map(|m| m.len()).unwrap_or_else(|e| fail(format!("{}: {e}", path.display())))
+}
+
+/// Replaces record `id`'s content with the file at `path` through a write
+/// session: 1 MiB pieces, or 512 KiB through another node (`--via`: a
+/// request over a Link is one RNS Resource, at most 1 MiB with its envelope).
+async fn write_file(client: &mut libretifs::Client, ns: &str, id: &str, path: &std::path::Path, via: bool) {
+    use std::io::Read;
+    let piece = if via { 512 << 10 } else { 1 << 20 };
+    let mut f = std::fs::File::open(path).unwrap_or_else(|e| fail(format!("{}: {e}", path.display())));
+    let session = match client.call(libretifs::Request::WriteBegin { ns: ns.into(), id: id.into(), truncate: true }).await.unwrap_or_else(|e| fail(e)) {
+        libretifs::Response::Session { session, .. } => session,
+        libretifs::Response::Error { message } => fail(message),
+        _ => fail("unexpected response"),
+    };
+    let mut buf = vec![0u8; piece];
+    let mut offset = 0u64;
+    loop {
+        let n = f.read(&mut buf).unwrap_or_else(|e| fail(format!("{}: {e}", path.display())));
+        if n == 0 {
+            break;
+        }
+        let req = libretifs::Request::WriteAt { session, offset, data: buf[..n].to_vec() };
+        match client.call(req).await {
+            Ok(libretifs::Response::Error { message }) => {
+                let _ = client.call(libretifs::Request::WriteAbort { session }).await;
+                fail(message)
+            }
+            Err(e) => fail(e),
+            _ => {}
+        }
+        offset += n as u64;
+    }
+    if let libretifs::Response::Error { message } = client.call(libretifs::Request::WriteCommit { session, attrs: vec![] }).await.unwrap_or_else(|e| fail(e)) {
+        fail(message);
+    }
+}
+
 /// The user's own namespace: contacts, saved queries, settings (ADR-0020).
 const ME: &str = "me";
 

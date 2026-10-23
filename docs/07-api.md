@@ -22,6 +22,8 @@ The implemented local API is the `Request`/`Response` enums in `crates/libretifs
 
 Not yet: fd passing, the C ABI, per-query live events.
 
+Large content: one message is at most 256 MiB (`MAX_FRAME`), and through another node (`--via`) a request is one RNS Resource, at most 1 MiB with its envelope. Clients move large files through write sessions and range reads in pieces: the CLI's `rec add/set --file` above 4 MiB (1 MiB pieces, 512 KiB `--via`) and `retifs read` (4 MiB pieces, 512 KiB `--via`); the mounts always do.
+
 ## Contents
 1. [Overview](#1-overview)
 2. [Core types](#2-core-types)
