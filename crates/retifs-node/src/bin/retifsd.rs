@@ -709,6 +709,10 @@ struct Daemon {
     changed: Notify,
     /// Open write sessions (the local API's WriteBegin … WriteCommit).
     sessions: Mutex<HashMap<u64, WriteSession>>,
+    /// Commits of write sessions, by session, for an hour: a commit asked
+    /// again (its answer timed out over a Link while a large file was being
+    /// stored) gets the same result instead of "no such write session".
+    commits: Mutex<HashMap<u64, (Instant, Arc<tokio::sync::OnceCell<Result<Vec<RecordView>, String>>>)>>,
     next_session: std::sync::atomic::AtomicU64,
 }
 
@@ -980,6 +984,7 @@ async fn serve(store: Arc<SlabStore>, identity: node::IdentitySecret, endpoint: 
         changes: Mutex::new(HashMap::new()),
         changed: Notify::new(),
         sessions: Mutex::new(HashMap::new()),
+        commits: Mutex::new(HashMap::new()),
         next_session: std::sync::atomic::AtomicU64::new(1),
     });
     println!("attached to shared instance {of}");
@@ -1795,9 +1800,22 @@ async fn handle(d: &Daemon, req: Request) -> Result<Response, String> {
         }
 
         Request::WriteCommit { session, attrs } => {
-            let s = d.sessions.lock().unwrap().remove(&session).ok_or("no such write session")?;
-            let result = commit_session(d, &s, attrs).await;
-            let _ = std::fs::remove_file(&s.path);
+            // One commit per session however often it's asked: a repeat waits
+            // for the first and answers with its result.
+            let cell = {
+                let mut commits = d.commits.lock().unwrap();
+                commits.retain(|_, (t, _)| t.elapsed() < Duration::from_secs(3600));
+                commits.entry(session).or_insert_with(|| (Instant::now(), Arc::new(tokio::sync::OnceCell::new()))).1.clone()
+            };
+            let result = cell
+                .get_or_init(|| async {
+                    let Some(s) = d.sessions.lock().unwrap().remove(&session) else { return Err("no such write session".to_string()) };
+                    let result = commit_session(d, &s, attrs).await;
+                    let _ = std::fs::remove_file(&s.path);
+                    result
+                })
+                .await
+                .clone();
             Ok(Response::Records { records: result? })
         }
 

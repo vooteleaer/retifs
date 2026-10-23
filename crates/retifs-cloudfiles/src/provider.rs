@@ -884,7 +884,20 @@ impl Sync {
                 }
                 offset += n as u64;
             }
-            first(d.records_of(Request::WriteCommit { session, attrs: vec![("mtime".into(), AttrValue::Int(mtime))] })?)
+            // Storing a large file can outlast an answer over a Link (--via):
+            // the commit is asked again, and the daemon answers a repeat with
+            // the first one's result, so nothing is sent twice.
+            let commit = Request::WriteCommit { session, attrs: vec![("mtime".into(), AttrValue::Int(mtime))] };
+            let mut tries = 0;
+            loop {
+                match d.records_of(commit.clone()) {
+                    Err(e) if e.contains("timed out") && tries < 10 => {
+                        tries += 1;
+                        eprintln!("retifs-cloudfiles: {path}: still storing ({e}); asking again");
+                    }
+                    r => break first(r?),
+                }
+            }
         })();
         let record = match result {
             Ok(r) => r,
