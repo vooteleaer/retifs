@@ -4706,27 +4706,25 @@ fn review(d: &Daemon, file: &FileRef, want: Copies, sites: &HashMap<PeerId, Opti
         // Surplus after a repair (the absent holder came back): stop renewing
         // the worst copy once the target holds well without it, never below
         // the floor; with a namespace's own number, whatever is over it.
+        // The last copy at another site is never trimmed, nor offered for it.
+        let protected = |p: &PeerId| own && d.site.is_some() && elsewhere && !elsewhere_without(Some(p));
+        let all_confirmed = views.iter().all(|h| h.confirmed);
+        // The worst copy that may go, at this site first.
+        let worst = views
+            .iter()
+            .filter(|h| !protected(&h.peer))
+            .max_by(|a, b| same_site(d, sites, &a.peer).cmp(&same_site(d, sites, &b.peer)).then(a.loss.total_cmp(&b.loss)).then(a.hops.cmp(&b.hops)));
         let drop = match want {
-            Copies::Default if views.len() + 1 > want.floor(d, own) => retifs_store::surplus_holder(local, &views, d.loss_target).or_else(|| {
+            Copies::Default if views.len() + 1 > want.floor(d, own) => retifs_store::surplus_holder(local, &views, d.loss_target).filter(|p| !protected(p)).or_else(|| {
                 // Over the count (a copy elsewhere came on top of three here):
-                // the worst one, at this site first, if the rest still meet the
-                // target and the rule without it.
-                if !views.iter().all(|h| h.confirmed) {
-                    return None;
-                }
-                let worst = views
-                    .iter()
-                    .max_by(|a, b| same_site(d, sites, &a.peer).cmp(&same_site(d, sites, &b.peer)).then(a.loss.total_cmp(&b.loss)))?;
+                // the worst one, if the rest still meet the target without it.
+                let worst = worst.filter(|_| all_confirmed)?;
                 let without = local * views.iter().filter(|h| h.peer != worst.peer).map(|h| h.loss).product::<f64>();
                 met(without, d.loss_target).then_some(worst.peer)
             }),
-            Copies::Exactly(n) if views.len() + 1 > n && views.iter().all(|h| h.confirmed) => {
-                views.iter().max_by(|a, b| a.loss.total_cmp(&b.loss).then(a.hops.cmp(&b.hops))).map(|h| h.peer)
-            }
+            Copies::Exactly(n) if views.len() + 1 > n && all_confirmed => worst.map(|h| h.peer),
             _ => None,
         };
-        // Never the last copy at another site.
-        let drop = drop.filter(|p| !own || d.site.is_none() || !elsewhere || elsewhere_without(Some(p)));
         if let Some(drop) = drop {
             let n = d.store.drop_holder(&file.root, &drop).map_err(|e| e.to_string())?;
             let without = local * views.iter().filter(|h| h.peer != drop).map(|h| h.loss).product::<f64>();
