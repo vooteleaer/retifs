@@ -77,6 +77,7 @@ invitation = { "ns": namespace address, "node": creator's node, "secret": 32 ran
   - `retifs contact add NAME NODE|LINK`, `contact list` (with words), `contact rm NAME`. Adding a known node again renames it; a name already used for another node is refused.
   - A contact's name works where a node goes (`--from Mom`).
   - Live (two nodes, 11 checks).
+- **Saved queries (2026-10-23)** live in `me` too: `type=retifs.query`, `name`, `query` (terms as `retifs query` takes them, comma-separated) and `scope`, the namespaces it looks in by their creators' keys (stable, the same on every device whatever each calls them; empty: all). `retifs query NS[,NS]|'*' TERM... --save NAME`, `retifs saved` (list), `saved run NAME [--watch]` (live: runs again when one of its namespaces changes), `saved rm NAME`. They're what the desktop utility's Find saves; being `retifs.*` records without a path, they aren't files in the mounts. Live (two devices, 9 checks): a query saved on one ran on the other through `me`, finding its namespace under another local name and saying which wasn't there.
 - Not yet: display names published by nodes (`/retifs/profile`), writer keys in contacts, sending links over LXMF.
 
 ## Impact on the threat model

@@ -30,6 +30,7 @@
 //!     retifs [--store DIR] ns grant NS WRITER [--grant] [--keys K1,K2,@content,@delete] [--until YYYY-MM-DD|+30d] [--from NODE]... | ns revoke NS WRITER
 //!     retifs [--store DIR] share create NAME --from NS [TERM]... [--id ID]... [--omit KEY]... [--qr] | share list NS | share rm NS ID
 //!     retifs [--store DIR] ns link NS [--name LABEL] [--q TERMS] [--qr] | open LINK [--as NAME]
+//!     retifs [--store DIR] query NS[,NS]|'*' TERM... --save NAME | saved [list] | saved run NAME [--watch] | saved rm NAME
 //!     retifs [--store DIR] mount [NS [DIR] [--foreground] [--via NODE]] | unmount NS [--forget]
 //!     retifs [--store DIR] me | me link [--name LABEL] [--qr] | contact add NAME NODE|LINK | contact list | contact rm NAME
 //!     retifs [--store DIR] invite create NS [--grant] [--keys K1,K2] [--until DATE] [--expires 1d] [--q TERMS] [--name LABEL] [--qr] | invite list NS | invite cancel NS ID
@@ -52,7 +53,7 @@
 //! `get` reads from the daemon's local store first, then fetches the rest from
 //! the given nodes; fetched chunks stay cached in the daemon's store.
 
-use std::path::PathBuf;
+use std::{collections::HashMap, path::PathBuf};
 
 use libretifs::{default_store_dir, Client};
 
@@ -77,6 +78,7 @@ fn usage() -> ! {
          retifs [--store DIR] ns grant NS WRITER [--grant] [--from NODE]... | ns revoke NS WRITER\n\
          retifs [--store DIR] share create NAME --from NS [TERM]... [--id ID]... [--omit KEY]... [--qr] | share list NS | share rm NS ID\n\
          retifs [--store DIR] ns link NS [--name LABEL] [--q TERMS] [--qr] | open LINK [--as NAME] | ns join NAME LINK\n\
+         retifs [--store DIR] query NS[,NS]|'*' TERM... --save NAME | saved [list] | saved run NAME [--watch] | saved rm NAME\n\
          retifs [--store DIR] mount [NS [DIR] [--foreground] [--via NODE]] | unmount NS [--forget]\n\
          retifs [--store DIR] me | me link [--name LABEL] [--qr] | contact add NAME NODE|LINK | contact list | contact rm NAME\n\
          retifs [--store DIR] invite create NS [--grant] [--keys K1,K2] [--until DATE] [--expires 1d] [--q TERMS] [--name LABEL] [--qr] | invite list NS | invite cancel NS ID"
@@ -799,22 +801,86 @@ async fn main() {
                 }
                 return;
             }
+            // Saved as a query of the user's own (in `me`), to run again on
+            // any of their devices.
+            if let Some(i) = terms.iter().position(|t| t == "--save") {
+                let name = terms.get(i + 1).cloned().unwrap_or_else(|| usage());
+                terms.drain(i..=i + 1);
+                save_query(&mut client, &name, &ns, &terms).await;
+                return;
+            }
             // Several namespaces (NS1,NS2): each contributor writes its own,
             // and a query combines them (instead of record filters in grants).
-            let names: Vec<String> = ns.split(',').map(str::trim).filter(|n| !n.is_empty()).map(String::from).collect();
-            let mut total = 0;
-            for n in &names {
-                let req = libretifs::Request::Query { ns: n.clone(), terms: terms.clone(), at };
-                let found = client.records(req).await.unwrap_or_else(|e| fail(format!("{n}: {e}")));
-                for r in &found {
-                    if names.len() > 1 {
-                        print!("{n}/");
+            // `*`: every namespace here but `me`.
+            let names = if ns == "*" { all_namespaces(&mut client).await } else { ns.split(',').map(str::trim).filter(|n| !n.is_empty()).map(String::from).collect() };
+            run_query(&mut client, &names, &terms, at).await;
+        }
+        "saved" => {
+            // Saved queries (`retifs query … --save NAME`): records in `me`.
+            let sub = it.next().unwrap_or_else(|| "list".into());
+            let rest: Vec<String> = it.collect();
+            let saved = saved_queries(&mut client).await;
+            let find = |name: &str| saved.iter().find(|q| q.name.eq_ignore_ascii_case(name)).unwrap_or_else(|| fail(format!("no saved query {name} (retifs saved lists them)")));
+            match sub.as_str() {
+                "list" => {
+                    let by_writer = namespaces_by_writer(&mut client).await;
+                    for q in &saved {
+                        let scope = if q.scope.is_empty() {
+                            "every namespace".to_string()
+                        } else {
+                            q.scope.iter().map(|w| by_writer.get(w).cloned().unwrap_or_else(|| format!("({}… not here)", &w[..8.min(w.len())]))).collect::<Vec<_>>().join(", ")
+                        };
+                        println!("{:<20} {}  in {scope}", q.name, q.query);
                     }
-                    print_record(r);
+                    println!("{} saved query(ies)", saved.len());
                 }
-                total += found.len();
+                "run" => {
+                    let q = find(rest.first().unwrap_or_else(|| usage()));
+                    let by_writer = namespaces_by_writer(&mut client).await;
+                    let names: Vec<String> = if q.scope.is_empty() {
+                        all_namespaces(&mut client).await
+                    } else {
+                        let mut names = Vec::new();
+                        for w in &q.scope {
+                            match by_writer.get(w) {
+                                Some(n) => names.push(n.clone()),
+                                None => eprintln!("(a namespace of this query isn't on this device: {}…)", &w[..8.min(w.len())]),
+                            }
+                        }
+                        names
+                    };
+                    let terms: Vec<String> = q.query.split(',').map(str::trim).filter(|t| !t.is_empty()).map(String::from).collect();
+                    run_query(&mut client, &names, &terms, None).await;
+                    if rest.iter().any(|a| a == "--watch") {
+                        // Live: run again whenever one of its namespaces changes.
+                        let mut since: HashMap<String, u64> = HashMap::new();
+                        loop {
+                            let mut changed = false;
+                            for n in &names {
+                                let s = since.get(n).copied().unwrap_or(0);
+                                if let Ok(libretifs::Response::Changed { count }) = client.call(libretifs::Request::Watch { ns: n.clone(), since: s, timeout_ms: 2_000 }).await
+                                    && count != s
+                                {
+                                    changed |= s != 0;
+                                    since.insert(n.clone(), count);
+                                }
+                            }
+                            if changed {
+                                println!("--- changed");
+                                run_query(&mut client, &names, &terms, None).await;
+                            }
+                        }
+                    }
+                }
+                "rm" => {
+                    let q = find(rest.first().unwrap_or_else(|| usage()));
+                    if let libretifs::Response::Error { message } = client.call(libretifs::Request::RecordDelete { ns: ME.into(), id: q.id.clone() }).await.unwrap_or_else(|e| fail(e)) {
+                        fail(message);
+                    }
+                    println!("removed {}", q.name);
+                }
+                _ => usage(),
             }
-            println!("{total} record(s)");
         }
         "forget" => {
             let cap = it.next().unwrap_or_else(|| usage());
@@ -947,6 +1013,109 @@ async fn write_file(client: &mut libretifs::Client, ns: &str, id: &str, path: &s
     if let libretifs::Response::Error { message } = client.call(libretifs::Request::WriteCommit { session, attrs: vec![] }).await.unwrap_or_else(|e| fail(e)) {
         fail(message);
     }
+}
+
+/// A query saved in `me` (`type = retifs.query`): its terms, and the
+/// namespaces it looks in by their creators' keys (stable, and the same on
+/// every device, whatever each calls them); none: every namespace.
+struct SavedQuery {
+    id: String,
+    name: String,
+    query: String,
+    scope: Vec<String>,
+}
+
+async fn saved_queries(client: &mut libretifs::Client) -> Vec<SavedQuery> {
+    let req = libretifs::Request::Query { ns: ME.into(), terms: vec!["type=retifs.query".into()], at: None };
+    let Ok(libretifs::Response::Records { records }) = client.call(req).await else { return Vec::new() };
+    let mut out: Vec<SavedQuery> = records
+        .iter()
+        .filter_map(|r| {
+            let get = |k: &str| r.attrs.iter().find(|(key, _)| key == k).map(|(_, v)| v);
+            let text = |k: &str| match get(k) {
+                Some(libretifs::AttrValue::Str(s)) => Some(s.clone()),
+                _ => None,
+            };
+            let scope = match get("scope") {
+                Some(libretifs::AttrValue::List(items)) => items.iter().filter_map(|v| if let libretifs::AttrValue::Str(s) = v { Some(s.clone()) } else { None }).collect(),
+                _ => Vec::new(),
+            };
+            Some(SavedQuery { id: r.id.clone(), name: text("name")?, query: text("query")?, scope })
+        })
+        .collect();
+    out.sort_by_key(|q| q.name.to_lowercase());
+    out
+}
+
+/// Every namespace on this device but `me`.
+async fn all_namespaces(client: &mut libretifs::Client) -> Vec<String> {
+    match client.call(libretifs::Request::Namespaces).await.unwrap_or_else(|e| fail(e)) {
+        libretifs::Response::Names { names } => names.into_iter().filter(|n| n != ME).collect(),
+        _ => Vec::new(),
+    }
+}
+
+/// This device's namespaces by their creator's key (hex), from their
+/// addresses (`retifs-ch:1:<creator>:<read key>`).
+async fn namespaces_by_writer(client: &mut libretifs::Client) -> HashMap<String, String> {
+    let mut out = HashMap::new();
+    for n in all_namespaces(client).await {
+        if let Ok(libretifs::Response::Namespace(v)) = client.call(libretifs::Request::NsInfo { ns: n.clone() }).await
+            && let Some(w) = v.address.split(':').nth(2)
+        {
+            out.insert(w.to_string(), n);
+        }
+    }
+    out
+}
+
+/// Saves (or replaces) query `name`: `terms` over namespaces `ns`
+/// (comma-separated, or `*` for all).
+async fn save_query(client: &mut libretifs::Client, name: &str, ns: &str, terms: &[String]) {
+    let mut scope = Vec::new();
+    if ns != "*" {
+        for n in ns.split(',').map(str::trim).filter(|n| !n.is_empty()) {
+            match client.call(libretifs::Request::NsInfo { ns: n.into() }).await.unwrap_or_else(|e| fail(e)) {
+                libretifs::Response::Namespace(v) => scope.push(libretifs::AttrValue::Str(v.address.split(':').nth(2).unwrap_or_default().to_string())),
+                libretifs::Response::Error { message } => fail(message),
+                _ => fail("unexpected response"),
+            }
+        }
+    }
+    let attrs = vec![
+        ("name".to_string(), libretifs::AttrValue::Str(name.into())),
+        ("query".to_string(), libretifs::AttrValue::Str(terms.join(", "))),
+        ("scope".to_string(), libretifs::AttrValue::List(scope)),
+    ];
+    let req = match saved_queries(client).await.into_iter().find(|q| q.name.eq_ignore_ascii_case(name)) {
+        Some(q) => libretifs::Request::RecordSet { ns: ME.into(), id: q.id, attrs, unset: vec![], data: None },
+        None => {
+            let mut attrs = attrs;
+            attrs.push(("type".into(), libretifs::AttrValue::Str("retifs.query".into())));
+            libretifs::Request::RecordCreate { ns: ME.into(), attrs, data: None }
+        }
+    };
+    if let libretifs::Response::Error { message } = client.call(req).await.unwrap_or_else(|e| fail(e)) {
+        fail(message);
+    }
+    println!("saved {name}: {} in {ns} (retifs saved run {name})", terms.join(", "));
+}
+
+/// Runs `terms` over `names`, printing what matches.
+async fn run_query(client: &mut libretifs::Client, names: &[String], terms: &[String], at: Option<u64>) {
+    let mut total = 0;
+    for n in names {
+        let req = libretifs::Request::Query { ns: n.clone(), terms: terms.to_vec(), at };
+        let found = client.records(req).await.unwrap_or_else(|e| fail(format!("{n}: {e}")));
+        for r in &found {
+            if names.len() > 1 {
+                print!("{n}/");
+            }
+            print_record(r);
+        }
+        total += found.len();
+    }
+    println!("{total} record(s)");
 }
 
 /// The user's own namespace: contacts, saved queries, settings (ADR-0020).

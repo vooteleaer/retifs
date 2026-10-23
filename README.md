@@ -94,6 +94,8 @@ Records, attributes and queries:
 retifs rec add photos album="Prangli 2026" --file boat.jpg
 retifs query photos 'album=Prangli 2026'
 retifs rec history photos <id>
+retifs query '*' type=photo --save Photos   # saved in your namespace me: every device has it
+retifs saved run Photos --watch             # live: again whenever it changes
 ```
 
 As a file tree, on Linux and Windows alike:
