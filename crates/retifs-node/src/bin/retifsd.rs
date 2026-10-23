@@ -712,7 +712,7 @@ struct Daemon {
     /// Commits of write sessions, by session, for an hour: a commit asked
     /// again (its answer timed out over a Link while a large file was being
     /// stored) gets the same result instead of "no such write session".
-    commits: Mutex<HashMap<u64, (Instant, Arc<tokio::sync::OnceCell<Result<Vec<RecordView>, String>>>)>>,
+    commits: Mutex<HashMap<u64, PendingCommit>>,
     next_session: std::sync::atomic::AtomicU64,
 }
 
@@ -1214,6 +1214,14 @@ async fn connection(mut stream: impl AsyncRead + AsyncWrite + Unpin, daemon: Arc
     }
 }
 
+/// A write session's commit, shared by its repeats: when, which namespace
+/// (for an app's scope), and its result once done.
+struct PendingCommit {
+    at: Instant,
+    ns: Option<String>,
+    result: Arc<tokio::sync::OnceCell<Result<Vec<RecordView>, String>>>,
+}
+
 /// Checks an app's token (the first message on the app socket). On Linux a
 /// token is pinned to the executable that first uses it; another program
 /// presenting it later is refused.
@@ -1253,7 +1261,10 @@ fn authorize(d: &Daemon, s: &AppScope, req: &Request) -> Result<(), String> {
             read(ns)
         }
     };
-    let session_ns = |session: u64| d.sessions.lock().unwrap().get(&session).map(|x| x.ns.clone());
+    // A session being committed (a repeat of its commit) is in `commits`.
+    let session_ns = |session: u64| {
+        d.sessions.lock().unwrap().get(&session).map(|x| x.ns.clone()).or_else(|| d.commits.lock().unwrap().get(&session).and_then(|c| c.ns.clone()))
+    };
     // Its key limit (ADR-0023): every key it sets or unsets, content, deleting
     // and new records each named.
     let keys_ok = |attrs: &[(String, AttrValue)], unset: &[String], content: bool| {
@@ -1803,9 +1814,10 @@ async fn handle(d: &Daemon, req: Request) -> Result<Response, String> {
             // One commit per session however often it's asked: a repeat waits
             // for the first and answers with its result.
             let cell = {
+                let ns = d.sessions.lock().unwrap().get(&session).map(|s| s.ns.clone());
                 let mut commits = d.commits.lock().unwrap();
-                commits.retain(|_, (t, _)| t.elapsed() < Duration::from_secs(3600));
-                commits.entry(session).or_insert_with(|| (Instant::now(), Arc::new(tokio::sync::OnceCell::new()))).1.clone()
+                commits.retain(|_, c| c.at.elapsed() < Duration::from_secs(3600));
+                commits.entry(session).or_insert_with(|| PendingCommit { at: Instant::now(), ns, result: Arc::new(tokio::sync::OnceCell::new()) }).result.clone()
             };
             let result = cell
                 .get_or_init(|| async {
