@@ -181,6 +181,29 @@ impl SlabStore {
         Ok(out)
     }
 
+    /// Forgets storage nodes not heard since `before_ms` (gone test nodes,
+    /// replaced identities). Returns how many.
+    pub fn forget_storage_nodes_heard_before(&self, before_ms: u64) -> Result<usize, StoreError> {
+        let w = self.db.begin_write()?;
+        let mut n = 0;
+        {
+            let mut t = w.open_table(STORAGE_NODES)?;
+            let old: Vec<PeerId> = t
+                .iter()?
+                .filter_map(|e| e.ok())
+                .map(|(k, v)| parse_node(k.value().try_into().unwrap(), v.value()))
+                .filter(|s| s.last_heard_ms < before_ms)
+                .map(|s| s.peer)
+                .collect();
+            for p in old {
+                t.remove(p.as_slice())?;
+                n += 1;
+            }
+        }
+        w.commit()?;
+        Ok(n)
+    }
+
     /// Don't offer `peer` leases until `until_ms` (no room, unreachable).
     pub fn avoid_storage_node(&self, peer: &PeerId, until_ms: u64) -> Result<(), StoreError> {
         let w = self.db.begin_write()?;

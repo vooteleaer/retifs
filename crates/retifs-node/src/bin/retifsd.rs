@@ -625,6 +625,9 @@ fn main() {
 }
 
 struct Daemon {
+    /// Who may hold copies of what, worked out from the namespaces and kept
+    /// until they change (or five minutes pass): see [`eligible`].
+    holders_ok: Mutex<Option<(Instant, EligibleKey, Arc<Eligible>)>>,
     store: Arc<SlabStore>,
     transport: PrnsTransport,
     node_hex: String,
@@ -938,6 +941,7 @@ async fn serve(store: Arc<SlabStore>, identity: node::IdentitySecret, endpoint: 
         announced_wake: Notify::new(),
         device: args.device.clone(),
         changes: Mutex::new(HashMap::new()),
+        holders_ok: Mutex::new(None),
         changed: Notify::new(),
         sessions: Mutex::new(HashMap::new()),
         next_session: std::sync::atomic::AtomicU64::new(1),
@@ -4352,18 +4356,33 @@ fn met(risk: f64, target: f64) -> bool {
 /// nor chunk order. Data goes by push, so readers' copies (cache, never
 /// served) can be placed too, and holders don't learn who sent it.
 async fn place_all(d: &Daemon) -> Result<(), String> {
+    // Not heard for a week: gone (test nodes, replaced identities).
+    if let Ok(n) = d.store.forget_storage_nodes_heard_before(now_ms().saturating_sub(7 * 24 * 3_600_000))
+        && n > 0
+    {
+        println!("placement: forgot {n} storage node(s) not heard for a week");
+    }
     let mut plan: std::collections::BTreeMap<PeerId, Vec<FileRef>> = Default::default();
     let mut ranked: Option<Vec<(f64, retifs_store::StorageNode)>> = None;
+    let ok = eligible(d)?;
     for file in d.store.needed_files().map_err(|e| e.to_string())? {
+        let allowed = ok.for_file(&file.root);
+        // A holder that may no longer read it (left the namespace, or it was
+        // never one of these): its copy is no longer renewed.
+        for o in d.store.own_leases_for(&file.root).map_err(|e| e.to_string())? {
+            if !allowed.contains(&o.holder) && d.store.drop_holder(&file.root, &o.holder).map_err(|e| e.to_string())? > 0 {
+                println!("placement: {}: <{}> may not read it, its copy is no longer renewed", file.root, hex(&o.holder));
+            }
+        }
         let Some((mut risk, holders)) = review(d, &file)? else { continue };
         if ranked.is_none() {
-            ranked = Some(rank_candidates(d).await?);
+            ranked = Some(rank_candidates(d, &ok.all()).await?);
         }
         for (_, n) in ranked.as_deref().unwrap_or_default() {
             if met(risk, d.loss_target) {
                 break;
             }
-            if holders.contains(&n.peer) {
+            if holders.contains(&n.peer) || !allowed.contains(&n.peer) {
                 continue;
             }
             plan.entry(n.peer).or_default().push(file);
@@ -4448,12 +4467,102 @@ fn review(d: &Daemon, file: &FileRef) -> Result<Option<(f64, std::collections::B
     Ok(Some((risk, views.iter().map(|h| h.peer).collect())))
 }
 
-/// The nearest few storage nodes by hops, measured by linking (RTT) and
-/// earlier transfers, ranked by estimated transfer time. Placement is never
-/// worth a slow link: copies for durability don't cross LoRa (ADR-0013/0014).
-async fn rank_candidates(d: &Daemon) -> Result<Vec<(f64, retifs_store::StorageNode)>, String> {
+/// Who may hold copies of a file (the user's choice, 2026-10-23): only
+/// nodes that may read it anyway, so no one else learns even that it exists,
+/// its size or when it changes. Those are the nodes of the members of the
+/// namespaces whose records use it (their `node` operations, ADR-0022) and
+/// the user's own devices (`retifs app add --device`, and the members of
+/// the user's namespace `me`). Content of no namespace goes to own devices
+/// only.
+#[derive(Default)]
+struct Eligible {
+    own_devices: std::collections::BTreeSet<PeerId>,
+    by_root: HashMap<Cid, std::collections::BTreeSet<PeerId>>,
+}
+
+impl Eligible {
+    fn for_file(&self, root: &Cid) -> std::collections::BTreeSet<PeerId> {
+        let mut s = self.own_devices.clone();
+        if let Some(m) = self.by_root.get(root) {
+            s.extend(m.iter().copied());
+        }
+        s
+    }
+
+    fn all(&self) -> std::collections::BTreeSet<PeerId> {
+        let mut s = self.own_devices.clone();
+        for m in self.by_root.values() {
+            s.extend(m.iter().copied());
+        }
+        s
+    }
+}
+
+/// What [`Eligible`] was worked out from: record changes, own devices and
+/// each namespace's member nodes (a member's `node` operation or a revoke
+/// changes no record, but changes who may hold).
+type EligibleKey = (HashMap<String, u64>, Vec<PeerId>, std::collections::BTreeMap<String, std::collections::BTreeSet<PeerId>>);
+
+/// [`Eligible`], recomputed when that changes, or every five minutes (it
+/// reads every record of every namespace).
+fn eligible(d: &Daemon) -> Result<Arc<Eligible>, String> {
+    let counts = d.changes.lock().unwrap().clone();
+    let devices: Vec<PeerId> = d.store.apps().map_err(|e| e.to_string())?.into_iter().filter_map(|a| a.device).filter(|n| *n != d.node_id).collect();
+    let mut by_ns: std::collections::BTreeMap<String, std::collections::BTreeSet<PeerId>> = Default::default();
+    for ns in d.store.ns_names().map_err(|e| e.to_string())? {
+        let Ok(merged) = materialize(d, &ns) else { continue };
+        let members: std::collections::BTreeSet<PeerId> = merged
+            .nodes
+            .iter()
+            .filter(|(w, n)| merged.writers.contains_key(*w) && **n != d.node_id)
+            .map(|(_, n)| *n)
+            .collect();
+        by_ns.insert(ns, members);
+    }
+    let key: EligibleKey = (counts, devices.clone(), by_ns.clone());
+    if let Some((at, seen, e)) = d.holders_ok.lock().unwrap().as_ref()
+        && at.elapsed() < Duration::from_secs(300)
+        && *seen == key
+    {
+        return Ok(e.clone());
+    }
+    let mut e = Eligible { own_devices: devices.into_iter().collect(), ..Default::default() };
+    for (ns, members) in by_ns {
+        if members.is_empty() {
+            continue;
+        }
+        // The members of `me` are the user's own devices (ADR-0020): they may
+        // hold anything.
+        if ns == "me" {
+            e.own_devices.extend(members.iter().copied());
+        }
+        for r in d.store.records(&ns).map_err(|e| e.to_string())? {
+            for b in &r.blocks {
+                e.by_root.entry(b.root).or_default().extend(members.iter().copied());
+            }
+        }
+    }
+    let e = Arc::new(e);
+    *d.holders_ok.lock().unwrap() = Some((Instant::now(), key, e.clone()));
+    Ok(e)
+}
+
+/// The nearest few of the nodes that may hold copies (`allowed`), measured
+/// by linking (RTT) and earlier transfers, ranked by estimated transfer
+/// time. Placement is never worth a slow link: copies for durability don't
+/// cross LoRa (ADR-0013/0014).
+async fn rank_candidates(d: &Daemon, allowed: &std::collections::BTreeSet<PeerId>) -> Result<Vec<(f64, retifs_store::StorageNode)>, String> {
     let mut candidates = Vec::new();
-    for n in d.store.storage_nodes().map_err(|e| e.to_string())? {
+    // Known ones nearest first; members and devices never heard announcing
+    // are tried too (their hops unknown).
+    let mut nodes: Vec<retifs_store::StorageNode> =
+        d.store.storage_nodes().map_err(|e| e.to_string())?.into_iter().filter(|n| allowed.contains(&n.peer)).collect();
+    for p in allowed {
+        if !nodes.iter().any(|n| n.peer == *p) {
+            nodes.push(retifs_store::StorageNode { peer: *p, hops: u8::MAX, last_heard_ms: 0, avoid_until_ms: 0 });
+        }
+    }
+    for n in nodes {
         if candidates.len() == 8 {
             break;
         }
