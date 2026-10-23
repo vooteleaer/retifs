@@ -118,11 +118,11 @@ fn owner_counts_holders_with_valid_receipts() {
 #[test]
 fn placement_state_ranks_nodes_and_learns_reliability() {
     let (_d, st) = store();
-    st.heard_storage_node(&[1; 16], 3, None, 100).unwrap();
-    st.heard_storage_node(&[2; 16], 1, None, 50).unwrap();
-    st.heard_storage_node(&[3; 16], 1, None, 90).unwrap();
+    st.heard_storage_node(&[1; 16], 3, None, None, 100).unwrap();
+    st.heard_storage_node(&[2; 16], 1, None, None, 50).unwrap();
+    st.heard_storage_node(&[3; 16], 1, None, None, 90).unwrap();
     st.avoid_storage_node(&[3; 16], 500).unwrap();
-    st.heard_storage_node(&[3; 16], 1, None, 95).unwrap();
+    st.heard_storage_node(&[3; 16], 1, None, None, 95).unwrap();
     let nodes = st.storage_nodes().unwrap();
     assert_eq!(nodes.iter().map(|n| n.peer[0]).collect::<Vec<_>>(), vec![3, 2, 1], "nearest, then freshest");
     assert_eq!(nodes[0].avoid_until_ms, 500, "hearing a node again keeps its back-off");
@@ -277,14 +277,14 @@ fn channels_and_follows_roundtrip() {
 #[test]
 fn storage_nodes_keep_their_announce_interval_and_are_forgotten_when_silent() {
     let (_d, st) = store();
-    st.heard_storage_node(&[1; 16], 1, Some(60), 1_000).unwrap();
-    st.heard_storage_node(&[2; 16], 1, None, 1_000).unwrap();
+    st.heard_storage_node(&[1; 16], 1, Some(60), None, 1_000).unwrap();
+    st.heard_storage_node(&[2; 16], 1, None, None, 1_000).unwrap();
     let every: Vec<(u8, u32)> = st.storage_nodes().unwrap().iter().map(|n| (n.peer[0], n.announce_s)).collect();
     assert!(every.contains(&(1, 60)) && every.contains(&(2, 600)), "{every:?}: unsaid means the default");
     // Silent for ten of its own intervals: node 1 (60 s) goes, node 2 (600 s) stays.
     let n = st.forget_silent_storage_nodes(1_000 + 700_000, |s| 10 * s.announce_s as u64 * 1000).unwrap();
     assert_eq!(n, 1);
     assert_eq!(st.storage_nodes().unwrap().iter().map(|n| n.peer[0]).collect::<Vec<_>>(), vec![2]);
-    st.heard_storage_node(&[1; 16], 1, Some(60), 800_000).unwrap();
+    st.heard_storage_node(&[1; 16], 1, Some(60), None, 800_000).unwrap();
     assert_eq!(st.storage_nodes().unwrap().len(), 2, "its next announce brings it back");
 }

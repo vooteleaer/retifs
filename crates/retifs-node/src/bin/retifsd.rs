@@ -22,6 +22,9 @@
 //! estimated chance of losing every copy is below P (default 0.001).
 //! `--min-copies`: and until there are at least N copies, this node's own
 //! included (default 3: two elsewhere), whatever the estimate says.
+//! `--site NAME`: where this node is ("prangli-home"); its announces carry a
+//! tag of it, and of the copies of this node's files, at least one is kept at
+//! another site.
 //! `--lease-term`: how long leases this node gives out run before renewal is
 //! due (seconds, or with an s/m/h/d suffix; default 30d). They're renewed at half-term.
 //!
@@ -471,6 +474,7 @@ struct Args {
     lease_term: u64,
     loss_target: f64,
     min_copies: usize,
+    site: Option<String>,
     slow_budget: u64,
     treat_as_slow: Vec<PeerId>,
     stamp_cost: u8,
@@ -533,6 +537,7 @@ fn args() -> Args {
         lease_term: 30 * 86_400,
         loss_target: 1e-3,
         min_copies: 3,
+        site: None,
         slow_budget: 600,
         treat_as_slow: Vec::new(),
         stamp_cost: 20,
@@ -573,6 +578,7 @@ fn args() -> Args {
             "--nomadnet" => a.nomadnet = Some(it.next().expect("--nomadnet NAMESPACE")),
             "--nomadnet-name" => a.nomadnet_name = it.next().expect("--nomadnet-name NAME"),
             "--loss-target" => a.loss_target = it.next().and_then(|v| v.parse().ok()).expect("--loss-target P (e.g. 0.001)"),
+            "--site" => a.site = Some(it.next().filter(|s| !s.trim().is_empty()).expect("--site NAME")),
             "--min-copies" => a.min_copies = it.next().and_then(|v| v.parse().ok()).filter(|n| *n >= 1).expect("--min-copies N (1 or more)"),
             "--lease-term" => a.lease_term = duration_secs(&it.next().expect("--lease-term DURATION")).max(60),
             "--device" => a.device = it.next().expect("--device NAME").to_lowercase(),
@@ -580,7 +586,7 @@ fn args() -> Args {
             "-h" | "--help" => {
                 println!(
                     "retifsd [--store DIR] [--max-store SIZE] [--min-free SIZE] [--cache-max SIZE] [--private-requests]
-                             [--hold-for-others SIZE] [--db-cache SIZE] [--lease-term DURATION] [--loss-target P] [--min-copies N] [--slow-link-budget DURATION]\n        \
+                             [--hold-for-others SIZE] [--db-cache SIZE] [--lease-term DURATION] [--loss-target P] [--min-copies N] [--site NAME] [--slow-link-budget DURATION]\n        \
                      [--stamp-cost BITS] [--max-stamp-cost BITS] [--announce-every DURATION]\n        \
                      [--nomadnet NAMESPACE [--nomadnet-name NAME]] [--device NAME] [--public] [--put FILE]..."
                 );
@@ -677,6 +683,8 @@ struct Daemon {
     loss_target: f64,
     /// Copies of each needed file, this node's own included, whatever the estimate.
     min_copies: usize,
+    /// This node's site, if its owner named one: then one copy is kept elsewhere.
+    site: Option<retifs_core::announce::SiteTag>,
     slow_budget: u64,
     treat_as_slow: Vec<PeerId>,
     /// Files whose rest waits for a faster path, with the estimate over the slow link.
@@ -877,7 +885,10 @@ impl Daemon {
 
 async fn serve(store: Arc<SlabStore>, identity: node::IdentitySecret, endpoint: String, args: Args) {
     let identity_bytes: [u8; 64] = identity[..].try_into().expect("RNS identity secrets are 64 bytes");
-    let dest = node::destination_announcing(identity, true, args.announce_s);
+    let dest = node::destination_announcing(identity, true, args.announce_s, args.site.as_deref().map(retifs_core::announce::site_tag));
+    if let Some(site) = &args.site {
+        println!("site: {site} (one copy of this node's files is kept at another site)");
+    }
     let dest_hash = dest.destination_hash().expect("valid destination");
     // Receipts are signed with the node identity and checked against the node's
     // address, so the identity layout must be RNS's (X25519 ‖ Ed25519).
@@ -899,7 +910,7 @@ async fn serve(store: Arc<SlabStore>, identity: node::IdentitySecret, endpoint: 
     // dropped when it's full is harmless (nodes announce again). An unbounded
     // queue grew without limit on a busy transport node while passes waited
     // on the network (found by the overnight soak test).
-    let (heard_tx, mut heard_rx) = mpsc::channel::<(PeerId, u8, Option<u32>)>(4096);
+    let (heard_tx, mut heard_rx) = mpsc::channel::<(PeerId, u8, retifs_core::announce::NodeAnnounce)>(4096);
     // Optionally a NomadNet node (its own identity and destination) serving a namespace.
     let nomadnet = args.nomadnet.as_ref().map(|_| {
         let id = load_or_create_identity(&store.root().join("nomadnet_identity")).expect("nomadnet identity");
@@ -919,8 +930,7 @@ async fn serve(store: Arc<SlabStore>, identity: node::IdentitySecret, endpoint: 
         on_event: move |event, _state| {
             match event {
                 PrnsEvent::Diagnostic(Diagnostic::AnnounceHeard { destination, hops, app_data, .. }) => {
-                    let every = retifs_core::announce::node_announce_s(app_data);
-                    let _ = heard_tx.try_send((*destination.as_bytes(), hops, every));
+                    let _ = heard_tx.try_send((*destination.as_bytes(), hops, retifs_core::announce::node_announce(app_data)));
                 }
                 // Page requests to the NomadNet destination (dynamically registered paths).
                 PrnsEvent::Message(Message::Request { destination, link_id, request_id, path_hash, rtt, .. })
@@ -954,6 +964,7 @@ async fn serve(store: Arc<SlabStore>, identity: node::IdentitySecret, endpoint: 
         upkeep_wake: Notify::new(),
         loss_target: args.loss_target,
         min_copies: args.min_copies,
+        site: args.site.as_deref().map(retifs_core::announce::site_tag),
         slow_budget: args.slow_budget,
         treat_as_slow: args.treat_as_slow.clone(),
         deferred: Mutex::new(HashMap::new()),
@@ -1007,7 +1018,8 @@ async fn serve(store: Arc<SlabStore>, identity: node::IdentitySecret, endpoint: 
         // identity (older nodes' app data says only `retifs/v0`); the app
         // data, when it says, gives how often it announces.
         let mut not_retifs = std::collections::HashSet::new();
-        while let Some((peer, hops, every)) = heard_rx.recv().await {
+        while let Some((peer, hops, said)) = heard_rx.recv().await {
+            let every = said.announce_s;
             if watcher.announced.lock().unwrap().insert(peer) {
                 watcher.announced_wake.notify_one();
             }
@@ -1021,7 +1033,7 @@ async fn serve(store: Arc<SlabStore>, identity: node::IdentitySecret, endpoint: 
             match watcher.transport.handle.destination_identity(DestinationIdentityQuery::Destination(dest)).await {
                 Some(id) if node_destination(id.public.as_bytes()) == peer => {
                     let known = watcher.store.storage_nodes().map(|n| n.iter().any(|n| n.peer == peer)).unwrap_or(true);
-                    if watcher.store.heard_storage_node(&peer, hops, every, now_ms()).is_ok() && !known {
+                    if watcher.store.heard_storage_node(&peer, hops, every, said.site, now_ms()).is_ok() && !known {
                         let every = every.map_or("an older node: interval unsaid".to_string(), |s| format!("announces every {s} s"));
                         println!("storage node <{}> heard, {hops} hop(s) away ({every})", hex(&peer));
                         watcher.upkeep_wake.notify_one();
@@ -1507,6 +1519,7 @@ async fn handle(d: &Daemon, req: Request) -> Result<Response, String> {
                         rtt_ms: q.rtt_ms,
                         rate_bps: q.rate_bps,
                         slow: q.rtt_ms > 0 && q.slow(),
+                        same_site: d.site.is_some() && n.site == d.site,
                         ok: s.ok,
                         fail: s.fail,
                     }
@@ -4459,30 +4472,39 @@ async fn place_all(d: &Daemon) -> Result<(), String> {
     let mut ranked: Option<Vec<(f64, retifs_store::StorageNode)>> = None;
     let mut short = 0;
     let wanted = copies_wanted(d);
+    let sites = node_sites(d);
     for file in d.store.needed_files().map_err(|e| e.to_string())? {
         let want = wanted.get(&file.root).map_or(Copies::Default, |&n| Copies::Exactly(n));
-        let Some((mut risk, holders)) = review(d, &file, want)? else { continue };
+        let Some(Need { mut risk, holders, own, mut elsewhere }) = review(d, &file, want, &sites)? else { continue };
         if ranked.is_none() {
             ranked = Some(rank_candidates(d).await?);
         }
         let mut copies = holders.len() + 1;
+        let floor = want.floor(d, own);
         for (_, n) in ranked.as_deref().unwrap_or_default() {
-            if want.enough(d, risk, copies) {
+            if want.enough(d, risk, copies, own, elsewhere) {
                 break;
             }
             if holders.contains(&n.peer) {
                 continue;
             }
+            // The last copy the count asks for goes to another site if none is there yet.
+            let other_site = !same_site(d, &sites, &n.peer);
+            if own && d.site.is_some() && !elsewhere && !other_site && copies + 1 >= floor {
+                continue;
+            }
             plan.entry(n.peer).or_default().push(file);
             risk *= d.store.holder_stats(&n.peer).map(|s| s.loss()).unwrap_or(1.0);
             copies += 1;
+            elsewhere |= other_site;
         }
-        if copies < want.floor(d) {
+        if !want.enough(d, risk, copies, own, elsewhere) && (copies < floor || (own && d.site.is_some() && !elsewhere)) {
             short += 1;
         }
     }
     if short > 0 {
-        println!("placement: {short} file(s) below their number of copies: not enough storage nodes reachable now");
+        let site = if d.site.is_some() { ", or none at another site" } else { "" };
+        println!("placement: {short} file(s) below their number of copies{site}: not enough storage nodes reachable now");
     }
     for (peer, files) in plan {
         // Union of the files' chunks: shared chunks (versions) are listed once.
@@ -4548,7 +4570,10 @@ fn copies_wanted(d: &Daemon) -> HashMap<Cid, usize> {
 }
 
 /// How many copies a file gets: a namespace's own number (exactly that), or
-/// the node's rule (the loss target, and at least `min_copies`).
+/// the node's rule (the loss target, and at least `min_copies`). The floor
+/// and the site rule are for the file's own copies (its writer's, or one kept
+/// here); a reader's node places copies near itself by the estimate alone,
+/// for availability, so a widely read file doesn't gain two copies a reader.
 #[derive(Clone, Copy)]
 enum Copies {
     Default,
@@ -4556,23 +4581,46 @@ enum Copies {
 }
 
 impl Copies {
-    fn floor(self, d: &Daemon) -> usize {
+    fn floor(self, d: &Daemon, own: bool) -> usize {
         match self {
-            Copies::Default => d.min_copies,
+            Copies::Default if own => d.min_copies,
+            Copies::Default => 1,
             Copies::Exactly(n) => n,
         }
     }
 
-    /// Whether `copies` copies (this node's own included) with loss estimate `risk` will do.
-    fn enough(self, d: &Daemon, risk: f64, copies: usize) -> bool {
+    /// Whether `copies` copies (this node's own included) with loss estimate
+    /// `risk` will do; `elsewhere`: one of them is at another site.
+    fn enough(self, d: &Daemon, risk: f64, copies: usize, own: bool, elsewhere: bool) -> bool {
+        let sited = !own || d.site.is_none() || elsewhere || self.floor(d, own) <= 1;
         match self {
-            Copies::Default => met(risk, d.loss_target) && copies >= d.min_copies,
-            Copies::Exactly(n) => copies >= n,
+            Copies::Default => met(risk, d.loss_target) && copies >= self.floor(d, own) && sited,
+            Copies::Exactly(n) => copies >= n && sited,
         }
     }
 }
 
-fn review(d: &Daemon, file: &FileRef, want: Copies) -> Result<Option<(f64, std::collections::BTreeSet<PeerId>)>, String> {
+/// Each storage node's site, as its announces say.
+fn node_sites(d: &Daemon) -> HashMap<PeerId, Option<retifs_core::announce::SiteTag>> {
+    d.store.storage_nodes().unwrap_or_default().into_iter().map(|n| (n.peer, n.site)).collect()
+}
+
+/// Whether `peer` is at this node's site. A node that names no site counts
+/// as elsewhere: it's most likely someone else's.
+fn same_site(d: &Daemon, sites: &HashMap<PeerId, Option<retifs_core::announce::SiteTag>>, peer: &PeerId) -> bool {
+    d.site.is_some() && sites.get(peer).copied().flatten() == d.site
+}
+
+/// A file that needs more copies: its loss estimate, holders, whether it's
+/// this node's own (pinned) copy, and whether a holder is at another site.
+struct Need {
+    risk: f64,
+    holders: std::collections::BTreeSet<PeerId>,
+    own: bool,
+    elsewhere: bool,
+}
+
+fn review(d: &Daemon, file: &FileRef, want: Copies, sites: &HashMap<PeerId, Option<retifs_core::announce::SiteTag>>) -> Result<Option<Need>, String> {
     // A lease that ran out unrenewed means the holder dropped the copy: forget
     // that holder for this file instead of re-offering to it later (a minute of
     // grace for clocks). One that's only away but still within its lease counts
@@ -4591,17 +4639,22 @@ fn review(d: &Daemon, file: &FileRef, want: Copies) -> Result<Option<(f64, std::
         println!("placement: {}: lease at <{}> ran out unrenewed, its copy is gone", file.root, hex(&h));
     }
     let (local, views, risk) = loss_now(d, file);
-    if want.enough(d, risk, views.len() + 1) {
+    let own = local <= 0.1;
+    let elsewhere_without = |drop: Option<&PeerId>| views.iter().any(|h| Some(&h.peer) != drop && !same_site(d, sites, &h.peer));
+    let elsewhere = elsewhere_without(None);
+    if want.enough(d, risk, views.len() + 1, own, elsewhere) {
         // Surplus after a repair (the absent holder came back): stop renewing
         // the worst copy once the target holds well without it, never below
         // the floor; with a namespace's own number, whatever is over it.
         let drop = match want {
-            Copies::Default if views.len() + 1 > d.min_copies => retifs_store::surplus_holder(local, &views, d.loss_target),
+            Copies::Default if views.len() + 1 > want.floor(d, own) => retifs_store::surplus_holder(local, &views, d.loss_target),
             Copies::Exactly(n) if views.len() + 1 > n && views.iter().all(|h| h.confirmed) => {
                 views.iter().max_by(|a, b| a.loss.total_cmp(&b.loss).then(a.hops.cmp(&b.hops))).map(|h| h.peer)
             }
             _ => None,
         };
+        // Never the last copy at another site.
+        let drop = drop.filter(|p| !own || d.site.is_none() || !elsewhere || elsewhere_without(Some(p)));
         if let Some(drop) = drop {
             let n = d.store.drop_holder(&file.root, &drop).map_err(|e| e.to_string())?;
             let without = local * views.iter().filter(|h| h.peer != drop).map(|h| h.loss).product::<f64>();
@@ -4613,7 +4666,7 @@ fn review(d: &Daemon, file: &FileRef, want: Copies) -> Result<Option<(f64, std::
         }
         return Ok(None);
     }
-    Ok(Some((risk, views.iter().map(|h| h.peer).collect())))
+    Ok(Some(Need { risk, holders: views.iter().map(|h| h.peer).collect(), own, elsewhere }))
 }
 
 /// The nearest few storage nodes by hops, measured by linking (RTT) and

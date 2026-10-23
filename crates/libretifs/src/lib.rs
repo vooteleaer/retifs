@@ -362,6 +362,9 @@ pub struct StorageNodeInfo {
     pub rate_bps: u32,
     /// Placement counts it as too slow for copies.
     pub slow: bool,
+    /// It names the same site as this node (`--site`).
+    #[serde(default)]
+    pub same_site: bool,
     /// Its record as a holder: answers that were right and wrong.
     pub ok: u32,
     pub fail: u32,

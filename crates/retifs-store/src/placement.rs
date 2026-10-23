@@ -2,7 +2,7 @@
 //! and which files this node needs kept.
 //!
 //! ```text
-//! STORAGE_NODES  peer (16) → hops (1) ‖ last_heard_ms (8) ‖ avoid_until_ms (8)
+//! STORAGE_NODES  peer (16) → hops (1) ‖ last_heard_ms (8) ‖ avoid_until_ms (8) [‖ announce_s (4) [‖ site (8)]]
 //! HOLDER_STATS   peer (16) → ok (4) ‖ fail (4) ‖ last_ok_ms (8)
 //! NEEDED         root CID → seed (32) ‖ size (8)
 //! ```
@@ -113,6 +113,8 @@ pub struct StorageNode {
     pub avoid_until_ms: u64,
     /// How often it says it announces (seconds; the default if it doesn't).
     pub announce_s: u32,
+    /// The site its announces name, if any.
+    pub site: Option<[u8; 8]>,
 }
 
 /// How a holder has answered upkeep (receipts, renewals, proofs).
@@ -139,11 +141,13 @@ fn parse_node(peer: PeerId, v: &[u8]) -> StorageNode {
         avoid_until_ms: u64::from_be_bytes(v[9..17].try_into().unwrap()),
         // Entries written before the interval was kept have none.
         announce_s: v.get(17..21).map_or(retifs_core::announce::DEFAULT_ANNOUNCE_S, |b| u32::from_be_bytes(b.try_into().unwrap())),
+        site: v.get(21..29).map(|b| b.try_into().unwrap()),
     }
 }
 
 fn node_value(n: &StorageNode) -> Vec<u8> {
-    [&[n.hops][..], &n.last_heard_ms.to_be_bytes(), &n.avoid_until_ms.to_be_bytes(), &n.announce_s.to_be_bytes()].concat()
+    let site: &[u8] = n.site.as_ref().map_or(&[], |s| s.as_slice());
+    [&[n.hops][..], &n.last_heard_ms.to_be_bytes(), &n.avoid_until_ms.to_be_bytes(), &n.announce_s.to_be_bytes(), site].concat()
 }
 
 fn parse_quality(v: &[u8]) -> LinkQuality {
@@ -162,7 +166,7 @@ fn parse_stats(v: &[u8]) -> HolderStats {
 impl SlabStore {
     /// A `retifs.node` announce was heard `hops` away, saying it announces
     /// every `announce_s` seconds (None: it didn't say).
-    pub fn heard_storage_node(&self, peer: &PeerId, hops: u8, announce_s: Option<u32>, now_ms: u64) -> Result<(), StoreError> {
+    pub fn heard_storage_node(&self, peer: &PeerId, hops: u8, announce_s: Option<u32>, site: Option<[u8; 8]>, now_ms: u64) -> Result<(), StoreError> {
         let w = self.db.begin_write()?;
         {
             let mut t = w.open_table(STORAGE_NODES)?;
@@ -173,6 +177,7 @@ impl SlabStore {
                 last_heard_ms: now_ms,
                 avoid_until_ms: old.map_or(0, |o| o.avoid_until_ms),
                 announce_s: announce_s.unwrap_or(retifs_core::announce::DEFAULT_ANNOUNCE_S),
+                site,
             };
             t.insert(peer.as_slice(), node_value(&n).as_slice())?;
         }

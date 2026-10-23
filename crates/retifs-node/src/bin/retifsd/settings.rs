@@ -26,6 +26,7 @@ const SETTINGS: &[(&str, &str, &str, Kind)] = &[
     ("placement", "lease_term", "--lease-term", Kind::Value),
     ("placement", "loss_target", "--loss-target", Kind::Value),
     ("placement", "min_copies", "--min-copies", Kind::Value),
+    ("node", "site", "--site", Kind::Value),
     ("placement", "stamp_cost", "--stamp-cost", Kind::Value),
     ("placement", "max_stamp_cost", "--max-stamp-cost", Kind::Value),
     ("placement", "slow_link_budget", "--slow-link-budget", Kind::Value),
@@ -48,6 +49,7 @@ const TEMPLATE: &str = r#"# retifs node settings. Flags given to retifsd overrid
 # device = "..."             # this device's name for keep tags and rules (default: the hostname)
 # announce_every = "10m"     # how often to announce retifs.node (the announces say so)
 # private_requests = false   # one item per have/get request when seeking: slower, less to correlate
+# site = "..."               # where this node is (e.g. "prangli-home"): one copy of its files is kept at another site
 
 [placement]
 # hold_for_others = "..."    # hold others' encrypted copies up to this (default: up to the store limit; 0 opts out)

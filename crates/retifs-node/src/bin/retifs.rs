@@ -156,7 +156,7 @@ async fn main() {
                 let avoid = if n.avoid_until_ms > now { format!("  avoided for {}", duration((n.avoid_until_ms - now) / 1000)) } else { String::new() };
                 let link = if n.rtt_ms == 0 { "not linked".to_string() } else { format!("rtt {} ms{}", n.rtt_ms, if n.rate_bps > 0 { format!(", {} B/s", n.rate_bps) } else { String::new() }) };
                 let record = if n.ok + n.fail > 0 { format!("  holder {} ok / {} failed", n.ok, n.fail) } else { String::new() };
-                println!("{}  {} hop(s)  heard {}  {link}{}{record}{avoid}", n.node, n.hops, ago(n.last_heard_ms), if n.slow { " (slow)" } else { "" });
+                println!("{}  {} hop(s)  heard {}  {link}{}{}{record}{avoid}", n.node, n.hops, ago(n.last_heard_ms), if n.slow { " (slow)" } else { "" }, if n.same_site { "  same site" } else { "" });
             }
             println!("{} storage node(s)", nodes.len());
         }
