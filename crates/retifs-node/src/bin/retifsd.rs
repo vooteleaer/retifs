@@ -4458,14 +4458,16 @@ async fn place_all(d: &Daemon) -> Result<(), String> {
     let mut plan: std::collections::BTreeMap<PeerId, Vec<FileRef>> = Default::default();
     let mut ranked: Option<Vec<(f64, retifs_store::StorageNode)>> = None;
     let mut short = 0;
+    let wanted = copies_wanted(d);
     for file in d.store.needed_files().map_err(|e| e.to_string())? {
-        let Some((mut risk, holders)) = review(d, &file)? else { continue };
+        let want = wanted.get(&file.root).map_or(Copies::Default, |&n| Copies::Exactly(n));
+        let Some((mut risk, holders)) = review(d, &file, want)? else { continue };
         if ranked.is_none() {
             ranked = Some(rank_candidates(d).await?);
         }
         let mut copies = holders.len() + 1;
         for (_, n) in ranked.as_deref().unwrap_or_default() {
-            if met(risk, d.loss_target) && copies >= d.min_copies {
+            if want.enough(d, risk, copies) {
                 break;
             }
             if holders.contains(&n.peer) {
@@ -4475,12 +4477,12 @@ async fn place_all(d: &Daemon) -> Result<(), String> {
             risk *= d.store.holder_stats(&n.peer).map(|s| s.loss()).unwrap_or(1.0);
             copies += 1;
         }
-        if copies < d.min_copies {
+        if copies < want.floor(d) {
             short += 1;
         }
     }
     if short > 0 {
-        println!("placement: {short} file(s) below {} copies: not enough storage nodes reachable now", d.min_copies);
+        println!("placement: {short} file(s) below their number of copies: not enough storage nodes reachable now");
     }
     for (peer, files) in plan {
         // Union of the files' chunks: shared chunks (versions) are listed once.
@@ -4524,7 +4526,53 @@ fn sorted(chunks: &[(Cid, ChunkToken)]) -> Vec<(Cid, ChunkToken)> {
 /// Brings one file's holders up to date: forgets holders whose lease ran
 /// out, trims a surplus copy. Returns the loss estimate and current holders
 /// if the file needs more.
-fn review(d: &Daemon, file: &FileRef) -> Result<Option<(f64, std::collections::BTreeSet<PeerId>)>, String> {
+/// The copies each file's namespaces ask for (`retifs.placement` records),
+/// where they ask: the most any of its namespaces asks.
+fn copies_wanted(d: &Daemon) -> HashMap<Cid, usize> {
+    let mut out: HashMap<Cid, usize> = HashMap::new();
+    for ns in d.store.ns_names().unwrap_or_default() {
+        let Ok(records) = d.store.records(&ns) else { continue };
+        let wanted = records.iter().find_map(|r| {
+            (r.attrs.get("type") == Some(&Value::Str(libretifs::PLACEMENT_TYPE.into()))).then(|| match r.attrs.get("copies") {
+                Some(Value::Int(n)) if *n >= 1 => Some(*n as usize),
+                _ => None,
+            })?
+        });
+        let Some(n) = wanted else { continue };
+        for b in records.iter().flat_map(|r| r.blocks.iter()) {
+            let e = out.entry(b.root).or_insert(n);
+            *e = (*e).max(n);
+        }
+    }
+    out
+}
+
+/// How many copies a file gets: a namespace's own number (exactly that), or
+/// the node's rule (the loss target, and at least `min_copies`).
+#[derive(Clone, Copy)]
+enum Copies {
+    Default,
+    Exactly(usize),
+}
+
+impl Copies {
+    fn floor(self, d: &Daemon) -> usize {
+        match self {
+            Copies::Default => d.min_copies,
+            Copies::Exactly(n) => n,
+        }
+    }
+
+    /// Whether `copies` copies (this node's own included) with loss estimate `risk` will do.
+    fn enough(self, d: &Daemon, risk: f64, copies: usize) -> bool {
+        match self {
+            Copies::Default => met(risk, d.loss_target) && copies >= d.min_copies,
+            Copies::Exactly(n) => copies >= n,
+        }
+    }
+}
+
+fn review(d: &Daemon, file: &FileRef, want: Copies) -> Result<Option<(f64, std::collections::BTreeSet<PeerId>)>, String> {
     // A lease that ran out unrenewed means the holder dropped the copy: forget
     // that holder for this file instead of re-offering to it later (a minute of
     // grace for clocks). One that's only away but still within its lease counts
@@ -4543,13 +4591,18 @@ fn review(d: &Daemon, file: &FileRef) -> Result<Option<(f64, std::collections::B
         println!("placement: {}: lease at <{}> ran out unrenewed, its copy is gone", file.root, hex(&h));
     }
     let (local, views, risk) = loss_now(d, file);
-    if met(risk, d.loss_target) && views.len() + 1 >= d.min_copies {
+    if want.enough(d, risk, views.len() + 1) {
         // Surplus after a repair (the absent holder came back): stop renewing
         // the worst copy once the target holds well without it, never below
-        // the floor.
-        if views.len() + 1 > d.min_copies
-            && let Some(drop) = retifs_store::surplus_holder(local, &views, d.loss_target)
-        {
+        // the floor; with a namespace's own number, whatever is over it.
+        let drop = match want {
+            Copies::Default if views.len() + 1 > d.min_copies => retifs_store::surplus_holder(local, &views, d.loss_target),
+            Copies::Exactly(n) if views.len() + 1 > n && views.iter().all(|h| h.confirmed) => {
+                views.iter().max_by(|a, b| a.loss.total_cmp(&b.loss).then(a.hops.cmp(&b.hops))).map(|h| h.peer)
+            }
+            _ => None,
+        };
+        if let Some(drop) = drop {
             let n = d.store.drop_holder(&file.root, &drop).map_err(|e| e.to_string())?;
             let without = local * views.iter().filter(|h| h.peer != drop).map(|h| h.loss).product::<f64>();
             println!(

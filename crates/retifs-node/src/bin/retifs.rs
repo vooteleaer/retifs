@@ -59,7 +59,7 @@ use libretifs::{default_store_dir, Client};
 
 fn usage() -> ! {
     eprintln!(
-        "retifs [--store DIR] ping\n\
+        "retifs [--store DIR] ping | nodes\n\
          retifs [--store DIR] put FILE [--public] [--compress] [--publish] [--record NAME | --one-off]\n\
          retifs [--store DIR] get READ-CAP [--from NODE]... [-o OUT] [--links N] [--batch N]\n\
          retifs [--store DIR] status READ-CAP\n\
@@ -74,7 +74,7 @@ fn usage() -> ! {
          retifs [--store DIR] follow ADDRESS [--from NODE]... | channels\n\
          retifs [--store DIR] rec add NS [KEY=VALUE]... [--file PATH] | rec set NS ID [KEY=VALUE]... [--unset KEY]... [--file PATH]\n\
          retifs [--store DIR] rec get NS ID | rec rm NS ID | rec history NS ID | rec import NS < LINES | query NS[,NS]... [--at VERSION] [TERM]... [--search NODE]\n\
-         retifs [--store DIR] ns address NS | ns info NS | ns checkpoint NS | ns search NS | ns verify NS | ns keep NS all|rules | ns join NAME ADDRESS [--from NODE]... [--lazy]\n\
+         retifs [--store DIR] ns address NS | ns info NS | ns checkpoint NS | ns search NS | ns verify NS | ns keep NS all|rules | ns copies NS [N] | ns join NAME ADDRESS [--from NODE]... [--lazy]\n\
          retifs [--store DIR] ns grant NS WRITER [--grant] [--from NODE]... | ns revoke NS WRITER\n\
          retifs [--store DIR] share create NAME --from NS [TERM]... [--id ID]... [--omit KEY]... [--qr] | share list NS | share rm NS ID\n\
          retifs [--store DIR] ns link NS [--name LABEL] [--q TERMS] [--qr] | open LINK [--as NAME] | ns join NAME LINK\n\
@@ -441,6 +441,37 @@ async fn main() {
                 "info" => libretifs::Request::NsInfo { ns },
                 "checkpoint" => libretifs::Request::NsCheckpoint { ns },
                 "keep" => libretifs::Request::NsKeep { ns, mode: rest.first().cloned().unwrap_or_else(|| usage()) },
+                "copies" => {
+                    // The namespace's own setting, a record every member's node follows.
+                    let find = libretifs::Request::Query { ns: ns.clone(), terms: vec![format!("type={}", libretifs::PLACEMENT_TYPE)], at: None };
+                    let current = client.records(find).await.unwrap_or_else(|e| fail(e)).into_iter().next();
+                    let copies = |r: &libretifs::RecordView| r.attrs.iter().find_map(|(k, v)| match (k.as_str(), v) {
+                        ("copies", libretifs::AttrValue::Int(n)) => Some(*n),
+                        _ => None,
+                    });
+                    let Some(n) = rest.first() else {
+                        match current.as_ref().and_then(copies) {
+                            Some(n) => println!("{ns}: {n} copies of each file (its own setting)"),
+                            None => println!("{ns}: each node's default (min_copies in retifs.toml, 3 unless set)"),
+                        }
+                        return;
+                    };
+                    let n: i64 = n.parse().ok().filter(|n| *n >= 1).unwrap_or_else(|| fail("copies: a number, 1 or more"));
+                    let attrs = vec![("copies".to_string(), libretifs::AttrValue::Int(n))];
+                    let req = match current {
+                        Some(r) => libretifs::Request::RecordSet { ns: ns.clone(), id: r.id, attrs, unset: vec![], data: None },
+                        None => {
+                            let mut attrs = attrs;
+                            attrs.push(("type".to_string(), libretifs::AttrValue::Str(libretifs::PLACEMENT_TYPE.into())));
+                            libretifs::Request::RecordCreate { ns: ns.clone(), attrs, data: None }
+                        }
+                    };
+                    if let libretifs::Response::Error { message } = client.call(req).await.unwrap_or_else(|e| fail(e)) {
+                        fail(message);
+                    }
+                    println!("{ns}: {n} copies of each file, the writer's own included; every member's node follows it");
+                    return;
+                }
                 "verify" => libretifs::Request::NsVerify { ns },
                 "search" => libretifs::Request::NsSearch { ns },
                 "link" => {

@@ -17,6 +17,11 @@ pub mod fdpass;
 pub mod link;
 pub mod saved;
 
+/// A namespace's own placement setting (ADR-0014): a record of this type
+/// with `copies = N` (copies of each of its files, the writer's own
+/// included). Every member's node follows it, so the club decides.
+pub const PLACEMENT_TYPE: &str = "retifs.placement";
+
 use std::{
     io,
     path::{Path, PathBuf},
