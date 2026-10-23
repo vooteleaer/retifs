@@ -8,12 +8,15 @@
 //! Like the FUSE mount it holds no keys and no store; `retifsd` does.
 
 use std::{
-    collections::HashMap,
+    collections::{HashMap, HashSet},
     fs,
     io::Read,
     os::windows::{fs::OpenOptionsExt, io::AsRawHandle},
     path::{Path, PathBuf},
-    sync::{mpsc, Arc, Mutex},
+    sync::{
+        atomic::{AtomicBool, Ordering},
+        mpsc, Arc, Mutex,
+    },
     time::{Duration, Instant, SystemTime, UNIX_EPOCH},
 };
 
@@ -112,6 +115,14 @@ impl Daemon {
         }
     }
 
+    /// Whether this node may write to `ns` (through `--via`: whether that node may).
+    fn may_write(&mut self, ns: &str) -> Result<bool, String> {
+        match self.call(Request::NsInfo { ns: ns.to_string() })? {
+            Response::Namespace(v) => Ok(v.writers.iter().any(|(w, rights)| *w == v.own_writer && rights.iter().any(|r| r == "write"))),
+            _ => Err("unexpected answer to NsInfo".into()),
+        }
+    }
+
     /// The record at tree path `path` and every record below it.
     fn records_under(&mut self, ns: &str, path: &str) -> Result<Vec<RecordView>, String> {
         let mut out = self.query(ns, vec![format!("path={path}")])?;
@@ -143,6 +154,10 @@ struct Shared {
     /// Records just pinned or unpinned in the folder, and when.
     pinning: Mutex<HashMap<String, Instant>>,
     hydrate: Mutex<mpsc::Sender<PathBuf>>,
+    /// This node may only read: the folder is read-only (below).
+    read_only: AtomicBool,
+    /// Local files already reported as not written (read-only).
+    refused: Mutex<HashSet<PathBuf>>,
 }
 
 impl Shared {
@@ -176,6 +191,32 @@ impl Shared {
     fn is_pinning(&self, id: &str) -> bool {
         self.pinning.lock().unwrap().get(id).is_some_and(|t| t.elapsed() < SETTLE)
     }
+}
+
+/// Makes the folder read-only for the user, or writable again: a deny ACE
+/// on creating and changing files and folders, inherited by everything in
+/// it. Windows ignores a folder's read-only attribute, and a file's is one
+/// click away; the ACE holds in Explorer and every program. Cloud Files
+/// itself still makes, updates and removes placeholders under it, so the
+/// folder keeps following the namespace. Deleting and renaming are refused
+/// in the callbacks.
+fn set_read_only(root: &Path, read_only: bool) -> Result<(), String> {
+    use std::os::windows::process::CommandExt;
+    const CREATE_NO_WINDOW: u32 = 0x0800_0000;
+    let user = match std::env::var("USERDOMAIN") {
+        Ok(d) => format!("{d}\\{}", std::env::var("USERNAME").unwrap_or_default()),
+        Err(_) => std::env::var("USERNAME").map_err(|e| e.to_string())?,
+    };
+    let icacls = |args: &[&str]| {
+        let out = std::process::Command::new("icacls").arg(root).args(args).creation_flags(CREATE_NO_WINDOW).output().map_err(|e| e.to_string())?;
+        if out.status.success() { Ok(()) } else { Err(String::from_utf8_lossy(&out.stdout).trim().to_string()) }
+    };
+    // Ours is the only deny ACE for the user there: off first, then on if asked.
+    icacls(&["/remove:d", &user, "/Q"])?;
+    if read_only {
+        icacls(&["/deny", &format!("{user}:(OI)(CI)(WD,AD)"), "/Q"])?;
+    }
+    Ok(())
 }
 
 fn is_scratch(abs: &Path) -> bool {
@@ -218,6 +259,12 @@ fn own_process(req: &CfRequest) -> bool {
 }
 
 impl Filter {
+    /// Whether to refuse a delete or rename: the folder is read-only and it's
+    /// one of retifs' files (the user's own local files there may go).
+    fn refuse(&self, req: &CfRequest) -> bool {
+        self.shared.read_only.load(Ordering::Relaxed) && names::parse_identity(req.file_blob()).is_some_and(|(id, _)| !id.is_empty())
+    }
+
     /// Deletes the records at and below `abs` (a delete in the folder, or a
     /// move out of it, e.g. to the Recycle Bin).
     fn delete_records(&self, abs: &Path, blob: &[u8]) {
@@ -352,6 +399,10 @@ impl SyncFilter for Filter {
     }
 
     fn delete(&self, req: CfRequest, ticket: ticket::Delete, _info: info::Delete) -> CResult<()> {
+        if !own_process(&req) && self.refuse(&req) {
+            eprintln!("retifs-cloudfiles: {}: not deleted: {} is read-only here", req.path().display(), self.shared.ns);
+            return Err(CloudErrorKind::ReadOnlyVolume);
+        }
         if !own_process(&req) {
             self.shared.settle(&req.path());
         }
@@ -365,6 +416,10 @@ impl SyncFilter for Filter {
     }
 
     fn rename(&self, req: CfRequest, ticket: ticket::Rename, info: info::Rename) -> CResult<()> {
+        if !own_process(&req) && self.refuse(&req) {
+            eprintln!("retifs-cloudfiles: {}: not moved: {} is read-only here", req.path().display(), self.shared.ns);
+            return Err(CloudErrorKind::ReadOnlyVolume);
+        }
         if !own_process(&req) {
             let path = req.path();
             self.shared.settle(&path);
@@ -499,6 +554,8 @@ pub fn run(store: &Path, ns: &str, folder: &Path, wait: Duration, via: Option<St
         settling: Mutex::new(HashMap::new()),
         pinning: Mutex::new(HashMap::new()),
         hydrate: Mutex::new(hydrate_tx.clone()),
+        read_only: AtomicBool::new(false),
+        refused: Mutex::new(HashSet::new()),
     });
     let filter = Filter { shared: shared.clone(), wait, daemon: Mutex::new(Daemon::new(store, via.clone())?) };
     let _connection = Session::new().connect(&folder, filter).map_err(|e| format!("connecting the sync root: {e}"))?;
@@ -519,7 +576,27 @@ pub fn run(store: &Path, ns: &str, folder: &Path, wait: Duration, via: Option<St
     watch(store, ns, via, wake_tx.clone());
     watch_folder(&folder, wake_tx);
     let sync = Sync { shared: shared.clone(), hydrate: hydrate_tx };
+    // Whether the folder is read-only (None: not set yet); checked each round,
+    // so a grant that arrives makes it writable.
+    let mut applied: Option<bool> = None;
     loop {
+        match daemon.may_write(ns) {
+            Ok(may) if applied != Some(!may) => match set_read_only(&folder, !may) {
+                Ok(()) => {
+                    shared.read_only.store(!may, Ordering::Relaxed);
+                    if !may {
+                        eprintln!("retifs-cloudfiles: {ns} is read-only here (this node has no write grant): the folder is read-only");
+                    } else if applied.is_some() {
+                        eprintln!("retifs-cloudfiles: {ns} may be written here now: the folder is writable");
+                        shared.refused.lock().unwrap().clear();
+                    }
+                    applied = Some(!may);
+                }
+                Err(e) => eprintln!("retifs-cloudfiles: making the folder {}: {e}", if may { "writable" } else { "read-only" }),
+            },
+            Ok(_) => {}
+            Err(e) => eprintln!("retifs-cloudfiles: {e}"),
+        }
         match daemon.query(ns, Vec::new()) {
             Ok(records) => {
                 *shared.kept.lock().unwrap() = records.iter().map(|r| (r.id.clone(), is_kept(r, &device))).collect();
@@ -606,6 +683,18 @@ struct Sync {
 impl Sync {
     fn root(&self) -> &Path {
         &self.shared.root
+    }
+
+    /// When read-only: a local file or folder that got in before the folder
+    /// was made read-only stays here, not in retifs; said once.
+    fn refused(&self, abs: &Path) -> bool {
+        if !self.shared.read_only.load(Ordering::Relaxed) {
+            return false;
+        }
+        if self.shared.refused.lock().unwrap().insert(abs.to_path_buf()) {
+            eprintln!("retifs-cloudfiles: {}: stays only on this device: {} is read-only here (no write grant)", abs.display(), self.shared.ns);
+        }
+        true
     }
 
     fn reconcile(&self, plan: &names::Plan, d: &mut Daemon) {
@@ -745,6 +834,9 @@ impl Sync {
     /// a new record; then makes it an in-sync placeholder of that version.
     /// A file another program is still writing is left for the next round.
     fn upload(&self, abs: &Path, id: Option<&str>, placeholder: bool, d: &mut Daemon) {
+        if self.refused(abs) {
+            return;
+        }
         let Some(path) = self.shared.tree_path(abs) else { return };
         let ns = self.shared.ns.clone();
         // Others may read meanwhile, not write.
@@ -817,6 +909,9 @@ impl Sync {
     /// A folder made here: a directory record, and the folder becomes its
     /// placeholder.
     fn add_dir(&self, abs: &Path, d: &mut Daemon) {
+        if self.refused(abs) {
+            return;
+        }
         let Some(path) = self.shared.tree_path(abs) else { return };
         let name = path.rsplit('/').next().unwrap_or("").to_string();
         let attrs = vec![("path".into(), AttrValue::Str(path.clone())), ("type".into(), AttrValue::Str("directory".into())), ("name".into(), AttrValue::Str(name))];
