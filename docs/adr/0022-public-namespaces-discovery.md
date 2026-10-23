@@ -37,6 +37,12 @@ Reticulum already has a discovery mechanism: the announce. NomadNet nodes, LXMF 
 ### Prns
 Prns 0.3.8 passes app_data with each heard announce (`Diagnostic::AnnounceHeard`), which is enough to keep a list of heard public namespaces. 0.3.7, which retifs used until 2026-10-21, left it out. Prns also keeps each destination's app_data (`DestinationIdentity::app_data`, as Python RNS's `Identity.recall_app_data`), but its snapshot (`DestinationIdentitySnapshot`) doesn't expose it, so app_data heard before retifs started listening can't be recalled. Exposing that is a small upstream change (asked for in [Prns#306](https://github.com/KenAKAFrosty/Prns/issues/306), see [recon](../recon/prns-issue-app-data.md)); until then app_data can't be read on Prns nodes (retifs recognises its storage nodes by identity for the same reason).
 
+## Implementation status (2026-10-23)
+- **Members' nodes:** done, as the operation `[node, bin 16]` (ADR-0017). Each sync round, a node whose namespace doesn't name its own node (and that may write) writes it, so namespaces made before this get it too; every member's node is then a peer of the namespace, so each member syncs with all of them.
+  - Live (three nodes on one machine, 5 checks): two members that joined through the creator learned each other's nodes; with the creator stopped, one's write reached the other directly, and the creator caught up when it was back.
+  - The four-node soak of 2026-10-22 had shown why: 49 of 84 rounds behind, almost all of it rtr-4's writes reaching the others late over its one path to cafa-cloud (368 link timeouts from cafa-cloud to rtr-4), although RTR-2 has a link of its own to rtr-4.
+- **Public namespaces (`retifs.public` announces):** not yet.
+
 ## Impact on the threat model
 - **Who reads a public namespace** isn't visible to its owner (fetching is anonymous by default); its existence and its announce are visible to everyone, by design.
 - **Searching** a public search node shows it the query, over an unidentified link: what's searched, not who searches; timing remains visible.

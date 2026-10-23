@@ -140,6 +140,10 @@ pub enum Op {
     /// The signer's public identity (X25519 ‖ Ed25519), so others can wrap keys to it.
     /// Counts only if its Ed25519 half is the signer's own key.
     Identity([u8; 64]),
+    /// The `retifs.node` address of the signer's node (ADR-0022), so every
+    /// member can sync with every member's node, not just the one it joined
+    /// through. Counts for the signer only; its latest one stands.
+    Node([u8; 16]),
     /// A new read key for epoch `epoch`, wrapped to each remaining writer
     /// (keywrap: RNS `Identity.encrypt`). Counts only from a writer holding `grant`.
     Rekey(u64, Vec<(WriterKey, Vec<u8>)>),
@@ -267,6 +271,11 @@ pub(crate) fn write_op(out: &mut Vec<u8>, op: &Op) {
             write_str(out, "identity");
             write_bin(out, p);
         }
+        Op::Node(n) => {
+            write_array_len(out, 2);
+            write_str(out, "node");
+            write_bin(out, n);
+        }
         Op::Rekey(epoch, entries) => {
             let mut entries = entries.clone();
             entries.sort_by_key(|(w, _)| *w);
@@ -360,6 +369,7 @@ pub(crate) fn read_op(r: &mut Reader) -> Result<Op, RecordError> {
         }
         ("revoke", 2) => Op::Revoke(writer(r)?),
         ("identity", 2) => Op::Identity(r.bin()?.try_into().map_err(|_| RecordError::Malformed("identity"))?),
+        ("node", 2) => Op::Node(r.bin()?.try_into().map_err(|_| RecordError::Malformed("node"))?),
         ("rekey", 3) => {
             let epoch = match r.value(0)? {
                 Value::Int(e) if e >= 0 => e as u64,
@@ -406,6 +416,8 @@ pub struct RekeyEvent {
 pub struct Merged {
     /// Writers' public identities, as they announced them.
     pub identities: BTreeMap<WriterKey, [u8; 64]>,
+    /// Writers' nodes (`retifs.node` addresses), as they announced them.
+    pub nodes: BTreeMap<WriterKey, [u8; 16]>,
     /// Valid rekeys, in stamp order.
     pub rekeys: Vec<RekeyEvent>,
     /// Visible records, by ID.
@@ -452,6 +464,9 @@ pub fn merge(creator: &WriterKey, chains: &BTreeMap<WriterKey, Vec<WriterCommit>
                 } else {
                     m.ignored_ops += 1;
                 }
+            }
+            Op::Node(n) => {
+                m.nodes.insert(writer, *n);
             }
             Op::Rekey(epoch, entries) if has(&rights, &writer, Right::Grant) => {
                 m.rekeys.push(RekeyEvent { epoch: *epoch, time_ms, by: writer, entries: entries.clone() });
@@ -503,10 +518,11 @@ pub fn merge(creator: &WriterKey, chains: &BTreeMap<WriterKey, Vec<WriterCommit>
 /// sequence number, index in commit).
 pub type Stamp = (u64, WriterKey, u64, u32);
 
-/// Grants, revokes, identities and rekeys: they decide what other operations
-/// mean, so they're evaluated as a whole, in stamp order.
+/// Grants, revokes, identities, nodes and rekeys: they decide what other
+/// operations mean (or whom to sync with), so they're evaluated as a whole,
+/// in stamp order.
 pub fn is_control(op: &Op) -> bool {
-    matches!(op, Op::Grant(..) | Op::GrantLimited(..) | Op::Revoke(_) | Op::Identity(_) | Op::Rekey(..))
+    matches!(op, Op::Grant(..) | Op::GrantLimited(..) | Op::Revoke(_) | Op::Identity(_) | Op::Node(_) | Op::Rekey(..))
 }
 
 /// The commits of a chain that count: not dated before their predecessor,
@@ -542,6 +558,7 @@ pub struct State {
     /// Each writer's rights over time: (from stamp, rights; None once revoked).
     rights: BTreeMap<WriterKey, RightsTimeline>,
     identities: BTreeMap<WriterKey, [u8; 64]>,
+    nodes: BTreeMap<WriterKey, [u8; 16]>,
     rekeys: Vec<RekeyEvent>,
     fields: BTreeMap<(RecordId, String), (Stamp, Option<Value>)>,
     blocks: BTreeMap<RecordId, (Stamp, Vec<FileRef>)>,
@@ -572,6 +589,7 @@ impl State {
         let creator = self.creator;
         self.rights = BTreeMap::from([(creator, vec![(ZERO, Some(Grant::full()))])]);
         self.identities.clear();
+        self.nodes.clear();
         self.rekeys.clear();
         self.ignored_control = 0;
         let control = std::mem::take(&mut self.control);
@@ -585,6 +603,9 @@ impl State {
                     } else {
                         self.ignored_control += 1;
                     }
+                }
+                Op::Node(n) => {
+                    self.nodes.insert(writer, *n);
                 }
                 Op::Rekey(epoch, entries) if can_grant => {
                     self.rekeys.push(RekeyEvent { epoch: *epoch, time_ms: s.0, by: writer, entries: entries.clone() })
@@ -805,6 +826,7 @@ impl State {
     pub fn merged_meta(&self) -> Merged {
         Merged {
             identities: self.identities.clone(),
+            nodes: self.nodes.clone(),
             rekeys: self.rekeys.clone(),
             records: Vec::new(),
             writers: self
@@ -1241,6 +1263,12 @@ mod tests {
         let bob = vec![c(200, vec![Op::Identity(alice_id), Op::Rekey(1, vec![(BOB, vec![9])])])];
         let m = merge(&ALICE, &chains(vec![(ALICE, alice), (BOB, bob)]), 1000);
         assert_eq!(m.identities.keys().copied().collect::<Vec<_>>(), vec![ALICE], "bob can't claim alice's identity");
+        let alice_node = vec![c(100, vec![Op::Node([1; 16])]), c(200, vec![Op::Node([2; 16])])];
+        let bob_node = vec![c(150, vec![Op::Node([3; 16])])];
+        let n = merge(&ALICE, &chains(vec![(ALICE, alice_node), (BOB, bob_node)]), 1000);
+        assert_eq!(n.nodes, BTreeMap::from([(ALICE, [2; 16]), (BOB, [3; 16])]), "each writer's latest, for itself");
+        let f = OpsFile { ops: vec![Op::Node([7; 16])] };
+        assert_eq!(OpsFile::decode(&f.encode()).unwrap(), f);
         assert_eq!(m.rekeys.len(), 1, "bob holds no grant right: his rekey doesn't count");
         assert_eq!((m.rekeys[0].epoch, m.rekeys[0].by, m.rekeys[0].time_ms), (1, ALICE, 300));
         let f = OpsFile { ops: vec![Op::Rekey(2, vec![(BOB, vec![5]), (ALICE, vec![6])])] };

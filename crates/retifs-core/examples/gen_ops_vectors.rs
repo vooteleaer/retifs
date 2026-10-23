@@ -56,6 +56,7 @@ fn op(o: &Op) -> J {
         }
         Op::Revoke(w) => json!(["revoke", hex::encode(w)]),
         Op::Identity(p) => json!(["identity", hex::encode(p)]),
+        Op::Node(n) => json!(["node", hex::encode(n)]),
         Op::Checkpoint(f) => json!(["checkpoint", [f.root.to_string(), hex::encode(f.seed.0), f.size]]),
         Op::Rekey(e, entries) => json!([
             "rekey",
@@ -84,6 +85,7 @@ fn main() {
                 time_ms: 1000,
                 ops: vec![
                     Op::Identity(keywrap::public(&alice_id)),
+                    Op::Node([0xa0; 16]),
                     Op::Grant(bob, vec![Right::Write]),
                     // Eve: only the rating, until 3500.
                     Op::GrantLimited(eve, vec![Right::Write], Limits { keys: Some(["rating".to_string()].into()), until: Some(3500) }),
@@ -112,6 +114,7 @@ fn main() {
                 time_ms: 2000,
                 ops: vec![
                     Op::Identity(keywrap::public(&bob_id)),
+                    Op::Node([0xb1; 16]),
                     Op::Set(page, "title".into(), s("A title by Bob")),
                     Op::Set(page, "tags".into(), Value::List(vec![s("home")])),
                     Op::Set(photo, "type".into(), s("image")),
@@ -151,6 +154,7 @@ fn main() {
         "writers_after": merged.writers.keys().map(hex::encode).collect::<Vec<_>>(),
         "limits_after": merged.limits.iter().map(|(w, l)| (hex::encode(w), json!({"keys": l.keys, "until": l.until}))).collect::<serde_json::Map<_, _>>(),
         "identities_after": merged.identities.keys().map(hex::encode).collect::<Vec<_>>(),
+        "nodes_after": merged.nodes.iter().map(|(w, n)| (hex::encode(w), hex::encode(n))).collect::<BTreeMap<_, _>>(),
         "rekeys_after": merged.rekeys.len(),
         "alice_identity_secret": hex::encode(alice_id),
         "rekey_new_key": hex::encode(new_key),

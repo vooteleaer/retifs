@@ -2220,8 +2220,42 @@ async fn ns_sync(d: Arc<Daemon>) {
             if let Err(e) = sync_ns(&d, &ns).await {
                 eprintln!("ns {ns}: {e}");
             }
+            if let Err(e) = member_nodes(&d, &ns).await {
+                eprintln!("ns {ns}: member nodes: {e}");
+            }
         }
     }
+}
+
+/// This node's `retifs.node` address.
+fn own_node(d: &Daemon) -> Result<PeerId, String> {
+    Ok(parse_peers(std::slice::from_ref(&d.node_hex))?[0])
+}
+
+/// Members know each other's nodes (ADR-0022): this node's address is in the
+/// namespace (written once it may write, and again if it changed), and every
+/// member's node is a peer to sync with, not just the one this node joined
+/// through. A member whose only peer loses its path still syncs through the
+/// others.
+async fn member_nodes(d: &Daemon, ns: &str) -> Result<(), String> {
+    let merged = materialize(d, ns)?;
+    let (_, own, _) = chains(d, ns, false)?;
+    let node = own_node(d)?;
+    if merged.writers.get(&own).is_some_and(|r| r.contains(&Right::Write)) && merged.nodes.get(&own) != Some(&node) {
+        write_ops(d, ns, vec![Op::Node(node)]).await?;
+    }
+    let known = d.store.ns_peers(ns).map_err(|e| e.to_string())?;
+    let new: Vec<PeerId> = merged
+        .nodes
+        .iter()
+        .filter(|(w, n)| **w != own && **n != node && !known.contains(n) && merged.writers.contains_key(*w))
+        .map(|(_, n)| *n)
+        .collect();
+    if !new.is_empty() {
+        d.store.add_ns_peers(ns, &new).map_err(|e| e.to_string())?;
+        eprintln!("ns {ns}: {} more member node(s) to sync with", new.len());
+    }
+    Ok(())
 }
 
 async fn sync_ns(d: &Daemon, ns: &str) -> Result<(), String> {
@@ -3223,6 +3257,7 @@ async fn write_ops(d: &Daemon, ns: &str, mut ops: Vec<Op>) -> Result<u64, String
     ensure_namespace(d, ns)?;
     if new && let Some(identity) = d.store.ns_identity(ns).map_err(|e| e.to_string())? {
         ops.insert(0, Op::Identity(keywrap::public(&identity)));
+        ops.insert(1, Op::Node(own_node(d)?));
     }
     // A hybrid logical clock (ADR-0017): a commit is never stamped before one
     // already merged here. Otherwise a writer whose clock is behind the granter's

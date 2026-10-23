@@ -61,6 +61,8 @@ def op(o):
         return ["checkpoint", [h(c), h(s), n]]
     if tag == "identity":
         return ["identity", h(o[1])]
+    if tag == "node":
+        return ["node", h(o[1])]
     if tag == "rekey":
         return ["rekey", o[1], [[h(w), h(x)] for w, x in sorted(o[2])]]
     raise ValueError(tag)
@@ -111,7 +113,7 @@ def merge(creator, chains, now):
                 events.append((c["time_ms"], writer, c["seq"], i, op(o)))
     events.sort(key=lambda e: (e[0], e[1], e[2], e[3]))
     rights = {creator: {"rights": {"grant", "write"}, "limits": (None, None)}}
-    records, ignored, identities, rekeys = {}, 0, {}, []
+    records, ignored, identities, rekeys, nodes = {}, 0, {}, [], {}
     for t, w, _, _, o in events:
         tag = o[0]
         if tag == "checkpoint":
@@ -121,6 +123,9 @@ def merge(creator, chains, now):
                 identities[w] = o[1]
             else:
                 ignored += 1
+            continue
+        if tag == "node":
+            nodes[w] = o[1]  # the signer's own node; the latest stands
             continue
         if tag == "rekey":
             if holds(rights, w, "grant", t):
@@ -150,7 +155,7 @@ def merge(creator, chains, now):
             records.setdefault(rid, {"attrs": {}, "blocks": []})["blocks"] = o[2]
         elif tag == "delete":
             records.pop(rid, None)
-    return records, rights, ignored, identities, rekeys
+    return records, rights, ignored, identities, rekeys, nodes
 
 
 def main():
@@ -164,7 +169,7 @@ def main():
         for c in ch["commits"]:
             f = sorted_map({"ops": [op(o) for o in c["ops"]], "retifs": "ns-ops/1"})
             checks[f"ops file {ch['writer'][:4]}@{c['time_ms']}"] = umsgpack.packb(f).hex() == c["encoded"]
-    records, rights, ignored, identities, rekeys = merge(bytes.fromhex(v["creator"]), chains, v["now_ms"])
+    records, rights, ignored, identities, rekeys, nodes = merge(bytes.fromhex(v["creator"]), chains, v["now_ms"])
     snap = sorted_map({
         "records": [
             sorted_map({"id": rid, "attrs": sorted_map(r["attrs"]), "blocks": r["blocks"]})
@@ -180,6 +185,7 @@ def main():
     checks["limited grants after (narrowed)"] = limits == v["limits_after"]
     checks["identities after"] = sorted(k.hex() for k in identities) == v["identities_after"]
     checks["rekeys after"] = len(rekeys) == v["rekeys_after"]
+    checks["nodes after"] = {k.hex(): n.hex() for k, n in nodes.items()} == v["nodes_after"]
     # The wrapped key opens with stock RNS Identity.decrypt.
     import RNS
     alice = RNS.Identity.from_bytes(bytes.fromhex(v["alice_identity_secret"]))

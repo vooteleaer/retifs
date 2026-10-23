@@ -6,7 +6,9 @@
 //!   its content block is the file's content.
 //! - A record with `type = directory` and a path is a directory (so empty
 //!   directories exist); other directories are implied by paths below them.
-//! - Records without a path are under `/.records/<id>`.
+//! - Records without a path are under `/.records/<id>`, except retifs' own
+//!   (`type` `retifs.*` or `keep-rule`: shares, index settings, keep rules),
+//!   which aren't files.
 //! - Two records claiming one path: the later ID gets `~<first 8 of its ID>`.
 
 use std::collections::BTreeMap;
@@ -99,6 +101,10 @@ impl Tree {
                 _ => None,
             };
             let dir = matches!(attr(r, "type"), Some(AttrValue::Str(t)) if t == "directory");
+            let internal = matches!(attr(r, "type"), Some(AttrValue::Str(t)) if t.starts_with("retifs.") || t == "keep-rule");
+            if path.is_none() && internal {
+                continue;
+            }
             match (path, dir) {
                 (Some(p), true) => {
                     let p = unique(&nodes, p, &r.id);
@@ -303,6 +309,8 @@ mod tests {
             rec("aa05", &[("path", s("/docs/a.txt"))], &[]),
             rec("aa06", &[("path", s("/docs"))], &[]),
             rec("aa07", &[("path", s("/.query/x"))], &[]),
+            rec("aa08", &[("type", s("retifs.share")), ("name", s("prangli"))], &[]),
+            rec("aa09", &[("type", s("keep-rule")), ("query", s("album=x"))], &[]),
         ]);
         let names = |d: &str| t.children(d).into_iter().map(|(n, _)| n).collect::<Vec<_>>();
         assert_eq!(names("/"), [".query", ".records", "docs", "docs~aa06", "photos"]);

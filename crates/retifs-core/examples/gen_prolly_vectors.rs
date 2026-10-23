@@ -101,6 +101,7 @@ fn op(o: &Op) -> J {
         }
         Op::Revoke(w) => json!(["revoke", hex::encode(w)]),
         Op::Identity(p) => json!(["identity", hex::encode(p)]),
+        Op::Node(n) => json!(["node", hex::encode(n)]),
         Op::Checkpoint(f) => json!(["checkpoint", [f.root.to_string(), hex::encode(f.seed.0), f.size]]),
         Op::Rekey(e, entries) => json!(["rekey", e, entries.iter().map(|(w, x)| json!([hex::encode(w), hex::encode(x)])).collect::<Vec<_>>()]),
     }
