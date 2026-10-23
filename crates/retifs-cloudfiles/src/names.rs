@@ -184,7 +184,7 @@ mod tests {
         ];
         let p = plan(&Tree::build(&records), &records, "laptop");
         let rels: Vec<&str> = p.wants.iter().map(|w| w.rel.as_str()).collect();
-        assert_eq!(rels, ["A.TXT", "Docs", "Docs\\a.txt", "Unfiled", "Docs\\b.txt", "e.txt"]);
+        assert_eq!(rels, ["A.TXT", "Docs", "Docs\\a.txt", "Docs\\b.txt", "e.txt"]);
         assert!(p.skipped.contains(&"/a.txt".to_string()), "case clash");
         assert!(!p.skipped.contains(&"/docs".to_string()), "merged into Docs");
         assert!(p.skipped.contains(&"/bad:dir".to_string()));

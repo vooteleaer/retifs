@@ -103,7 +103,8 @@ fn unique(nodes: &BTreeMap<String, Node>, p: String, id: &str) -> String {
 impl Tree {
     pub fn build(records: &[RecordView]) -> Tree {
         let mut nodes = BTreeMap::new();
-        for v in ["/", RECORDS_DIR, QUERY_DIR] {
+        // Unfiled only when something is in it (a directory implied below).
+        for v in ["/", QUERY_DIR] {
             nodes.insert(v.to_string(), Node::Dir { id: None });
         }
         let mut sorted: Vec<&RecordView> = records.iter().collect();
@@ -310,6 +311,12 @@ mod tests {
     }
     fn s(x: &str) -> AttrValue {
         AttrValue::Str(x.into())
+    }
+
+    #[test]
+    fn unfiled_only_when_used() {
+        let t = Tree::build(&[rec("aa01", &[("path", s("/a.txt"))], &[])]);
+        assert!(t.get(RECORDS_DIR).is_none());
     }
 
     #[test]
