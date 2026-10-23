@@ -214,8 +214,12 @@ The schema is a convention, not enforced. Keys are lowercase, `.` separates grou
 | `mime` | Str | content | |
 | `size` | Int | content | plaintext bytes |
 | `width`, `height`, `duration` | Int | content | |
-| `exif.*` | any | content | |
-| `geo` | Geo | content | |
+| `exif.*` | any | content | `exif.lens`, `exif.exposure`, `exif.fnumber`, `exif.iso`, `exif.focal`, `exif.orientation`, `exif.software` |
+| `geo` | Geo | content | `[lat, lon]` (floats) for now |
+| `taken`, `camera` | Str | content | ISO 8601 as recorded; make and model |
+| `audio.*` | Str/Int | content | `title`, `artist`, `album`, `track`, `year`, `genre` (not `album`: that's the user's) |
+| `doc.*` | Str/Int | content | `title`, `author`, `pages` |
+| `extracted` | Str | record | which content the content keys were taken from ([ADR-0023](adr/0023-attribute-extraction.md)) |
 | `keep` / `keep:<device>` | Bool | record | availability (§11) |
 | `retifs.*` | — | — | reserved for the daemon |
 
@@ -489,7 +493,7 @@ let id = ns.create(&[
 ]).await?;
 ns.put_block_fd(id, "original", file.as_raw_fd()).await?;
 ns.put_block(id, "thumb:256", thumbnail.as_slice()).await?;
-// width, height, exif.*, geo are extracted by the daemon and bound to the CID
+// width, height, exif.*, geo are filled in by retifs-extractd (ADR-0023)
 ```
 
 ### Show an album and keep it updated
@@ -536,7 +540,7 @@ let docs = old.query(r#"type = "document""#, Default::default()).await?;
 
 - App identity on Linux without a sandbox (see [open questions](06-open-questions.md)).
 - Multi-valued attributes: is `tags:<tag> = true` enough, or do we need a real set type?
-- Daemon-side metadata extraction: which formats, and does it run sandboxed?
+- ~~Daemon-side metadata extraction: which formats, and does it run sandboxed?~~ A separate daemon, an app with a key limit ([ADR-0023](adr/0023-attribute-extraction.md)).
 - Pagination and consistency of cursors across commits (snapshot the root per cursor?).
 - Partial namespace sync for small devices.
 - Language bindings beyond Rust/C: which first?

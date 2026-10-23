@@ -52,7 +52,7 @@ use retifs_core::{
     manifest::{self, decode_node, decode_root, NodeEntry},
     keywrap,
     checkpoint::{state_secret, Checkpoint, Frontier},
-    ops::{Op, OpsFile, Right, State, WriterCommit, MAX_CLOCK_AHEAD_MS},
+    ops::{self, Op, OpsFile, Right, State, WriterCommit, MAX_CLOCK_AHEAD_MS},
     prolly,
     invite::{self, Invitation},
     record::{Record, RecordId, Snapshot, Value},
@@ -1124,6 +1124,8 @@ struct AppScope {
     name: String,
     namespaces: Vec<String>,
     write: bool,
+    /// The app's limits on attribute keys (an app with `keys` set).
+    app: retifs_store::App,
 }
 
 /// A local API connection. `app`: `None` for the owner's socket (everything
@@ -1210,7 +1212,7 @@ fn hello(d: &Daemon, req: Request, exe: Option<&str>) -> Result<AppScope, String
         }
         _ => {}
     }
-    Ok(AppScope { name: app.name, namespaces: app.namespaces, write: app.write })
+    Ok(AppScope { name: app.name.clone(), namespaces: app.namespaces.clone(), write: app.write, app })
 }
 
 /// Whether an app may make this request: reads in its namespaces, writes
@@ -1227,11 +1229,41 @@ fn authorize(d: &Daemon, s: &AppScope, req: &Request) -> Result<(), String> {
         }
     };
     let session_ns = |session: u64| d.sessions.lock().unwrap().get(&session).map(|x| x.ns.clone());
+    // Its key limit (ADR-0023): every key it sets or unsets, content, deleting
+    // and new records each named.
+    let keys_ok = |attrs: &[(String, AttrValue)], unset: &[String], content: bool| {
+        let bad = attrs
+            .iter()
+            .map(|(k, _)| k.as_str())
+            .chain(unset.iter().map(String::as_str))
+            .chain(content.then_some(ops::CONTENT_KEY))
+            .find(|k| !s.app.may_write_key(k));
+        match bad {
+            Some(k) => deny(&format!("write {k}")),
+            None => Ok(()),
+        }
+    };
+    let create_ok = || if s.app.may_write_key("@create") { Ok(()) } else { deny("create records") };
+    let delete_ok = || if s.app.may_write_key(ops::DELETE_KEY) { Ok(()) } else { deny("delete records") };
     match req {
+        Request::RecordCreate { ns, attrs, data } => write(ns).and_then(|_| create_ok()).and_then(|_| keys_ok(attrs, &[], data.is_some())),
+        Request::RecordSet { ns, attrs, unset, data, .. } => write(ns).and_then(|_| keys_ok(attrs, unset, data.is_some())),
+        Request::RecordDelete { ns, .. } => write(ns).and_then(|_| delete_ok()),
+        Request::WriteBegin { ns, .. } => write(ns).and_then(|_| keys_ok(&[], &[], true)),
+        Request::Transaction { ns, steps } => {
+            write(ns)?;
+            for step in steps {
+                match step {
+                    TxStep::Create { attrs, data } => create_ok().and_then(|_| keys_ok(attrs, &[], data.is_some()))?,
+                    TxStep::Set { attrs, unset, data, blocks, .. } => keys_ok(attrs, unset, data.is_some() || blocks.is_some())?,
+                    TxStep::Delete { .. } => delete_ok()?,
+                }
+            }
+            Ok(())
+        }
         Request::Ping | Request::Namespaces => Ok(()),
         Request::RecordGet { ns, .. } | Request::Query { ns, .. } | Request::SearchQuery { ns, .. } | Request::RecordHistory { ns, .. } | Request::NsInfo { ns } | Request::Watch { ns, .. } => read(ns),
         Request::ReadRange { ns: Some(ns), .. } => read(ns),
-        Request::RecordCreate { ns, .. } | Request::RecordSet { ns, .. } | Request::RecordDelete { ns, .. } | Request::Transaction { ns, .. } | Request::WriteBegin { ns, .. } => write(ns),
         Request::WriteAt { session, .. }
         | Request::WriteRead { session, .. }
         | Request::WriteTruncate { session, .. }
@@ -1365,7 +1397,7 @@ async fn remote_call(d: &Daemon, requester: Option<[u8; 16]>, body: &[u8]) -> Re
         .find(|a| a.device == Some(node))
         .ok_or_else(|| format!("node <{}> isn't one of this node's devices (retifs app add NAME --ns NS --device ADDRESS)", hex(&node)))?;
     let req: Request = rmp_serde::from_slice(body).map_err(|e| format!("bad request: {e}"))?;
-    let scope = AppScope { name: app.name, namespaces: app.namespaces, write: app.write };
+    let scope = AppScope { name: app.name.clone(), namespaces: app.namespaces.clone(), write: app.write, app };
     authorize(d, &scope, &req)?;
     let req = match req {
         Request::ReadRange { len, .. } if len > REMOTE_MAX_RANGE => {
@@ -1407,7 +1439,7 @@ async fn handle(d: &Daemon, req: Request) -> Result<Response, String> {
     match req {
         Request::Hello { .. } => Ok(Response::Done), // the owner needs no token
 
-        Request::AppAdd { name, namespaces, write, device } => {
+        Request::AppAdd { name, namespaces, write, device, keys } => {
             if name.is_empty() || namespaces.is_empty() {
                 return Err("an app needs a name and at least one namespace".into());
             }
@@ -1423,7 +1455,7 @@ async fn handle(d: &Daemon, req: Request) -> Result<Response, String> {
             let token = format!("rta_{}", hex(&raw));
             let token_hash: [u8; 32] = <sha2::Sha256 as sha2::Digest>::digest(token.as_bytes()).into();
             d.store
-                .put_app(&retifs_store::App { name, token_hash, namespaces, write, exe: None, device })
+                .put_app(&retifs_store::App { name, token_hash, namespaces, write, exe: None, device, keys })
                 .map_err(|e| e.to_string())?;
             Ok(if device.is_some() { Response::Done } else { Response::AppToken { token } })
         }
@@ -1455,7 +1487,7 @@ async fn handle(d: &Daemon, req: Request) -> Result<Response, String> {
                 .apps()
                 .map_err(|e| e.to_string())?
                 .into_iter()
-                .map(|a| AppInfo { name: a.name, namespaces: a.namespaces, write: a.write, exe: a.exe, device: a.device.map(|d| hex(&d)) })
+                .map(|a| AppInfo { name: a.name, namespaces: a.namespaces, write: a.write, exe: a.exe, device: a.device.map(|d| hex(&d)), keys: a.keys })
                 .collect(),
         }),
 

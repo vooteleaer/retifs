@@ -1,0 +1,25 @@
+# Attributes from what's in files (ADR-0023). Its token, from
+#   retifs app add extract --ns NS[,NS] --write --keys mime,width,height,taken,camera,geo,duration,'exif.*','audio.*','doc.*',type,extracted
+# goes in ~/.config/retifs/extract.token; then
+#   systemctl --user enable --now retifs-extractd
+[Unit]
+Description=retifs attribute extractor
+Requires=retifsd.service
+After=retifsd.service
+
+[Service]
+Type=simple
+ExecStart=%h/.cargo/bin/retifs-extractd --token-file %h/.config/retifs/extract.token
+Restart=on-failure
+RestartSec=10
+# It parses files from other people: no network, a read-only system, nothing new.
+PrivateNetwork=yes
+RestrictAddressFamilies=AF_UNIX
+ProtectSystem=strict
+ProtectHome=read-only
+NoNewPrivileges=yes
+PrivateTmp=yes
+MemoryMax=512M
+
+[Install]
+WantedBy=default.target

@@ -81,6 +81,7 @@ git -C Prns-0.3.8 checkout v0.3.8-hotfix.1
 cargo install --path crates/retifs-node      # retifsd and the retifs CLI
 cargo install --path crates/retifs-fuse      # retifs-mount (needs fuse3)
 cargo install --path crates/retifs-gateway   # retifs-gateway
+cargo install --path crates/retifs-extract   # retifs-extractd
 cargo install --path crates/retifs-cloudfiles   # on Windows: retifs-cloudfiles
 cp packaging/systemd/*.service ~/.config/systemd/user/
 systemctl --user enable --now retifsd
@@ -112,6 +113,8 @@ retifs mount photos --via home # a namespace your home node holds, nothing of it
 On Linux it's a FUSE mount (attributes are `user.retifs.*` xattrs; `.query/<terms>/` lists matches, e.g. `ls ~/retifs/photos/.query/album=Prangli\ 2026/`); `systemctl --user enable --now retifs-mount@photos` mounts it at login. On Windows it's a folder in Explorer: files are fetched when opened, "Always keep on this device" sets this device's keep tag, and **Share with retifs…** is in the context menu; `retifs unmount photos --forget` also removes it from Explorer.
 
 As websites, one origin per namespace, read-only: `systemctl --user enable --now retifs-gateway`, then open <http://localhost:8740/>.
+
+**Attributes from what's in files**, as BeOS gave files theirs when they arrived: `retifs-extractd` watches your libraries and describes new content, whatever route it came in by: `mime` and `type`, a photo's size, `camera`, `taken` and `geo`, a recording's `audio.artist`, `audio.title` and `duration`, a document's `doc.title`, `doc.author` and `doc.pages`. Then `retifs query photos has:camera` or `type=audio audio.artist=Bach` finds them. It's an app that may write only those keys: `retifs app add extract --ns photos,music --write --keys mime,width,height,taken,camera,geo,duration,'exif.*','audio.*','doc.*',type,extracted > ~/.config/retifs/extract.token`, then `systemctl --user enable --now retifs-extractd` ([ADR-0023](docs/adr/0023-attribute-extraction.md)). One of your nodes running it is enough.
 
 **Sharing a namespace** with another machine:
 1. On your machine: `retifs ns link photos` prints a `retifs:ns/…` link (the address and your node).

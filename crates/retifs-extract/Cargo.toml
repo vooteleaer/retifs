@@ -1,0 +1,22 @@
+[package]
+name = "retifs-extract"
+version = "0.0.1"
+description = "retifs-extractd: reads new content and writes what's in it as attributes (ADR-0023)"
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+publish = false
+
+[[bin]]
+name = "retifs-extractd"
+path = "src/bin/retifs-extractd.rs"
+
+[dependencies]
+libretifs = { path = "../libretifs" }
+tokio = { version = "1", features = ["rt"] }
+sha2 = "0.10"
+infer = "0.19"
+imagesize = "0.13"
+kamadak-exif = "0.6"
+lofty = "0.22"
+zip = { version = "2", default-features = false, features = ["deflate"] }

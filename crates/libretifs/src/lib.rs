@@ -48,12 +48,17 @@ pub enum Request {
     /// unless `write`.
     /// With `device` (a node's `retifs.node` address): admits that node of
     /// the user's to ask over a Link instead (ADR-0019); no token.
+    /// `keys` limits its writes to those attribute keys (`exif.*` for a
+    /// prefix; `@content`, `@delete`, `@create` for content, deleting and
+    /// new records); empty: no limit (ADR-0023).
     AppAdd {
         name: String,
         namespaces: Vec<String>,
         write: bool,
         #[serde(default)]
         device: Option<String>,
+        #[serde(default)]
+        keys: Vec<String>,
     },
     /// Builds and publishes the namespace's blind index now, if it declares
     /// searchable keys; answers with the search capability (ADR-0019).
@@ -343,6 +348,9 @@ pub struct AppInfo {
     /// A device's node address, for entries that ask over a Link.
     #[serde(default)]
     pub device: Option<String>,
+    /// The attribute keys it may write; empty: any.
+    #[serde(default)]
+    pub keys: Vec<String>,
 }
 
 /// One step of a [`Request::Transaction`].

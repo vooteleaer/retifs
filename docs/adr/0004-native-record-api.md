@@ -69,7 +69,7 @@ The first slice exists: `crates/libretifs` (client, no Reticulum dependency) and
 ## Per-app capabilities (2026-10-20)
 - **Two sockets.** The owner's (`retifs.sock`, or a named pipe on Windows) has full access, for the CLI, the mount and the gateway. The app socket (`apps.sock`, or a `retifs-apps-…` pipe) accepts a connection only if its first message is `Hello { token }`. Both are private to the user (0600). A sandbox is given only the app socket.
 - **Tokens:**
-  - `retifs app add NAME --ns photos[,notes] [--write]` prints a token once; the store keeps only its SHA-256.
+  - `retifs app add NAME --ns photos[,notes] [--write] [--keys K[,K]]` prints a token once; the store keeps only its SHA-256. `--keys` limits its writes to those attribute keys (`exif.*` for a family; `@content`, `@delete`, `@create`), checked on the local API ([ADR-0023](0023-attribute-extraction.md)).
   - `retifs app list` shows each app's scope and pinned executable.
   - `retifs app remove NAME` revokes the token at once.
 - **Scope:**

@@ -95,7 +95,8 @@ Prototypes are throwaway. They're for learning, not for locking in the format. T
 - [ ] apkovl in the user namespace.
 
 ## Later: user clients (Android, Linux, Haiku, Windows)
-- [ ] An app in the spirit of the Nextcloud mobile and desktop clients, on `libretifs` (locally) or `--via` an own node (phones): browse namespaces and records, search (local, own node, blind index), import and export files, extract metadata from files into attributes (EXIF, audio tags, document properties), keep rules per device, sharing (addresses, grants, search capabilities). Native per platform: Android, a Linux desktop app, Haiku (Tracker already shows attributes), Windows.
+- [ ] An app in the spirit of the Nextcloud mobile and desktop clients, on `libretifs` (locally) or `--via` an own node (phones): browse namespaces and records, search (local, own node, blind index), import and export files, keep rules per device, sharing (addresses, grants, search capabilities). Native per platform: Android, a Linux desktop app, Haiku (Tracker already shows attributes), Windows.
+- [x] Attributes from what's in files, for every file that enters: `retifs-extractd` (EXIF, audio tags, document properties, types; [ADR-0023](adr/0023-attribute-extraction.md)).
 - [ ] Conventions first: attribute keys and block roles per media type (image, audio, video, document), the mapping from EXIF and audio tags, time and location formats, thumbnail roles. One library, many apps (and Haiku's Tracker) reading the same records; also settles content-bound attributes (decision 7).
 - [ ] Apps on those records, iterated one at a time:
   - photo suite in the spirit of Immich: albums as queries, thumbnail blocks, phone backup via the own node, timeline and map from range queries, faces and tags computed on own devices, shared albums as namespaces or grants;
