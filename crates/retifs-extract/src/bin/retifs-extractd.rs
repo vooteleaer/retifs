@@ -1,11 +1,13 @@
-//! `retifs-extractd [--store DIR] [--token-file FILE] [--ns NS[,NS]] [--every SECS] [--once]`:
+//! `retifs-extractd [--store DIR] [--token-file FILE] [--via NODE] [--ns NS[,NS]] [--every SECS] [--once]`:
 //! watches the user's libraries and writes what's in new content as
 //! attributes (ADR-0023), as BeOS filled in a file's attributes when it
 //! arrived. An app of the user's own node like any other: with a token
 //! (`retifs app add extract --ns … --write --keys …`) it sees and writes only
 //! what that allows; without one it's the owner and looks at every library
 //! but `me`. One node of the user's running it is enough: the attributes
-//! reach the others as they sync.
+//! reach the others as they sync. With `--via` it describes the libraries of
+//! another node of the user's (one that admitted this one), reading only
+//! the parts of files it needs over the network.
 
 use std::collections::HashMap;
 use std::io::{Read, Seek, SeekFrom};
@@ -17,7 +19,7 @@ use retifs_extract::{extract, is_extracted_key, MARKER};
 use sha2::Digest;
 
 fn usage() -> ! {
-    eprintln!("retifs-extractd [--store DIR] [--token-file FILE] [--ns NS[,NS]] [--every SECS] [--once]");
+    eprintln!("retifs-extractd [--store DIR] [--token-file FILE] [--via NODE] [--ns NS[,NS]] [--every SECS] [--once]");
     std::process::exit(2)
 }
 
@@ -26,16 +28,18 @@ struct Conn {
     client: Client,
     store: PathBuf,
     token: Option<String>,
+    via: Option<String>,
 }
 
 impl Conn {
-    fn open(rt: &tokio::runtime::Runtime, store: &PathBuf, token: &Option<String>) -> Result<Client, String> {
+    fn open(rt: &tokio::runtime::Runtime, store: &PathBuf, token: &Option<String>, via: &Option<String>) -> Result<Client, String> {
         rt.block_on(async {
             match token {
                 Some(t) => Client::connect_app(store, t).await,
                 None => Client::connect(store).await,
             }
         })
+        .map(|c| c.via(via.clone()))
         .map_err(|e| e.to_string())
     }
 
@@ -44,7 +48,7 @@ impl Conn {
             Ok(r) => r,
             Err(_) => {
                 // The daemon restarted: connect again once.
-                self.client = Self::open(&self.rt, &self.store, &self.token)?;
+                self.client = Self::open(&self.rt, &self.store, &self.token, &self.via)?;
                 self.rt.block_on(self.client.call(req)).map_err(|e| e.to_string())?
             }
         };
@@ -185,7 +189,7 @@ fn main() {
     let args: Vec<String> = std::env::args().skip(1).collect();
     let flag = |name: &str| args.windows(2).find(|w| w[0] == name).map(|w| w[1].clone());
     for a in &args {
-        if a.starts_with("--") && !["--store", "--token-file", "--ns", "--every", "--once"].contains(&a.as_str()) {
+        if a.starts_with("--") && !["--store", "--token-file", "--via", "--ns", "--every", "--once"].contains(&a.as_str()) {
             usage();
         }
     }
@@ -196,10 +200,11 @@ fn main() {
     let only: Option<Vec<String>> = flag("--ns").map(|s| s.split(',').map(|n| n.trim().to_string()).filter(|n| !n.is_empty()).collect());
     let every = Duration::from_secs(flag("--every").and_then(|s| s.parse().ok()).unwrap_or(5));
     let once = args.iter().any(|a| a == "--once");
+    let via = flag("--via");
 
     let rt = tokio::runtime::Builder::new_current_thread().enable_all().build().expect("a tokio runtime");
     let client = loop {
-        match Conn::open(&rt, &store, &token) {
+        match Conn::open(&rt, &store, &token, &via) {
             Ok(c) => break c,
             Err(e) if once => {
                 eprintln!("retifs-extractd: {e}");
@@ -211,7 +216,7 @@ fn main() {
             }
         }
     };
-    let mut conn = Conn { rt, client, store, token };
+    let mut conn = Conn { rt, client, store, token, via };
     eprintln!("retifs-extractd: watching {}", only.as_ref().map_or("every library".into(), |o| o.join(", ")));
 
     // Each library's change count when last looked at.
