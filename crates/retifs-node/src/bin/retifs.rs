@@ -986,6 +986,9 @@ fn print_status(s: &libretifs::Status) {
     if s.leased_to > 0 {
         println!("  leased to {} node(s), {} confirmed by receipt", s.leased_to, s.replicas);
     }
+    for h in &s.holders {
+        println!("    <{}>{}{}", h.node, if h.confirmed { " confirmed" } else { " waiting for its receipt" }, if h.same_site { ", same site" } else { "" });
+    }
 }
 
 /// `key=value` on the command line; `key=a,b,c` with a trailing `,` or more than one comma is a list.

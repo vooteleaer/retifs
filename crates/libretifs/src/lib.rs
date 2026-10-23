@@ -631,6 +631,20 @@ pub struct Status {
     /// the rest waits for a faster path (ADR-0014).
     #[serde(default)]
     pub slow_link_wait_secs: Option<u64>,
+    /// The nodes it's leased to: which, whether confirmed, whether at this
+    /// node's site.
+    #[serde(default)]
+    pub holders: Vec<FileHolder>,
+}
+
+/// A node holding a copy of a file for this one.
+#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq, Eq)]
+pub struct FileHolder {
+    /// Its `retifs.node` address (32 hex digits).
+    pub node: String,
+    /// A valid receipt for every lease, no failed storage proof.
+    pub confirmed: bool,
+    pub same_site: bool,
 }
 
 impl Status {

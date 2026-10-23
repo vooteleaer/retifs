@@ -2221,8 +2221,15 @@ fn full_status(d: &Daemon, cap: &FileRef) -> Status {
     s.seeking = store.is_wanted(&cap.root).unwrap_or(false);
     s.holders_known = store.hints(&cap.root).map(|h| h.len()).unwrap_or(0);
     let own = store.own_leases().unwrap_or_default();
-    s.leased_to = own.iter().filter(|o| o.roots.contains(&cap.root)).map(|o| o.holder).collect::<std::collections::BTreeSet<_>>().len();
-    s.replicas = store.confirmed_holders(&cap.root, now_s()).map(|h| h.len()).unwrap_or(0);
+    let holders: std::collections::BTreeSet<PeerId> = own.iter().filter(|o| o.roots.contains(&cap.root)).map(|o| o.holder).collect();
+    let confirmed = store.confirmed_holders(&cap.root, now_s()).unwrap_or_default();
+    let sites = node_sites(d);
+    s.leased_to = holders.len();
+    s.replicas = confirmed.len();
+    s.holders = holders
+        .iter()
+        .map(|h| libretifs::FileHolder { node: hex(h), confirmed: confirmed.contains(h), same_site: same_site(d, &sites, h) })
+        .collect();
     s
 }
 
