@@ -45,7 +45,7 @@ The mount exposes plaintext to processes in the user's session, and root on the 
 **The view:**
 - A record with a `path` attribute is the file at that path; its content block is the file's content.
 - `type = directory` records give empty directories; other directories are implied by the paths below them.
-- Records without a path are under `/.records/<id>`.
+- Records without a path (from apps, phones, the CLI) are under `/Unfiled/<name>`, by their `name` (else their ID). Moving one out gives it a path. In Explorer a file made there has none, and moving one in takes it away; the Linux mount refuses both (2026-10-23: the file tree stays a plain view of files for programs that need one. The main interface is the apps, each organising its own data by its own logic, as a photo album does by albums, time and place; searches live in Find).
 - Two records claiming one path: the later ID is shown as `name~<first 8 of its ID>`.
 
 **Attributes as xattrs:**

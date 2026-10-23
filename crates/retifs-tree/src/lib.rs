@@ -6,7 +6,8 @@
 //!   its content block is the file's content.
 //! - A record with `type = directory` and a path is a directory (so empty
 //!   directories exist); other directories are implied by paths below them.
-//! - Records without a path are under `/.records/<id>`, except retifs' own
+//! - Records without a path (put there by an app, a phone, the CLI) are
+//!   under `/Unfiled/<name>` (their ID if they have no name), except retifs' own
 //!   (`type` `retifs.*` or `keep-rule`: shares, index settings, keep rules),
 //!   which aren't files.
 //! - Two records claiming one path: the later ID gets `~<first 8 of its ID>`.
@@ -15,7 +16,7 @@ use std::collections::BTreeMap;
 
 use libretifs::{AttrValue, RecordView};
 
-pub const RECORDS_DIR: &str = "/.records";
+pub const RECORDS_DIR: &str = "/Unfiled";
 pub const QUERY_DIR: &str = "/.query";
 
 #[derive(Debug, Clone, PartialEq)]
@@ -59,7 +60,8 @@ pub fn normalize(p: &str) -> Option<String> {
     (!is_virtual(&out) || out == RECORDS_DIR || out == QUERY_DIR).then_some(out)
 }
 
-/// Inside `/.records` or `/.query`: not a place a record's path can point.
+/// Inside `/Unfiled` or `/.query`: not a place a record's path can point
+/// (a file put in `/Unfiled` is one without a path).
 pub fn is_virtual(p: &str) -> bool {
     [RECORDS_DIR, QUERY_DIR].iter().any(|v| p == *v || p.starts_with(&format!("{v}/")))
 }
@@ -81,6 +83,17 @@ pub fn join(dir: &str, name: &str) -> String {
 
 fn attr<'a>(r: &'a RecordView, key: &str) -> Option<&'a AttrValue> {
     r.attrs.iter().find(|(k, _)| k == key).map(|(_, v)| v)
+}
+
+/// A record's file name in `/Unfiled`: its `name`, made safe for a file
+/// name, or its ID.
+fn unfiled_name(r: &RecordView) -> String {
+    let name = match attr(r, "name") {
+        Some(AttrValue::Str(n)) => n.chars().map(|c| if c == '/' || c == '\\' || c.is_control() { '_' } else { c }).collect::<String>(),
+        _ => String::new(),
+    };
+    let name = name.trim();
+    if name.is_empty() || name == "." || name == ".." { r.id.clone() } else { name.to_string() }
 }
 
 fn unique(nodes: &BTreeMap<String, Node>, p: String, id: &str) -> String {
@@ -111,7 +124,7 @@ impl Tree {
                     nodes.insert(p, Node::Dir { id: Some(r.id.clone()) });
                 }
                 (path, _) => {
-                    let p = path.unwrap_or_else(|| join(RECORDS_DIR, &r.id));
+                    let p = path.unwrap_or_else(|| join(RECORDS_DIR, &unfiled_name(r)));
                     let p = unique(&nodes, p, &r.id);
                     let size = match attr(r, "size") {
                         Some(AttrValue::Int(n)) if *n >= 0 => *n as u64,
@@ -306,6 +319,9 @@ mod tests {
             rec("aa02", &[("path", s("//docs/sub/../b.txt"))], &[]),
             rec("aa03", &[("path", s("/photos")), ("type", s("directory"))], &[]),
             rec("aa04", &[("title", s("no path"))], &[]),
+            rec("aa10", &[("name", s("IMG_1.jpg"))], &[]),
+            rec("aa11", &[("name", s("IMG_1.jpg"))], &[]),
+            rec("aa12", &[("name", s("a/b"))], &[]),
             rec("aa05", &[("path", s("/docs/a.txt"))], &[]),
             rec("aa06", &[("path", s("/docs"))], &[]),
             rec("aa07", &[("path", s("/.query/x"))], &[]),
@@ -313,11 +329,11 @@ mod tests {
             rec("aa09", &[("type", s("keep-rule")), ("query", s("album=x"))], &[]),
         ]);
         let names = |d: &str| t.children(d).into_iter().map(|(n, _)| n).collect::<Vec<_>>();
-        assert_eq!(names("/"), [".query", ".records", "docs", "docs~aa06", "photos"]);
+        assert_eq!(names("/"), [".query", "Unfiled", "docs", "docs~aa06", "photos"]);
         assert_eq!(names("/docs"), ["a.txt", "a.txt~aa05"]);
         assert_eq!(t.get("/docs/a.txt"), Some(&Node::File { id: "aa01".into(), cap: Some("cap-a".into()), size: 5, mtime_ms: None }));
         assert_eq!(t.get("/photos"), Some(&Node::Dir { id: Some("aa03".into()) }));
-        assert_eq!(names("/.records"), ["aa02", "aa04", "aa07"], "bad paths and no path");
+        assert_eq!(names("/Unfiled"), ["IMG_1.jpg", "IMG_1.jpg~aa11", "a_b", "aa02", "aa04", "aa07"], "no path (or a bad one): by name, else ID");
         assert_eq!(names("/photos"), Vec::<String>::new());
         assert_eq!(t.records_under("/docs").len(), 2);
     }

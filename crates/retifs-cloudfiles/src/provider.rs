@@ -27,7 +27,7 @@ use cloud_filter::{
     utility::WriteAt,
 };
 use libretifs::{AttrValue, Client, RecordView, Request, Response, TxStep};
-use retifs_tree::Tree;
+use retifs_tree::{self as tree, Tree};
 
 use crate::names::{self, Want};
 
@@ -199,6 +199,13 @@ fn collect_ids(abs: &Path, out: &mut Vec<String>) {
     }
 }
 
+/// A new file's place: its path and name, or in Unfiled only its name (a
+/// record there has no path).
+fn place(path: &str, name: &str) -> Vec<(String, AttrValue)> {
+    let name = ("name".to_string(), AttrValue::Str(name.to_string()));
+    if tree::is_virtual(path) { vec![name] } else { vec![("path".to_string(), AttrValue::Str(path.to_string())), name] }
+}
+
 /// The callbacks Windows makes into the provider, on threads of its own.
 struct Filter {
     shared: Arc<Shared>,
@@ -247,8 +254,10 @@ impl Filter {
         }
     }
 
-    /// Moves the records at and below `from` to `to`, in one commit.
-    fn move_records(&self, from: &Path, to: &Path) {
+    /// Moves the records at and below `from` to `to`, in one commit. Out of
+    /// Unfiled, a file gets a path (found by its identity: it has none);
+    /// into it, its path goes.
+    fn move_records(&self, from: &Path, to: &Path, blob: &[u8]) {
         if is_scratch(to) {
             // How Office and many editors save: the file is renamed aside, the
             // new one written under its name, the old one deleted. The record
@@ -267,6 +276,18 @@ impl Filter {
             }
         };
         let new_name = names::tree_path(&new).rsplit('/').next().unwrap_or("").to_string();
+        if tree::is_virtual(&old) || tree::is_virtual(&new) {
+            let Some((id, _)) = names::parse_identity(blob).filter(|(id, _)| !id.is_empty()) else { return };
+            let (attrs, unset) = match place(&new, &new_name).as_slice() {
+                [path, name] => (vec![path.clone(), name.clone()], vec![]),
+                only_name => (only_name.to_vec(), vec!["path".to_string()]),
+            };
+            match d.call(Request::RecordSet { ns: ns.clone(), id: id.to_string(), attrs, unset, data: None }) {
+                Ok(_) => eprintln!("retifs-cloudfiles: {old} -> {new}"),
+                Err(e) => eprintln!("retifs-cloudfiles: {old} -> {new}: {e}"),
+            }
+            return;
+        }
         let steps: Vec<TxStep> = records
             .iter()
             .filter_map(|r| {
@@ -362,7 +383,7 @@ impl SyncFilter for Filter {
         }
         let (from, to) = (info.source_path(), req.path());
         if from.starts_with(&self.shared.root) && to.starts_with(&self.shared.root) {
-            self.move_records(&from, &to);
+            self.move_records(&from, &to, req.file_blob());
         }
     }
 
@@ -743,7 +764,8 @@ impl Sync {
                 return match id {
                     Some(id) => first(d.records_of(Request::RecordSet { ns: ns.clone(), id: id.to_string(), attrs: vec![mtime], unset: vec![], data: Some(data) })?),
                     None => {
-                        let attrs = vec![("path".into(), AttrValue::Str(path.clone())), ("name".into(), AttrValue::Str(name.clone())), mtime];
+                        let mut attrs = place(&path, &name);
+                        attrs.push(mtime);
                         first(d.records_of(Request::RecordCreate { ns: ns.clone(), attrs, data: Some(data) })?)
                     }
                 };
@@ -751,10 +773,7 @@ impl Sync {
             // Large: through a write session, a piece at a time.
             let id = match id {
                 Some(id) => id.to_string(),
-                None => {
-                    let attrs = vec![("path".into(), AttrValue::Str(path.clone())), ("name".into(), AttrValue::Str(name.clone()))];
-                    first(d.records_of(Request::RecordCreate { ns: ns.clone(), attrs, data: None })?)?.id
-                }
+                None => first(d.records_of(Request::RecordCreate { ns: ns.clone(), attrs: place(&path, &name), data: None })?)?.id,
             };
             let session = match d.call(Request::WriteBegin { ns: ns.clone(), id, truncate: true })? {
                 Response::Session { session, .. } => session,
