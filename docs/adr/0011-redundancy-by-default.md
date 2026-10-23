@@ -87,15 +87,8 @@ A receipt is a promise. Before handing out a lease, the owner precomputes a few 
 - **Erasure coding** (Tahoe-LAFS style, k-of-n) costs less per unit of protection: 4-of-6 costs 1.5× and survives 2 losses; 3-of-10 costs 3.3× and survives 7.
 - **Decided:** full replicas now; erasure coding later as a separate layer below chunks (share maps: a chunk group = n shares, any k rebuild it, each chunk still checked against its CID), with its own ADR. Chunks and manifests don't change for it, so nothing has to be reserved in ADR-0008/0009. Replicas suit slow links: one holder is enough to read, where shares need k ([options](../08-open-format-decisions.md)).
 
-### Who holds copies (decided 2026-10-23)
-**Only nodes that may read the content anyway**, so that even the metadata a holder sees (that a file exists, its padded size, when it changes, which node placed it) reaches no one it wasn't shared with. The user's words: kept in sufficient numbers on the nearest nodes, and metadata seen only by those it's shared with.
-- A file used by a namespace's records may be held by that namespace's members' nodes (their `node` operations, [ADR-0022](0022-public-namespaces-discovery.md)).
-- Anything may be held by the user's own devices: nodes admitted with `retifs app add --device`, and the members of the user's own namespace `me`.
-- Content of no namespace (a plain `put`) goes to own devices only. A private namespace with no other member and no other device of the user has no copies elsewhere: `retifs status` says so (no "leased to" line).
-- Among those, the nearest and fastest are chosen until the loss target is met (ADR-0014). A holder that can no longer read the file (it left the namespace, or was revoked) has its copy dropped: its leases are no longer renewed.
-- Announces no longer pick holders: storage nodes heard announcing only give hops, and those not heard for a week are forgotten (test nodes and replaced identities had piled up as candidates, each costing a 20 s link attempt).
-- Volunteer storage for strangers (diffuse mode, `retifs.store` offers) stays an explicit opt-in for later.
-- Live (three nodes, 7 checks): a namespace's file was kept at its other member and not at a stranger node that announced; a private file was kept nowhere until the stranger was admitted as an own device, then there.
+### Who holds copies (confirmed 2026-10-23)
+Any retifs node may hold the encrypted chunks; the nearest and fastest are preferred (ADR-0014). What a file holds, its name, path and other attributes, are readable only by the club's members (the namespace's read key): a holder sees ciphertext and chunk CIDs, not which namespace, record or file they belong to. Storage nodes not heard announcing for a week are dropped from the candidates (gone test nodes had piled up, each costing a 20 s link attempt).
 
 ## Impact on the threat model
 See the [threat model](../04-threat-model.md).
