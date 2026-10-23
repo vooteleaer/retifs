@@ -86,7 +86,7 @@ cp packaging/systemd/*.service ~/.config/systemd/user/
 systemctl --user enable --now retifsd
 ```
 
-**Settings** live in `retifs.toml` in the store (`~/.local/share/retifs/` on Linux, `%LOCALAPPDATA%etifs\` on Windows), made with every setting commented out on first start: disk budget, device name, how often to announce, how much to hold for others, and so on. Flags given to `retifsd` override the file.
+**Settings** live in `retifs.toml` in the store (`~/.local/share/retifs/` on Linux, `%LOCALAPPDATA%\retifs\` on Windows), made with every setting commented out on first start: disk budget, device name, how often to announce, how much to hold for others, and so on. Flags given to `retifsd` override the file.
 
 Records, attributes and queries:
 
