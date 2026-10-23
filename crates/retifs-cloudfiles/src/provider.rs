@@ -35,8 +35,9 @@ const PROVIDER: &str = "retifs";
 /// Content moves in pieces this large (a multiple of 4 KiB, as Cloud Files
 /// wants every piece but the last).
 const PIECE: u64 = 4 << 20;
-/// Through another node (`--via`), a range read answers at most 1 MiB.
-const PIECE_VIA: u64 = 1 << 20;
+/// Through another node (`--via`): a request or answer is one RNS Resource,
+/// at most 1 MiB with its envelope, so content moves in half that.
+const PIECE_VIA: u64 = 512 << 10;
 /// Without a change notice, the namespace is re-read at least this often.
 const RESYNC: Duration = Duration::from_secs(60);
 /// After a delete or rename in the folder, its records are left alone this
