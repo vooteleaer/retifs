@@ -25,6 +25,7 @@ const SETTINGS: &[(&str, &str, &str, Kind)] = &[
     ("placement", "hold_for_others", "--hold-for-others", Kind::Value),
     ("placement", "lease_term", "--lease-term", Kind::Value),
     ("placement", "loss_target", "--loss-target", Kind::Value),
+    ("placement", "min_copies", "--min-copies", Kind::Value),
     ("placement", "stamp_cost", "--stamp-cost", Kind::Value),
     ("placement", "max_stamp_cost", "--max-stamp-cost", Kind::Value),
     ("placement", "slow_link_budget", "--slow-link-budget", Kind::Value),
@@ -52,6 +53,7 @@ const TEMPLATE: &str = r#"# retifs node settings. Flags given to retifsd overrid
 # hold_for_others = "..."    # hold others' encrypted copies up to this (default: up to the store limit; 0 opts out)
 # lease_term = "30d"         # how long others hold this node's copies before renewal
 # loss_target = 0.001        # place copies until the chance of losing a file is below this
+# min_copies = 3             # and until there are at least this many copies, this node's own included
 # stamp_cost = 20            # proof-of-work bits asked of others' lease offers
 # max_stamp_cost = 24        # at most this many bits paid for an offer
 # slow_link_budget = "10m"   # transfers over a slow link (LoRa) take at most this

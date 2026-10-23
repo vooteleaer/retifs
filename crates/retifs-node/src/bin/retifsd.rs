@@ -20,6 +20,8 @@
 //! `/page/x.mu`; without an `/index.mu`, an index of the pages is generated.
 //! `--loss-target`: keep adding nearby holders for each needed file until the
 //! estimated chance of losing every copy is below P (default 0.001).
+//! `--min-copies`: and until there are at least N copies, this node's own
+//! included (default 3: two elsewhere), whatever the estimate says.
 //! `--lease-term`: how long leases this node gives out run before renewal is
 //! due (seconds, or with an s/m/h/d suffix; default 30d). They're renewed at half-term.
 //!
@@ -468,6 +470,7 @@ struct Args {
     announce_s: u32,
     lease_term: u64,
     loss_target: f64,
+    min_copies: usize,
     slow_budget: u64,
     treat_as_slow: Vec<PeerId>,
     stamp_cost: u8,
@@ -529,6 +532,7 @@ fn args() -> Args {
         db_cache: retifs_store::DEFAULT_DB_CACHE,
         lease_term: 30 * 86_400,
         loss_target: 1e-3,
+        min_copies: 3,
         slow_budget: 600,
         treat_as_slow: Vec::new(),
         stamp_cost: 20,
@@ -569,13 +573,14 @@ fn args() -> Args {
             "--nomadnet" => a.nomadnet = Some(it.next().expect("--nomadnet NAMESPACE")),
             "--nomadnet-name" => a.nomadnet_name = it.next().expect("--nomadnet-name NAME"),
             "--loss-target" => a.loss_target = it.next().and_then(|v| v.parse().ok()).expect("--loss-target P (e.g. 0.001)"),
+            "--min-copies" => a.min_copies = it.next().and_then(|v| v.parse().ok()).filter(|n| *n >= 1).expect("--min-copies N (1 or more)"),
             "--lease-term" => a.lease_term = duration_secs(&it.next().expect("--lease-term DURATION")).max(60),
             "--device" => a.device = it.next().expect("--device NAME").to_lowercase(),
             "--announce-every" => a.announce_s = (duration_secs(&it.next().expect("--announce-every DURATION")) as u32).max(60),
             "-h" | "--help" => {
                 println!(
                     "retifsd [--store DIR] [--max-store SIZE] [--min-free SIZE] [--cache-max SIZE] [--private-requests]
-                             [--hold-for-others SIZE] [--db-cache SIZE] [--lease-term DURATION] [--loss-target P] [--slow-link-budget DURATION]\n        \
+                             [--hold-for-others SIZE] [--db-cache SIZE] [--lease-term DURATION] [--loss-target P] [--min-copies N] [--slow-link-budget DURATION]\n        \
                      [--stamp-cost BITS] [--max-stamp-cost BITS] [--announce-every DURATION]\n        \
                      [--nomadnet NAMESPACE [--nomadnet-name NAME]] [--device NAME] [--public] [--put FILE]..."
                 );
@@ -670,6 +675,8 @@ struct Daemon {
     /// Wakes lease upkeep (receipts, renewals, proofs, placement) after new leases or needs.
     upkeep_wake: Notify,
     loss_target: f64,
+    /// Copies of each needed file, this node's own included, whatever the estimate.
+    min_copies: usize,
     slow_budget: u64,
     treat_as_slow: Vec<PeerId>,
     /// Files whose rest waits for a faster path, with the estimate over the slow link.
@@ -946,6 +953,7 @@ async fn serve(store: Arc<SlabStore>, identity: node::IdentitySecret, endpoint: 
         lease_term: args.lease_term,
         upkeep_wake: Notify::new(),
         loss_target: args.loss_target,
+        min_copies: args.min_copies,
         slow_budget: args.slow_budget,
         treat_as_slow: args.treat_as_slow.clone(),
         deferred: Mutex::new(HashMap::new()),
@@ -4449,13 +4457,15 @@ async fn place_all(d: &Daemon) -> Result<(), String> {
     }
     let mut plan: std::collections::BTreeMap<PeerId, Vec<FileRef>> = Default::default();
     let mut ranked: Option<Vec<(f64, retifs_store::StorageNode)>> = None;
+    let mut short = 0;
     for file in d.store.needed_files().map_err(|e| e.to_string())? {
         let Some((mut risk, holders)) = review(d, &file)? else { continue };
         if ranked.is_none() {
             ranked = Some(rank_candidates(d).await?);
         }
+        let mut copies = holders.len() + 1;
         for (_, n) in ranked.as_deref().unwrap_or_default() {
-            if met(risk, d.loss_target) {
+            if met(risk, d.loss_target) && copies >= d.min_copies {
                 break;
             }
             if holders.contains(&n.peer) {
@@ -4463,7 +4473,14 @@ async fn place_all(d: &Daemon) -> Result<(), String> {
             }
             plan.entry(n.peer).or_default().push(file);
             risk *= d.store.holder_stats(&n.peer).map(|s| s.loss()).unwrap_or(1.0);
+            copies += 1;
         }
+        if copies < d.min_copies {
+            short += 1;
+        }
+    }
+    if short > 0 {
+        println!("placement: {short} file(s) below {} copies: not enough storage nodes reachable now", d.min_copies);
     }
     for (peer, files) in plan {
         // Union of the files' chunks: shared chunks (versions) are listed once.
@@ -4526,10 +4543,13 @@ fn review(d: &Daemon, file: &FileRef) -> Result<Option<(f64, std::collections::B
         println!("placement: {}: lease at <{}> ran out unrenewed, its copy is gone", file.root, hex(&h));
     }
     let (local, views, risk) = loss_now(d, file);
-    if met(risk, d.loss_target) {
+    if met(risk, d.loss_target) && views.len() + 1 >= d.min_copies {
         // Surplus after a repair (the absent holder came back): stop renewing
-        // the worst copy once the target holds well without it.
-        if let Some(drop) = retifs_store::surplus_holder(local, &views, d.loss_target) {
+        // the worst copy once the target holds well without it, never below
+        // the floor.
+        if views.len() + 1 > d.min_copies
+            && let Some(drop) = retifs_store::surplus_holder(local, &views, d.loss_target)
+        {
             let n = d.store.drop_holder(&file.root, &drop).map_err(|e| e.to_string())?;
             let without = local * views.iter().filter(|h| h.peer != drop).map(|h| h.loss).product::<f64>();
             println!(
