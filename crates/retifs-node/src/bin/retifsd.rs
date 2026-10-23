@@ -889,7 +889,7 @@ impl Daemon {
 
 async fn serve(store: Arc<SlabStore>, identity: node::IdentitySecret, endpoint: String, args: Args) {
     let identity_bytes: [u8; 64] = identity[..].try_into().expect("RNS identity secrets are 64 bytes");
-    let dest = node::destination_announcing(identity, true, args.announce_s, args.site.as_deref().map(retifs_core::announce::site_tag));
+    let dest = node::destination_announcing(identity, true, args.announce_s, args.site.as_deref().map(retifs_core::announce::site_tag), args.hold_limit != Some(0));
     if let Some(site) = &args.site {
         println!("site: {site} (one copy of this node's files is kept at another site)");
     }
@@ -1036,6 +1036,12 @@ async fn serve(store: Arc<SlabStore>, identity: node::IdentitySecret, endpoint: 
             }
             let dest = parse_destination(&hex(&peer)).expect("destination hash");
             match watcher.transport.handle.destination_identity(DestinationIdentityQuery::Destination(dest)).await {
+                // It holds nothing for others: not a candidate, and one it was is set aside.
+                Some(id) if node_destination(id.public.as_bytes()) == peer && said.holds_nothing => {
+                    if watcher.store.storage_nodes().map(|n| n.iter().any(|n| n.peer == peer && n.avoid_until_ms < now_ms())).unwrap_or(false) {
+                        let _ = watcher.store.avoid_storage_node(&peer, now_ms() + FORGET_SILENT_MS);
+                    }
+                }
                 Some(id) if node_destination(id.public.as_bytes()) == peer => {
                     let known = watcher.store.storage_nodes().map(|n| n.iter().any(|n| n.peer == peer)).unwrap_or(true);
                     if watcher.store.heard_storage_node(&peer, hops, every, said.site, now_ms()).is_ok() && !known {

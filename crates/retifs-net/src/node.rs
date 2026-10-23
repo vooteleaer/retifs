@@ -88,14 +88,15 @@ pub fn new_identity() -> IdentitySecret {
 /// The node's destination: `retifs.node` (serving) or `retifs.client`,
 /// announcing the default interval.
 pub fn destination(identity: IdentitySecret, serve: bool) -> PreConfiguredDestination<'static> {
-    destination_announcing(identity, serve, retifs_core::announce::DEFAULT_ANNOUNCE_S, None)
+    destination_announcing(identity, serve, retifs_core::announce::DEFAULT_ANNOUNCE_S, None, true)
 }
 
 /// The node's destination, its announces saying it announces every
-/// `announce_s` seconds, and its site if it has one (ADR-0014).
-pub fn destination_announcing(identity: IdentitySecret, serve: bool, announce_s: u32, site: Option<retifs_core::announce::SiteTag>) -> PreConfiguredDestination<'static> {
+/// `announce_s` seconds, its site if it has one, and whether it holds
+/// others' copies (ADR-0014).
+pub fn destination_announcing(identity: IdentitySecret, serve: bool, announce_s: u32, site: Option<retifs_core::announce::SiteTag>, holds: bool) -> PreConfiguredDestination<'static> {
     // Once per process: the destination needs it for the process's life.
-    let app_data: &'static [u8] = Box::leak(retifs_core::announce::node_app_data(announce_s, site).into_boxed_slice());
+    let app_data: &'static [u8] = Box::leak(retifs_core::announce::node_app_data(announce_s, site, holds).into_boxed_slice());
     PreConfiguredDestination::Single {
         request_endpoints: if serve { ServeMyRequestEndpoints::Yes } else { ServeMyRequestEndpoints::No },
         resource_strategy: ResourceStrategy::Accept { max_uncompressed_bytes: 32 << 20, accept_compressed: false },
