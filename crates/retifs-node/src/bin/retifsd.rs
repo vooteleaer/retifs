@@ -4518,22 +4518,34 @@ async fn place_all(d: &Daemon) -> Result<(), String> {
         }
         let mut copies = holders.len() + 1;
         let floor = want.floor(d, own);
-        for (_, n) in ranked.as_deref().unwrap_or_default() {
-            if want.enough(d, risk, copies, own, elsewhere) {
+        let mut chosen: Vec<PeerId> = Vec::new();
+        // First the rule as a whole: the last copy the count asks for goes to
+        // another site if none is there yet. If no node at another site can be
+        // had now, then the count at least, at this site: three copies in one
+        // place beat two; the one elsewhere follows when such a node is heard
+        // (and a surplus copy here is trimmed then).
+        for pass in 0..2 {
+            for (_, n) in ranked.as_deref().unwrap_or_default() {
+                let count_met = copies >= floor && (matches!(want, Copies::Exactly(_)) || met(risk, d.loss_target));
+                if (pass == 0 && want.enough(d, risk, copies, own, elsewhere)) || (pass == 1 && count_met) {
+                    break;
+                }
+                if holders.contains(&n.peer) || chosen.contains(&n.peer) {
+                    continue;
+                }
+                let other_site = !same_site(d, &sites, &n.peer);
+                if pass == 0 && own && d.site.is_some() && !elsewhere && !other_site && copies + 1 >= floor {
+                    continue;
+                }
+                plan.entry(n.peer).or_default().push(file);
+                chosen.push(n.peer);
+                risk *= d.store.holder_stats(&n.peer).map(|s| s.loss()).unwrap_or(1.0);
+                copies += 1;
+                elsewhere |= other_site;
+            }
+            if copies >= floor || want.enough(d, risk, copies, own, elsewhere) {
                 break;
             }
-            if holders.contains(&n.peer) {
-                continue;
-            }
-            // The last copy the count asks for goes to another site if none is there yet.
-            let other_site = !same_site(d, &sites, &n.peer);
-            if own && d.site.is_some() && !elsewhere && !other_site && copies + 1 >= floor {
-                continue;
-            }
-            plan.entry(n.peer).or_default().push(file);
-            risk *= d.store.holder_stats(&n.peer).map(|s| s.loss()).unwrap_or(1.0);
-            copies += 1;
-            elsewhere |= other_site;
         }
         if !want.enough(d, risk, copies, own, elsewhere) && (copies < floor || (own && d.site.is_some() && !elsewhere)) {
             short += 1;
@@ -4684,7 +4696,19 @@ fn review(d: &Daemon, file: &FileRef, want: Copies, sites: &HashMap<PeerId, Opti
         // the worst copy once the target holds well without it, never below
         // the floor; with a namespace's own number, whatever is over it.
         let drop = match want {
-            Copies::Default if views.len() + 1 > want.floor(d, own) => retifs_store::surplus_holder(local, &views, d.loss_target),
+            Copies::Default if views.len() + 1 > want.floor(d, own) => retifs_store::surplus_holder(local, &views, d.loss_target).or_else(|| {
+                // Over the count (a copy elsewhere came on top of three here):
+                // the worst one, at this site first, if the rest still meet the
+                // target and the rule without it.
+                if !views.iter().all(|h| h.confirmed) {
+                    return None;
+                }
+                let worst = views
+                    .iter()
+                    .max_by(|a, b| same_site(d, sites, &a.peer).cmp(&same_site(d, sites, &b.peer)).then(a.loss.total_cmp(&b.loss)))?;
+                let without = local * views.iter().filter(|h| h.peer != worst.peer).map(|h| h.loss).product::<f64>();
+                met(without, d.loss_target).then_some(worst.peer)
+            }),
             Copies::Exactly(n) if views.len() + 1 > n && views.iter().all(|h| h.confirmed) => {
                 views.iter().max_by(|a, b| a.loss.total_cmp(&b.loss).then(a.hops.cmp(&b.hops))).map(|h| h.peer)
             }
