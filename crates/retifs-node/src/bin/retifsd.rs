@@ -4521,10 +4521,26 @@ fn review(d: &Daemon, file: &FileRef) -> Result<Option<(f64, std::collections::B
 /// The nearest few storage nodes by hops, measured by linking (RTT) and
 /// earlier transfers, ranked by estimated transfer time. Placement is never
 /// worth a slow link: copies for durability don't cross LoRa (ADR-0013/0014).
+///
+/// Nodes that kept data for this one before are asked first, by their
+/// record; then the rest, nearest and most recently heard first. A pass
+/// tries at most `MAX_LINK_ATTEMPTS` links: many announced nodes may be gone
+/// (test nodes, a crowded network), and each failed link costs 20 s.
 async fn rank_candidates(d: &Daemon) -> Result<Vec<(f64, retifs_store::StorageNode)>, String> {
+    const MAX_LINK_ATTEMPTS: usize = 12;
+    let mut nodes = d.store.storage_nodes().map_err(|e| e.to_string())?;
+    let record = |n: &retifs_store::StorageNode| d.store.holder_stats(&n.peer).ok().filter(|s| s.ok > 0).map(|s| s.loss());
+    // Stable: within each group the store's order (hops, then recency) stays.
+    nodes.sort_by(|a, b| match (record(a), record(b)) {
+        (Some(x), Some(y)) => x.total_cmp(&y),
+        (Some(_), None) => std::cmp::Ordering::Less,
+        (None, Some(_)) => std::cmp::Ordering::Greater,
+        (None, None) => std::cmp::Ordering::Equal,
+    });
     let mut candidates = Vec::new();
-    for n in d.store.storage_nodes().map_err(|e| e.to_string())? {
-        if candidates.len() == 8 {
+    let mut attempts = 0;
+    for n in nodes {
+        if candidates.len() == 8 || attempts == MAX_LINK_ATTEMPTS {
             break;
         }
         if n.peer == d.node_id || n.avoid_until_ms > now_ms() {
@@ -4536,6 +4552,7 @@ async fn rank_candidates(d: &Daemon) -> Result<Vec<(f64, retifs_store::StorageNo
         if n.last_heard_ms + MISSED_ANNOUNCES * n.announce_s as u64 * 1000 < now_ms() {
             continue;
         }
+        attempts += 1;
         if let Err(e) = d.link_to(&n.peer).await {
             eprintln!("placement: <{}>: {e}", hex(&n.peer));
             d.store.avoid_storage_node(&n.peer, now_ms() + 600_000).map_err(|e| e.to_string())?;
