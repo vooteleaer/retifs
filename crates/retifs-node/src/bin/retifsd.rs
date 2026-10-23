@@ -514,6 +514,9 @@ fn size(s: &str) -> u64 {
     (n * mult as f64) as u64
 }
 
+#[path = "retifsd/settings.rs"]
+mod settings;
+
 fn args() -> Args {
     let mut a = Args {
         store: libretifs::default_store_dir(),
@@ -534,7 +537,20 @@ fn args() -> Args {
         nomadnet_name: "retifs site".into(),
         device: hostname(),
     };
-    let mut it = std::env::args().skip(1);
+    // The store's settings file first, then the command line: a flag given
+    // there overrides the file (the last value of a flag counts).
+    let cli: Vec<String> = std::env::args().skip(1).collect();
+    if let Some(i) = cli.iter().position(|a| a == "--store") {
+        a.store = cli.get(i + 1).expect("--store DIR").into();
+    }
+    let (settings_path, from_file) = settings::flags(&a.store).unwrap_or_else(|e| {
+        eprintln!("retifsd: settings: {e}");
+        std::process::exit(2);
+    });
+    if !cli.iter().any(|a| a == "-h" || a == "--help") {
+        println!("settings: {} ({})", settings_path.display(), if from_file.is_empty() { "all defaults".to_string() } else { format!("{} set", from_file.join(" ")) });
+    }
+    let mut it = from_file.into_iter().chain(cli);
     while let Some(arg) = it.next() {
         match arg.as_str() {
             "--store" => a.store = it.next().expect("--store DIR").into(),
