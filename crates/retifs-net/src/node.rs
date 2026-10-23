@@ -85,8 +85,17 @@ pub fn new_identity() -> IdentitySecret {
     try_generate_identity_secret().expect("OS entropy for identity generation")
 }
 
-/// The node's destination: `retifs.node` (serving) or `retifs.client`.
+/// The node's destination: `retifs.node` (serving) or `retifs.client`,
+/// announcing the default interval.
 pub fn destination(identity: IdentitySecret, serve: bool) -> PreConfiguredDestination<'static> {
+    destination_announcing(identity, serve, retifs_core::announce::DEFAULT_ANNOUNCE_S)
+}
+
+/// The node's destination, its announces saying it announces every
+/// `announce_s` seconds (ADR-0014).
+pub fn destination_announcing(identity: IdentitySecret, serve: bool, announce_s: u32) -> PreConfiguredDestination<'static> {
+    // Once per process: the destination needs it for the process's life.
+    let app_data: &'static [u8] = Box::leak(retifs_core::announce::node_app_data(announce_s).into_boxed_slice());
     PreConfiguredDestination::Single {
         request_endpoints: if serve { ServeMyRequestEndpoints::Yes } else { ServeMyRequestEndpoints::No },
         resource_strategy: ResourceStrategy::Accept { max_uncompressed_bytes: 32 << 20, accept_compressed: false },
@@ -94,7 +103,7 @@ pub fn destination(identity: IdentitySecret, serve: bool) -> PreConfiguredDestin
         app_name: APP_NAME,
         aspects: if serve { &["node"] } else { &["client"] },
         identity,
-        announce_app_data: b"retifs/v0",
+        announce_app_data: app_data,
         proof: ProofStrategy::ProveAll,
         link_requests: LinkRequestPolicy::AcceptAll,
         ratchet: RatchetPolicy::NoRatchets,

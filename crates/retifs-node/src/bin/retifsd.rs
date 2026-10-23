@@ -64,7 +64,7 @@ use personal_rns::routing::request_handlers::{RequestPathHash, RequestPolicy};
 use personal_rns::routing::links::LinkId;
 use retifs_net::{
     fetch::{fetch_file, FetchOpts},
-    node::{self, attach, block_on, destination, destination_hex, load_or_create_identity, parse_destination},
+    node::{self, attach, block_on, destination_hex, load_or_create_identity, parse_destination},
     protocol::{
         decode_have, decode_lease_request, decode_lease_status, decode_lease_statuses, decode_prove, decode_prove_reply,
         decode_receipt_replies, decode_receipt_request, encode_receipt_replies, encode_receipt_request, MAX_BUNDLE,
@@ -464,6 +464,8 @@ struct Args {
     budget: retifs_store::Budget,
     private_requests: bool,
     hold_limit: Option<u64>,
+    /// How often to announce `retifs.node` (seconds; the announces say so).
+    announce_s: u32,
     lease_term: u64,
     loss_target: f64,
     slow_budget: u64,
@@ -520,6 +522,7 @@ fn args() -> Args {
         budget: Default::default(),
         private_requests: false,
         hold_limit: None,
+        announce_s: retifs_core::announce::DEFAULT_ANNOUNCE_S,
         db_cache: retifs_store::DEFAULT_DB_CACHE,
         lease_term: 30 * 86_400,
         loss_target: 1e-3,
@@ -552,11 +555,12 @@ fn args() -> Args {
             "--loss-target" => a.loss_target = it.next().and_then(|v| v.parse().ok()).expect("--loss-target P (e.g. 0.001)"),
             "--lease-term" => a.lease_term = duration_secs(&it.next().expect("--lease-term DURATION")).max(60),
             "--device" => a.device = it.next().expect("--device NAME").to_lowercase(),
+            "--announce-every" => a.announce_s = (duration_secs(&it.next().expect("--announce-every DURATION")) as u32).max(60),
             "-h" | "--help" => {
                 println!(
                     "retifsd [--store DIR] [--max-store SIZE] [--min-free SIZE] [--cache-max SIZE] [--private-requests]
                              [--hold-for-others SIZE] [--db-cache SIZE] [--lease-term DURATION] [--loss-target P] [--slow-link-budget DURATION]\n        \
-                     [--stamp-cost BITS] [--max-stamp-cost BITS]\n        \
+                     [--stamp-cost BITS] [--max-stamp-cost BITS] [--announce-every DURATION]\n        \
                      [--nomadnet NAMESPACE [--nomadnet-name NAME]] [--device NAME] [--public] [--put FILE]..."
                 );
                 std::process::exit(0);
@@ -850,7 +854,7 @@ impl Daemon {
 
 async fn serve(store: Arc<SlabStore>, identity: node::IdentitySecret, endpoint: String, args: Args) {
     let identity_bytes: [u8; 64] = identity[..].try_into().expect("RNS identity secrets are 64 bytes");
-    let dest = destination(identity, true);
+    let dest = node::destination_announcing(identity, true, args.announce_s);
     let dest_hash = dest.destination_hash().expect("valid destination");
     // Receipts are signed with the node identity and checked against the node's
     // address, so the identity layout must be RNS's (X25519 ‖ Ed25519).
@@ -872,7 +876,7 @@ async fn serve(store: Arc<SlabStore>, identity: node::IdentitySecret, endpoint: 
     // dropped when it's full is harmless (nodes announce again). An unbounded
     // queue grew without limit on a busy transport node while passes waited
     // on the network (found by the overnight soak test).
-    let (heard_tx, mut heard_rx) = mpsc::channel::<(PeerId, u8)>(4096);
+    let (heard_tx, mut heard_rx) = mpsc::channel::<(PeerId, u8, Option<u32>)>(4096);
     // Optionally a NomadNet node (its own identity and destination) serving a namespace.
     let nomadnet = args.nomadnet.as_ref().map(|_| {
         let id = load_or_create_identity(&store.root().join("nomadnet_identity")).expect("nomadnet identity");
@@ -891,8 +895,9 @@ async fn serve(store: Arc<SlabStore>, identity: node::IdentitySecret, endpoint: 
         request_endpoints: request_endpoints![Get, Have, LeaseEndpoint, ReceiptEndpoint, ProveEndpoint, PutEndpoint, HeadEndpoint, ApiEndpoint, QueryEndpoint, InviteEndpoint],
         on_event: move |event, _state| {
             match event {
-                PrnsEvent::Diagnostic(Diagnostic::AnnounceHeard { destination, hops, .. }) => {
-                    let _ = heard_tx.try_send((*destination.as_bytes(), hops));
+                PrnsEvent::Diagnostic(Diagnostic::AnnounceHeard { destination, hops, app_data, .. }) => {
+                    let every = retifs_core::announce::node_announce_s(app_data);
+                    let _ = heard_tx.try_send((*destination.as_bytes(), hops, every));
                 }
                 // Page requests to the NomadNet destination (dynamically registered paths).
                 PrnsEvent::Message(Message::Request { destination, link_id, request_id, path_hash, rtt, .. })
@@ -974,10 +979,11 @@ async fn serve(store: Arc<SlabStore>, identity: node::IdentitySecret, endpoint: 
     });
     let watcher = daemon.clone();
     tokio::spawn(async move {
-        // Every retifs node is a storage node (ADR-0014). Prns doesn't pass
-        // announce app data on, so recognise retifs.node by its identity.
+        // Every retifs node is a storage node (ADR-0014), recognised by its
+        // identity (older nodes' app data says only `retifs/v0`); the app
+        // data, when it says, gives how often it announces.
         let mut not_retifs = std::collections::HashSet::new();
-        while let Some((peer, hops)) = heard_rx.recv().await {
+        while let Some((peer, hops, every)) = heard_rx.recv().await {
             if watcher.announced.lock().unwrap().insert(peer) {
                 watcher.announced_wake.notify_one();
             }
@@ -991,8 +997,9 @@ async fn serve(store: Arc<SlabStore>, identity: node::IdentitySecret, endpoint: 
             match watcher.transport.handle.destination_identity(DestinationIdentityQuery::Destination(dest)).await {
                 Some(id) if node_destination(id.public.as_bytes()) == peer => {
                     let known = watcher.store.storage_nodes().map(|n| n.iter().any(|n| n.peer == peer)).unwrap_or(true);
-                    if watcher.store.heard_storage_node(&peer, hops, now_ms()).is_ok() && !known {
-                        println!("storage node <{}> heard, {hops} hop(s) away", hex(&peer));
+                    if watcher.store.heard_storage_node(&peer, hops, every, now_ms()).is_ok() && !known {
+                        let every = every.map_or("an older node: interval unsaid".to_string(), |s| format!("announces every {s} s"));
+                        println!("storage node <{}> heard, {hops} hop(s) away ({every})", hex(&peer));
                         watcher.upkeep_wake.notify_one();
                     }
                 }
@@ -1026,10 +1033,11 @@ async fn serve(store: Arc<SlabStore>, identity: node::IdentitySecret, endpoint: 
     }
 
     let announcer = handle.clone();
+    let announce_every = args.announce_s;
     tokio::spawn(async move {
         // Once at start (the first tick is immediate), then every ten minutes:
         // announces travel the whole network, LoRa links included.
-        let mut tick = tokio::time::interval(Duration::from_secs(600));
+        let mut tick = tokio::time::interval(Duration::from_secs(announce_every as u64));
         loop {
             tick.tick().await;
             let cmd = PrnsCommand::AnnounceNow(AnnounceNow {
@@ -4267,6 +4275,13 @@ async fn pull_pass(d: &Daemon) -> Result<(), String> {
     Ok(())
 }
 
+/// A storage node that missed this many of its announces (at the interval
+/// its announces state) gets no new leases: it's likely gone. Its present
+/// leases are checked by upkeep as ever, and its next announce brings it back.
+const MISSED_ANNOUNCES: u64 = 5;
+/// Silent for a day (and ten of its intervals): forgotten until heard again.
+const FORGET_SILENT_MS: u64 = 24 * 3_600_000;
+
 /// How often the owner checks each holder still has the data.
 const PROOF_INTERVAL: Duration = Duration::from_secs(600);
 
@@ -4352,13 +4367,12 @@ fn met(risk: f64, target: f64) -> bool {
 /// nor chunk order. Data goes by push, so readers' copies (cache, never
 /// served) can be placed too, and holders don't learn who sent it.
 async fn place_all(d: &Daemon) -> Result<(), String> {
-    // Not heard announcing for a week: gone (test nodes, replaced
-    // identities). Otherwise they pile up as candidates, each costing a
-    // 20 s link attempt.
-    if let Ok(n) = d.store.forget_storage_nodes_heard_before(now_ms().saturating_sub(7 * 24 * 3_600_000))
+    // Silent for a day: gone (test nodes, replaced identities). Otherwise
+    // they pile up as candidates, each costing a 20 s link attempt.
+    if let Ok(n) = d.store.forget_silent_storage_nodes(now_ms(), |s| FORGET_SILENT_MS.max(10 * s.announce_s as u64 * 1000))
         && n > 0
     {
-        println!("placement: forgot {n} storage node(s) not heard for a week");
+        println!("placement: forgot {n} storage node(s) silent for a day");
     }
     let mut plan: std::collections::BTreeMap<PeerId, Vec<FileRef>> = Default::default();
     let mut ranked: Option<Vec<(f64, retifs_store::StorageNode)>> = None;
@@ -4466,6 +4480,12 @@ async fn rank_candidates(d: &Daemon) -> Result<Vec<(f64, retifs_store::StorageNo
             break;
         }
         if n.peer == d.node_id || n.avoid_until_ms > now_ms() {
+            continue;
+        }
+        // Missed its last few announces: likely gone, so not worth a link
+        // attempt (which would also bring back its old announce from a
+        // transport node's cache and make it look heard).
+        if n.last_heard_ms + MISSED_ANNOUNCES * n.announce_s as u64 * 1000 < now_ms() {
             continue;
         }
         if let Err(e) = d.link_to(&n.peer).await {

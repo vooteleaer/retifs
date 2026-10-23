@@ -111,6 +111,8 @@ pub struct StorageNode {
     pub last_heard_ms: u64,
     /// Don't offer it leases before this (it refused, or was unreachable).
     pub avoid_until_ms: u64,
+    /// How often it says it announces (seconds; the default if it doesn't).
+    pub announce_s: u32,
 }
 
 /// How a holder has answered upkeep (receipts, renewals, proofs).
@@ -135,11 +137,13 @@ fn parse_node(peer: PeerId, v: &[u8]) -> StorageNode {
         hops: v[0],
         last_heard_ms: u64::from_be_bytes(v[1..9].try_into().unwrap()),
         avoid_until_ms: u64::from_be_bytes(v[9..17].try_into().unwrap()),
+        // Entries written before the interval was kept have none.
+        announce_s: v.get(17..21).map_or(retifs_core::announce::DEFAULT_ANNOUNCE_S, |b| u32::from_be_bytes(b.try_into().unwrap())),
     }
 }
 
 fn node_value(n: &StorageNode) -> Vec<u8> {
-    [&[n.hops][..], &n.last_heard_ms.to_be_bytes(), &n.avoid_until_ms.to_be_bytes()].concat()
+    [&[n.hops][..], &n.last_heard_ms.to_be_bytes(), &n.avoid_until_ms.to_be_bytes(), &n.announce_s.to_be_bytes()].concat()
 }
 
 fn parse_quality(v: &[u8]) -> LinkQuality {
@@ -156,13 +160,20 @@ fn parse_stats(v: &[u8]) -> HolderStats {
 }
 
 impl SlabStore {
-    /// A `retifs.node` announce was heard `hops` away.
-    pub fn heard_storage_node(&self, peer: &PeerId, hops: u8, now_ms: u64) -> Result<(), StoreError> {
+    /// A `retifs.node` announce was heard `hops` away, saying it announces
+    /// every `announce_s` seconds (None: it didn't say).
+    pub fn heard_storage_node(&self, peer: &PeerId, hops: u8, announce_s: Option<u32>, now_ms: u64) -> Result<(), StoreError> {
         let w = self.db.begin_write()?;
         {
             let mut t = w.open_table(STORAGE_NODES)?;
             let old = t.get(peer.as_slice())?.map(|v| parse_node(*peer, v.value()));
-            let n = StorageNode { peer: *peer, hops, last_heard_ms: now_ms, avoid_until_ms: old.map_or(0, |o| o.avoid_until_ms) };
+            let n = StorageNode {
+                peer: *peer,
+                hops,
+                last_heard_ms: now_ms,
+                avoid_until_ms: old.map_or(0, |o| o.avoid_until_ms),
+                announce_s: announce_s.unwrap_or(retifs_core::announce::DEFAULT_ANNOUNCE_S),
+            };
             t.insert(peer.as_slice(), node_value(&n).as_slice())?;
         }
         w.commit()?;
@@ -181,9 +192,9 @@ impl SlabStore {
         Ok(out)
     }
 
-    /// Forgets storage nodes not heard since `before_ms` (gone test nodes,
-    /// replaced identities). Returns how many.
-    pub fn forget_storage_nodes_heard_before(&self, before_ms: u64) -> Result<usize, StoreError> {
+    /// Forgets storage nodes silent for longer than `silent(node)` ms at
+    /// `now_ms` (gone test nodes, replaced identities). Returns how many.
+    pub fn forget_silent_storage_nodes(&self, now_ms: u64, silent: impl Fn(&StorageNode) -> u64) -> Result<usize, StoreError> {
         let w = self.db.begin_write()?;
         let mut n = 0;
         {
@@ -192,7 +203,7 @@ impl SlabStore {
                 .iter()?
                 .filter_map(|e| e.ok())
                 .map(|(k, v)| parse_node(k.value().try_into().unwrap(), v.value()))
-                .filter(|s| s.last_heard_ms < before_ms)
+                .filter(|s| s.last_heard_ms.saturating_add(silent(s)) < now_ms)
                 .map(|s| s.peer)
                 .collect();
             for p in old {
