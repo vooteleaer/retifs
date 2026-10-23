@@ -4579,11 +4579,22 @@ async fn place_all(d: &Daemon) -> Result<(), String> {
             Ok(false) => d.store.avoid_storage_node(&peer, now_ms() + 3_600_000).map_err(|e| e.to_string())?,
             Err(e) => {
                 eprintln!("placement: <{}>: {e}", hex(&peer));
-                d.store.avoid_storage_node(&peer, now_ms() + 600_000).map_err(|e| e.to_string())?;
+                d.store.avoid_storage_node(&peer, now_ms() + avoid_after_failure(d, &peer)).map_err(|e| e.to_string())?;
             }
         }
     }
     Ok(())
+}
+
+/// How long placement leaves a node alone after a link or a lease to it
+/// failed: ten minutes, but two for a holder with a good record. Paths over
+/// several hops of the internet come and go; with only a few real holders,
+/// avoiding each for ten minutes after one timeout left placement with none.
+fn avoid_after_failure(d: &Daemon, peer: &PeerId) -> u64 {
+    match d.store.holder_stats(peer) {
+        Ok(s) if s.ok > 0 && s.ok >= s.fail => 120_000,
+        _ => 600_000,
+    }
 }
 
 /// Chunks in CID order: a lease then says nothing about file order or boundaries.
@@ -4767,7 +4778,7 @@ async fn rank_candidates(d: &Daemon) -> Result<Vec<(f64, retifs_store::StorageNo
         attempts += 1;
         if let Err(e) = d.link_to(&n.peer).await {
             eprintln!("placement: <{}>: {e}", hex(&n.peer));
-            d.store.avoid_storage_node(&n.peer, now_ms() + 600_000).map_err(|e| e.to_string())?;
+            d.store.avoid_storage_node(&n.peer, now_ms() + avoid_after_failure(d, &n.peer)).map_err(|e| e.to_string())?;
             continue;
         }
         let q = d.quality(&n.peer);
