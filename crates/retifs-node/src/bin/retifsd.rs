@@ -1481,6 +1481,31 @@ async fn handle(d: &Daemon, req: Request) -> Result<Response, String> {
             remote_request(d, &peer, &req).await
         }
 
+        Request::StorageNodes => Ok(Response::StorageNodes {
+            nodes: d
+                .store
+                .storage_nodes()
+                .map_err(|e| e.to_string())?
+                .into_iter()
+                .map(|n| {
+                    let q = d.store.link_quality(&n.peer).unwrap_or_default();
+                    let s = d.store.holder_stats(&n.peer).unwrap_or_default();
+                    libretifs::StorageNodeInfo {
+                        node: hex(&n.peer),
+                        hops: n.hops,
+                        last_heard_ms: n.last_heard_ms,
+                        announce_s: n.announce_s,
+                        avoid_until_ms: n.avoid_until_ms,
+                        rtt_ms: q.rtt_ms,
+                        rate_bps: q.rate_bps,
+                        slow: q.rtt_ms > 0 && q.slow(),
+                        ok: s.ok,
+                        fail: s.fail,
+                    }
+                })
+                .collect(),
+        }),
+
         Request::AppList => Ok(Response::Apps {
             apps: d
                 .store

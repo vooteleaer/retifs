@@ -1,6 +1,6 @@
 //! retifs CLI (prototype): a thin client of the local retifsd (libretifs).
 //!
-//!     retifs [--store DIR] ping
+//!     retifs [--store DIR] ping | nodes
 //!     retifs [--store DIR] put FILE [--public] [--compress] [--publish] [--record NAME | --one-off]
 //!
 //! `put` treats the file's absolute path as its record by default, so putting
@@ -143,6 +143,23 @@ async fn main() {
     .via(via.clone());
     let via_set = via.is_some();
     match command.as_str() {
+        "nodes" => {
+            // The storage nodes placement knows: proven holders and the rest.
+            let nodes = match client.call(libretifs::Request::StorageNodes).await.unwrap_or_else(|e| fail(e)) {
+                libretifs::Response::StorageNodes { nodes } => nodes,
+                libretifs::Response::Error { message } => fail(message),
+                _ => fail("unexpected response"),
+            };
+            let now = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map(|d| d.as_millis() as u64).unwrap_or(0);
+            let ago = |ms: u64| if ms == 0 { "never".to_string() } else { format!("{} ago", duration(now.saturating_sub(ms) / 1000)) };
+            for n in &nodes {
+                let avoid = if n.avoid_until_ms > now { format!("  avoided for {}", duration((n.avoid_until_ms - now) / 1000)) } else { String::new() };
+                let link = if n.rtt_ms == 0 { "not linked".to_string() } else { format!("rtt {} ms{}", n.rtt_ms, if n.rate_bps > 0 { format!(", {} B/s", n.rate_bps) } else { String::new() }) };
+                let record = if n.ok + n.fail > 0 { format!("  holder {} ok / {} failed", n.ok, n.fail) } else { String::new() };
+                println!("{}  {} hop(s)  heard {}  {link}{}{record}{avoid}", n.node, n.hops, ago(n.last_heard_ms), if n.slow { " (slow)" } else { "" });
+            }
+            println!("{} storage node(s)", nodes.len());
+        }
         "ping" => {
             let (node, chunks, usage) = client.ping().await.unwrap_or_else(|e| fail(e));
             println!("retifsd <{node}>, {chunks} chunks in store");

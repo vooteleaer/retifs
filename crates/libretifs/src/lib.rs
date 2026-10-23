@@ -70,6 +70,9 @@ pub enum Request {
     /// returns its answer (it must have admitted this node as a device).
     Remote { node: String, req: Box<Request> },
     AppList,
+    /// Owner only: the storage nodes this node knows (from their announces),
+    /// with what placement knows of each (ADR-0014).
+    StorageNodes,
     AppRemove { name: String },
     /// Like `Put`, but the file comes as an open descriptor sent with this
     /// frame (SCM_RIGHTS, Unix sockets only): the daemon reads it itself, so
@@ -337,6 +340,28 @@ impl std::fmt::Display for AttrValue {
     }
 }
 
+/// A storage node as placement sees it.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct StorageNodeInfo {
+    /// Its `retifs.node` address (32 hex digits).
+    pub node: String,
+    pub hops: u8,
+    pub last_heard_ms: u64,
+    /// How often it says it announces.
+    pub announce_s: u32,
+    /// No new leases offered before this (it refused, was unreachable or slow).
+    pub avoid_until_ms: u64,
+    /// Last link setup round trip (0: never linked).
+    pub rtt_ms: u32,
+    /// Measured throughput, bytes per second (0: none yet).
+    pub rate_bps: u32,
+    /// Placement counts it as too slow for copies.
+    pub slow: bool,
+    /// Its record as a holder: answers that were right and wrong.
+    pub ok: u32,
+    pub fail: u32,
+}
+
 /// An application allowed on the app socket.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub struct AppInfo {
@@ -502,6 +527,9 @@ pub enum Response {
     },
     Apps {
         apps: Vec<AppInfo>,
+    },
+    StorageNodes {
+        nodes: Vec<StorageNodeInfo>,
     },
     Verified {
         ok: bool,
