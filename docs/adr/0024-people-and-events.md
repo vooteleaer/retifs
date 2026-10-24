@@ -60,7 +60,7 @@ Records point at each other by record ID: IDs are 128 random bits, unique across
 | an event | `attendee:<contact id>` | this person is at it |
 | a contact | `photo` = `<photo record id>` | their profile picture is that photo (its content, not a copy) |
 
-So "photos of Mom" is `has:person:<id>` in any library, in Find and in any app; the contacts app lists a person's photos and events, and offers any of those photos as their picture; the calendar shows attendees as contacts. A reference to a record the reader can't see (another club's) just doesn't resolve: the hint is all they get, so a hint carries no more than the referring record's members should see.
+So "photos of Mom" is `has:person:<id>` in any library, in Find and in any app; the contacts app lists a person's photos and events, and offers any of those photos as their picture; the calendar shows attendees as contacts. Later, faces found by machine vision on the user's own node (an extractor, ADR-0023: regions and embeddings are content-derived) are matched against contacts' profile photos and confirmed tags, and proposed as `person?:<contact id>`; the user's confirmation turns one into `person:<contact id>`. Nothing tags a person for certain on its own. A reference to a record the reader can't see (another club's) just doesn't resolve: the hint is all they get, so a hint carries no more than the referring record's members should see.
 
 ### Birthdays
 A calendar shows the birthdays of the contacts it can see (`type=contact has:birthday` in `me` and the libraries it shows) as all-day yearly events, without copying them into event records. The contact stays the one place a birthday is kept.
