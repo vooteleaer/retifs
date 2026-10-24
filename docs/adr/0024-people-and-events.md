@@ -65,6 +65,20 @@ So "photos of Mom" is `has:person:<id>` in any library, in Find and in any app; 
 ### Birthdays
 A calendar shows the birthdays of the contacts it can see (`type=contact has:birthday` in `me` and the libraries it shows) as all-day yearly events, without copying them into event records. The contact stays the one place a birthday is kept.
 
+### Sharing
+The library is the boundary of who sees what, so a calendar or an address book is shared the way libraries are (ADR-0020, ADR-0021), with nothing new:
+
+| What | How | They get |
+|---|---|---|
+| a calendar, to work in it (a colleague joining the CAFA calendar) | an invitation | membership: read and write, until the grant is revoked |
+| a calendar, to read | its link | all of it |
+| a calendar's free/busy | a share of its events without `title`, `note`, `location`, `attendee:*`, `uid` | when it's busy, nothing else |
+| one event (a client meeting) | a share of that record | it, kept up to date: they see it move |
+| an address book | membership of its library (a family's) | read and write, like a calendar |
+| one contact (a business card) | a share of that record | it |
+
+Links carry `view=calendar` or `view=contacts` (ADR-0020): whatever opens one joins the library and shows it in that app; any app sees the library once it's on the device. A share is a library of its own on the owner's nodes too; apps don't list it as another calendar (its definition, `type=retifs.share`, is in the source). Still open: an answer from an attendee who isn't a member (RSVP). A share is read-only to them; their answer could be a record in their own library referring to the event's ID.
+
 ### Settings
 A library's display settings for a calendar (`color`) are a record `type=retifs.calendar` in it, shared by its members like `retifs.placement` (ADR-0014). Being `retifs.*`, it isn't a file in the mounts.
 
