@@ -927,7 +927,7 @@ impl Sync {
         }
         let Some(path) = self.shared.tree_path(abs) else { return };
         let name = path.rsplit('/').next().unwrap_or("").to_string();
-        let attrs = vec![("path".into(), AttrValue::Str(path.clone())), ("type".into(), AttrValue::Str("directory".into())), ("name".into(), AttrValue::Str(name))];
+        let attrs = vec![("path".into(), AttrValue::Str(path.clone())), ("type".into(), AttrValue::Str(libretifs::types::DIRECTORY.into())), ("name".into(), AttrValue::Str(name))];
         let record = match d.records_of(Request::RecordCreate { ns: self.shared.ns.clone(), attrs, data: None }) {
             Ok(rs) if !rs.is_empty() => rs.into_iter().next().unwrap(),
             Ok(_) => return,

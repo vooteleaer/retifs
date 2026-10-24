@@ -145,9 +145,10 @@ fn update(conn: &mut Conn, ns: &str, r: &RecordView) -> Result<bool, String> {
         found
     };
     let mut attrs = found.attrs.clone();
+    // What it is, when nothing says yet: its MIME type (ADR-0025).
     if attr(r, "type").is_none() {
-        if let Some(kind) = found.kind {
-            attrs.push(("type".into(), AttrValue::Str(kind.into())));
+        if let Some(AttrValue::Str(mime)) = found.attrs.iter().find(|(k, _)| k == "mime").map(|(_, v)| v) {
+            attrs.push(("type".into(), AttrValue::Str(mime.clone())));
         }
     }
     attrs.push((MARKER.into(), AttrValue::Str(mark)));

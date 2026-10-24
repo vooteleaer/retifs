@@ -583,7 +583,7 @@ impl Filesystem for RetifsFs {
         if self.tree.get(&path).is_some() {
             return reply.error(libc::EEXIST);
         }
-        let attrs = vec![("path".into(), AttrValue::Str(path.clone())), ("type".into(), AttrValue::Str("directory".into()))];
+        let attrs = vec![("path".into(), AttrValue::Str(path.clone())), ("type".into(), AttrValue::Str(libretifs::types::DIRECTORY.into()))];
         if let Err(e) = self.create_record(attrs, None) {
             return reply.error(e);
         }

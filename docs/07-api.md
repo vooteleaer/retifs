@@ -206,7 +206,7 @@ The schema is a convention, not enforced. Keys are lowercase, `.` separates grou
 
 | Key | Type | Binding | Meaning |
 |---|---|---|---|
-| `type` | Str | record | `image`, `document`, `contact`, `album`, `package`, ... |
+| `type` | Str | record | what the record is, a MIME type: `image/jpeg`, `application/x-person`, `text/calendar`, `inode/directory` ([ADR-0025](adr/0025-types-are-mime-types.md)) |
 | `name` | Str | record | human title |
 | `path` | Str | record | POSIX view only (§16); not unique |
 | `tags` | Str | record | multi-valued via `tags:<tag> = true` |
@@ -220,7 +220,7 @@ The schema is a convention, not enforced. Keys are lowercase, `.` separates grou
 | `audio.*` | Str/Int | content | `title`, `artist`, `album`, `track`, `year`, `genre` (not `album`: that's the user's) |
 | `doc.*` | Str/Int | content | `title`, `author`, `pages` |
 | `extracted` | Str | record | which content the content keys were taken from ([ADR-0023](adr/0023-attribute-extraction.md)) |
-| `type=contact`, `type=event` | — | record | people and events: [ADR-0024](adr/0024-people-and-events.md) |
+| `type=application/x-person`, `type=text/calendar` | — | record | people and events: [ADR-0024](adr/0024-people-and-events.md) |
 | `keep` / `keep:<device>` | Bool | record | availability (§11) |
 | `retifs.*` | — | — | reserved for the daemon |
 

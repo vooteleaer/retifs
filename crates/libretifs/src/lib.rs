@@ -17,6 +17,32 @@ pub mod fdpass;
 pub mod link;
 pub mod saved;
 
+/// What a record is: its `type`, a MIME type (ADR-0025). For a file, its
+/// content's type (`image/jpeg`); for a record of attributes only, the type
+/// that names its kind. retifs' own records keep `retifs.*` names.
+pub mod types {
+    /// A person (a contact): Haiku People's type, so Tracker and People read them.
+    pub const PERSON: &str = "application/x-person";
+    /// An event in a calendar (the iCalendar media type; the record isn't iCalendar text).
+    pub const EVENT: &str = "text/calendar";
+    /// A directory of the file-tree view (freedesktop's type for directories).
+    pub const DIRECTORY: &str = "inode/directory";
+
+    /// The names records had before (ADR-0020, ADR-0024 before ADR-0025),
+    /// still read: (new, old).
+    pub const LEGACY: [(&str, &str); 3] = [(PERSON, "contact"), (EVENT, "event"), (DIRECTORY, "directory")];
+
+    /// Whether `t` is type `kind`, under its new name or its old one.
+    pub fn is(t: &str, kind: &str) -> bool {
+        t == kind || LEGACY.iter().any(|(new, old)| *new == kind && t == *old)
+    }
+
+    /// Query terms finding records of `kind`, one per name it has had.
+    pub fn terms(kind: &str) -> Vec<String> {
+        std::iter::once(kind).chain(LEGACY.iter().filter(|(new, _)| *new == kind).map(|(_, old)| *old)).map(|t| format!("type={t}")).collect()
+    }
+}
+
 /// A namespace's own placement setting (ADR-0014): a record of this type
 /// with `copies = N` (copies of each of its files, the writer's own
 /// included). Every member's node follows it, so the club decides.

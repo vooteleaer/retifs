@@ -4,7 +4,7 @@
 //!
 //! - A record with a `path` attribute (`/a/b.txt`) is the file at that path;
 //!   its content block is the file's content.
-//! - A record with `type = directory` and a path is a directory (so empty
+//! - A record with `type = inode/directory` (once `directory`) and a path is a directory (so empty
 //!   directories exist); other directories are implied by paths below them.
 //! - Records without a path (put there by an app, a phone, the CLI) are
 //!   under `/Unfiled/<name>` (their ID if they have no name), except retifs' own
@@ -114,7 +114,7 @@ impl Tree {
                 Some(AttrValue::Str(p)) => normalize(p).filter(|p| p != "/" && !is_virtual(p)),
                 _ => None,
             };
-            let dir = matches!(attr(r, "type"), Some(AttrValue::Str(t)) if t == "directory");
+            let dir = matches!(attr(r, "type"), Some(AttrValue::Str(t)) if libretifs::types::is(t, libretifs::types::DIRECTORY));
             let internal = matches!(attr(r, "type"), Some(AttrValue::Str(t)) if t.starts_with("retifs.") || t == "keep-rule");
             if path.is_none() && internal {
                 continue;
@@ -325,6 +325,7 @@ mod tests {
             rec("aa01", &[("path", s("/docs/a.txt")), ("size", AttrValue::Int(5))], &["cap-a"]),
             rec("aa02", &[("path", s("//docs/sub/../b.txt"))], &[]),
             rec("aa03", &[("path", s("/photos")), ("type", s("directory"))], &[]),
+            rec("aa13", &[("path", s("/albums")), ("type", s("inode/directory"))], &[]),
             rec("aa04", &[("title", s("no path"))], &[]),
             rec("aa10", &[("name", s("IMG_1.jpg"))], &[]),
             rec("aa11", &[("name", s("IMG_1.jpg"))], &[]),
@@ -336,10 +337,11 @@ mod tests {
             rec("aa09", &[("type", s("keep-rule")), ("query", s("album=x"))], &[]),
         ]);
         let names = |d: &str| t.children(d).into_iter().map(|(n, _)| n).collect::<Vec<_>>();
-        assert_eq!(names("/"), [".query", "Unfiled", "docs", "docs~aa06", "photos"]);
+        assert_eq!(names("/"), [".query", "Unfiled", "albums", "docs", "docs~aa06", "photos"]);
         assert_eq!(names("/docs"), ["a.txt", "a.txt~aa05"]);
         assert_eq!(t.get("/docs/a.txt"), Some(&Node::File { id: "aa01".into(), cap: Some("cap-a".into()), size: 5, mtime_ms: None }));
-        assert_eq!(t.get("/photos"), Some(&Node::Dir { id: Some("aa03".into()) }));
+        assert_eq!(t.get("/photos"), Some(&Node::Dir { id: Some("aa03".into()) }), "the old name of the type");
+        assert_eq!(t.get("/albums"), Some(&Node::Dir { id: Some("aa13".into()) }));
         assert_eq!(names("/Unfiled"), ["IMG_1.jpg", "IMG_1.jpg~aa11", "a_b", "aa02", "aa04", "aa07"], "no path (or a bad one): by name, else ID");
         assert_eq!(names("/photos"), Vec::<String>::new());
         assert_eq!(t.records_under("/docs").len(), 2);

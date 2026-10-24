@@ -1,7 +1,7 @@
 # ADR-0024: People and events (contacts and calendars)
 
 - **Status:** accepted (prototype)
-- **Date:** 2026-10-24
+- **Date:** 2026-10-24 (types as MIME types: [ADR-0025](0025-types-are-mime-types.md), the same day)
 - **Irreversible:** no. These are attribute conventions ([API §6.3](../07-api.md)). Apps and bridges read them, so changes need care, but nothing in the formats depends on them.
 
 ## Context
@@ -16,7 +16,7 @@ Contacts already exist: [ADR-0020](0020-sharing-names-invitations.md) keeps the 
 
 ## Decision
 
-### People: `type=contact`
+### People: `type=application/x-person`
 In `me` (the user's own address book) or in any library (a club's shared one).
 
 | Key | Value | vCard |
@@ -35,7 +35,7 @@ In `me` (the user's own address book) or in any library (a club's shared one).
 
 A profile picture is a reference to a photo record (`photo`, below). Labels are lowercase words. The qualifier form (`key:label`, as `tags:<tag>`, §6.3) keeps every value its own attribute, so `has:phone:mobile` and `email:work=…` work in queries and in Find.
 
-### Events: `type=event`
+### Events: `type=text/calendar`
 In any library: each library holding events is a calendar (`Family`, `Work`, a club's).
 
 | Key | Value | iCalendar |
@@ -63,7 +63,7 @@ Records point at each other by record ID: IDs are 128 random bits, unique across
 So "photos of Mom" is `has:person:<id>` in any library, in Find and in any app; the contacts app lists a person's photos and events, and offers any of those photos as their picture; the calendar shows attendees as contacts. Later, faces found by machine vision on the user's own node (an extractor, ADR-0023: regions and embeddings are content-derived) are matched against contacts' profile photos and confirmed tags, and proposed as `person?:<contact id>`; the user's confirmation turns one into `person:<contact id>`. Nothing tags a person for certain on its own. A reference to a record the reader can't see (another club's) just doesn't resolve: the hint is all they get, so a hint carries no more than the referring record's members should see.
 
 ### Birthdays
-A calendar shows the birthdays of the contacts it can see (`type=contact has:birthday` in `me` and the libraries it shows) as all-day yearly events, without copying them into event records. The contact stays the one place a birthday is kept.
+A calendar shows the birthdays of the contacts it can see (`type=application/x-person has:birthday` in `me` and the libraries it shows) as all-day yearly events, without copying them into event records. The contact stays the one place a birthday is kept.
 
 ### Sharing
 The library is the boundary of who sees what, so a calendar or an address book is shared the way libraries are (ADR-0020, ADR-0021), with nothing new:

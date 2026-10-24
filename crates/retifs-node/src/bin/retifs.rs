@@ -1106,8 +1106,14 @@ fn is_node(s: &str) -> bool {
 
 /// The contacts in `me`: (name, node, record ID). None yet: no `me` yet.
 async fn contacts(client: &mut libretifs::Client) -> Vec<(String, String, String)> {
-    let req = libretifs::Request::Query { ns: ME.into(), terms: vec!["type=contact".into()], at: None };
-    let Ok(libretifs::Response::Records { records }) = client.call(req).await else { return Vec::new() };
+    // People under their type and the name they had before (ADR-0025).
+    let mut records = Vec::new();
+    for term in libretifs::types::terms(libretifs::types::PERSON) {
+        let req = libretifs::Request::Query { ns: ME.into(), terms: vec![term], at: None };
+        if let Ok(libretifs::Response::Records { records: found }) = client.call(req).await {
+            records.extend(found);
+        }
+    }
     let s = |r: &libretifs::RecordView, k: &str| {
         r.attrs.iter().find_map(|(key, v)| match v {
             libretifs::AttrValue::Str(s) if key == k => Some(s.clone()),
@@ -1136,7 +1142,7 @@ async fn add_contact(client: &mut libretifs::Client, name: &str, node: &str) {
         Some((_, _, id)) => libretifs::Request::RecordSet { ns: ME.into(), id: id.clone(), attrs, unset: vec![], data: None },
         None => {
             let mut attrs = attrs;
-            attrs.push(("type".into(), libretifs::AttrValue::Str("contact".into())));
+            attrs.push(("type".into(), libretifs::AttrValue::Str(libretifs::types::PERSON.into())));
             attrs.push(("retifs:node".into(), libretifs::AttrValue::Str(node.into())));
             libretifs::Request::RecordCreate { ns: ME.into(), attrs, data: None }
         }

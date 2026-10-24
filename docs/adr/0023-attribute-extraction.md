@@ -25,7 +25,7 @@ Option 2: `retifs-extractd` (crate `retifs-extract`), the attribute producer for
 
 - **How it finds work.** For each library it may see (all but `me`), it compares the change count (`Watch` with no wait) with the last one it saw, and on a change looks at the records with content (`has:size`). A record is done when its `extracted` attribute equals a short hash of its content's read-cap (the cap itself is a key and stays out of attributes). New content has a new cap, so it's described again.
 - **What it reads.** Content comes through `ReadRange` a piece at a time (256 KiB), as the extractors ask for it: the head of a file to tell its type, a photo's EXIF block, a zip's directory and one part of it, an MP4's boxes. A lazy library fetches only those pieces. Content that can't be reached (not here, holders offline) is left for a later look, not marked.
-- **What it writes.** Only what changed, with `RecordSet`, in one commit per record. Keys an earlier content had and the new one hasn't are unset. `type` is set only when the record has none. Other keys, such as `album`, `path` and `name`, aren't touched.
+- **What it writes.** Only what changed, with `RecordSet`, in one commit per record. Keys an earlier content had and the new one hasn't are unset. `type` is set only when the record has none: to the content's MIME type ([ADR-0025](0025-types-are-mime-types.md)). Other keys, such as `album`, `path` and `name`, aren't touched.
 - **Formats** (built in, Rust):
 
   | Kind | Formats | Keys |
