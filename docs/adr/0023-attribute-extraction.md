@@ -30,7 +30,7 @@ Option 2: `retifs-extractd` (crate `retifs-extract`), the attribute producer for
 
   | Kind | Formats | Keys |
   |---|---|---|
-  | all | by magic bytes; text by name (md, csv, json, code, …) | `mime`, `type` (`image`, `audio`, `video`, `document`, `text`) |
+  | all | by magic bytes; text by name (md, csv, json, code, …) | `mime`, and `type` when the record has none (the same MIME type, ADR-0025) |
   | image | JPEG, PNG, GIF, WebP, HEIF/AVIF, TIFF, … | `width`, `height`, `taken` (ISO 8601, local time as recorded), `camera` (make and model), `geo` ([lat, lon]), `exif.lens`, `exif.exposure`, `exif.fnumber`, `exif.iso`, `exif.focal`, `exif.orientation`, `exif.software` |
   | audio | MP3, FLAC, Ogg, Opus, M4A, WAV, AIFF, … | `duration` (s), `audio.title`, `audio.artist`, `audio.album`, `audio.track`, `audio.year`, `audio.genre` |
   | video | MP4/MOV | `duration` (s) |
