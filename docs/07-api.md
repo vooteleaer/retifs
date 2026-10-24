@@ -220,6 +220,7 @@ The schema is a convention, not enforced. Keys are lowercase, `.` separates grou
 | `audio.*` | Str/Int | content | `title`, `artist`, `album`, `track`, `year`, `genre` (not `album`: that's the user's) |
 | `doc.*` | Str/Int | content | `title`, `author`, `pages` |
 | `extracted` | Str | record | which content the content keys were taken from ([ADR-0023](adr/0023-attribute-extraction.md)) |
+| `type=contact`, `type=event` | — | record | people and events: [ADR-0024](adr/0024-people-and-events.md) |
 | `keep` / `keep:<device>` | Bool | record | availability (§11) |
 | `retifs.*` | — | — | reserved for the daemon |
 
