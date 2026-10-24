@@ -29,10 +29,11 @@ In `me` (the user's own address book) or in any library (a club's shared one).
 | `address`, `address:<label>` | Str: one postal address, lines separated by `\n` | `ADR` (as label) |
 | `birthday` | Str: `YYYY-MM-DD`, or `--MM-DD` without the year | `BDAY` |
 | `url` | Str | `URL` |
+| `photo` | Str: a photo record's ID (references below) | `PHOTO` (by value, for a bridge) |
 | `note` | Str | `NOTE` |
 | `retifs:node`, `retifs:writer`, `lxmf` | as in ADR-0020 | (`X-`) |
 
-A photo is the record's content block with role `photo` (later). Labels are lowercase words. The qualifier form (`key:label`, as `tags:<tag>`, §6.3) keeps every value its own attribute, so `has:phone:mobile` and `email:work=…` work in queries and in Find.
+A profile picture is a reference to a photo record (`photo`, below). Labels are lowercase words. The qualifier form (`key:label`, as `tags:<tag>`, §6.3) keeps every value its own attribute, so `has:phone:mobile` and `email:work=…` work in queries and in Find.
 
 ### Events: `type=event`
 In any library: each library holding events is a calendar (`Family`, `Work`, a club's).
@@ -45,10 +46,21 @@ In any library: each library holding events is a calendar (`Family`, `Work`, a c
 | `tz` | Str: an IANA zone (`Europe/Tallinn`); absent: floating (the same local time anywhere) | `TZID` |
 | `location`, `note` | Str | `LOCATION`, `DESCRIPTION` |
 | `rrule` | Str: an RFC 5545 rule (`FREQ=WEEKLY;BYDAY=MO`) | `RRULE` |
-| `attendee:<label>` | Str: a contact's record ID in the same library or `me`, or an address | `ATTENDEE` |
+| `attendee:<contact id>` | Str: their name, a hint (references below); `attendee:<label>` with an address for someone not in contacts | `ATTENDEE` |
 | `uid` | Str: an iCalendar UID, kept for bridges | `UID` |
 
 Times are strings in ISO 8601 order so they sort and compare as text: `start^=2026-10` finds October, `start>=2026-10-24` everything from that day.
+
+### References between records
+Records point at each other by record ID: IDs are 128 random bits, unique across libraries, so a reference needs no namespace and finds the record wherever the reader has it. The key names the role, qualified by the ID; the value is a readable hint (a name), never needed to follow it.
+
+| On | Key | Means |
+|---|---|---|
+| a photo (or any record) | `person:<contact id>` | this person is in it (tagged by hand, or proposed by face detection and confirmed) |
+| an event | `attendee:<contact id>` | this person is at it |
+| a contact | `photo` = `<photo record id>` | their profile picture is that photo (its content, not a copy) |
+
+So "photos of Mom" is `has:person:<id>` in any library, in Find and in any app; the contacts app lists a person's photos and events, and offers any of those photos as their picture; the calendar shows attendees as contacts. A reference to a record the reader can't see (another club's) just doesn't resolve: the hint is all they get, so a hint carries no more than the referring record's members should see.
 
 ### Birthdays
 A calendar shows the birthdays of the contacts it can see (`type=contact has:birthday` in `me` and the libraries it shows) as all-day yearly events, without copying them into event records. The contact stays the one place a birthday is kept.
