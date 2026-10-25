@@ -215,7 +215,7 @@ The schema is a convention, not enforced. Keys are lowercase, `.` separates grou
 | `size` | Int | content | plaintext bytes |
 | `width`, `height`, `duration` | Int | content | |
 | `exif.*` | any | content | `exif.lens`, `exif.exposure`, `exif.fnumber`, `exif.iso`, `exif.focal`, `exif.orientation`, `exif.software` |
-| `geo` | Geo | content | `[lat, lon]` (floats) for now |
+| `geo`, `geo:<label>` | Geo | content for photos, record otherwise | `[lat, lon]` (floats): where the record is ([ADR-0027](adr/0027-places.md)) |
 | `taken`, `camera` | Str | content | ISO 8601 as recorded; make and model |
 | `audio.*` | Str/Int | content | `title`, `artist`, `album`, `track`, `year`, `genre` (not `album`: that's the user's) |
 | `doc.*` | Str/Int | content | `title`, `author`, `pages` |
