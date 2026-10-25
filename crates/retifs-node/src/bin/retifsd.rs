@@ -1291,6 +1291,9 @@ fn authorize(d: &Daemon, s: &AppScope, req: &Request) -> Result<(), String> {
         Request::RecordCreate { ns, attrs, data } => write(ns).and_then(|_| create_ok()).and_then(|_| keys_ok(attrs, &[], data.is_some())),
         Request::RecordSet { ns, attrs, unset, data, .. } => write(ns).and_then(|_| keys_ok(attrs, unset, data.is_some())),
         Request::RecordDelete { ns, .. } => write(ns).and_then(|_| delete_ok()),
+        // Storing content not yet in a record (a thumbnail, ADR-0026): an app
+        // that may write content.
+        Request::Put { .. } if s.write && s.app.may_write_key(ops::CONTENT_KEY) => Ok(()),
         Request::WriteBegin { ns, .. } => write(ns).and_then(|_| keys_ok(&[], &[], true)),
         Request::Transaction { ns, steps } => {
             write(ns)?;

@@ -1,5 +1,5 @@
 # Attributes from what's in files (ADR-0023). Its token, from
-#   retifs app add extract --ns NS[,NS] --write --keys mime,width,height,taken,camera,geo,duration,'exif.*','audio.*','doc.*',type,extracted
+#   retifs app add extract --ns NS[,NS] --write --keys mime,width,height,taken,camera,geo,duration,'exif.*','audio.*','doc.*','block:*',@content,type,extracted
 # goes in ~/.config/retifs/extract.token; then
 #   systemctl --user enable --now retifs-extractd
 [Unit]

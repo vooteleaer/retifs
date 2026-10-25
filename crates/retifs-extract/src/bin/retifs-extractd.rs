@@ -14,8 +14,8 @@ use std::io::{Read, Seek, SeekFrom};
 use std::path::PathBuf;
 use std::time::Duration;
 
-use libretifs::{AttrValue, Client, RecordView, Request, Response};
-use retifs_extract::{extract, is_extracted_key, MARKER};
+use libretifs::{AttrValue, Client, RecordView, Request, Response, TxStep};
+use retifs_extract::{extract, is_extracted_key, thumbnails, MARKER};
 use sha2::Digest;
 
 fn usage() -> ! {
@@ -58,6 +58,9 @@ impl Conn {
         }
     }
 }
+
+/// Pictures larger than this get no thumbnails (they'd be read whole).
+const MAX_PICTURE: u64 = 64 << 20;
 
 /// How much is read from the daemon at a time.
 const PIECE: u64 = 256 << 10;
@@ -133,7 +136,7 @@ fn update(conn: &mut Conn, ns: &str, r: &RecordView) -> Result<bool, String> {
         Some(AttrValue::Int(n)) if *n > 0 => *n as u64,
         _ => return Ok(false),
     };
-    let found = {
+    let (found, picture) = {
         let mut content = Content { conn, ns: ns.into(), cap: cap.clone(), size, pos: 0, piece: (0, Vec::new()) };
         let name = [attr(r, "path"), attr(r, "name")].into_iter().flatten().find_map(|v| if let AttrValue::Str(s) = v { Some(s.clone()) } else { None });
         let found = extract(&mut content, size, name.as_deref());
@@ -142,7 +145,12 @@ fn update(conn: &mut Conn, ns: &str, r: &RecordView) -> Result<bool, String> {
         if content.piece.1.is_empty() {
             return Err("its content isn't reachable now".into());
         }
-        found
+        // A picture is read whole for its thumbnails (ADR-0026).
+        let mut picture = Vec::new();
+        if found.kind == Some("image") && size <= MAX_PICTURE && content.seek(SeekFrom::Start(0)).is_ok() {
+            content.read_to_end(&mut picture).map_err(|e| e.to_string())?;
+        }
+        (found, picture)
     };
     let mut attrs = found.attrs.clone();
     // What it is, when nothing says yet: its MIME type (ADR-0025).
@@ -152,11 +160,33 @@ fn update(conn: &mut Conn, ns: &str, r: &RecordView) -> Result<bool, String> {
         }
     }
     attrs.push((MARKER.into(), AttrValue::Str(mark)));
+    // Thumbnails: stored, then named by role after the content (ADR-0026).
+    let orientation = found.attrs.iter().find_map(|(k, v)| match (k.as_str(), v) {
+        ("exif.orientation", AttrValue::Int(o)) => Some(*o),
+        _ => None,
+    });
+    let mut blocks = None;
+    if let Some((thumb, preview)) = (!picture.is_empty()).then(|| thumbnails(&picture, orientation)).flatten() {
+        let mut caps = vec![cap.clone()];
+        for data in [thumb, preview] {
+            match conn.call(Request::Put { data, public: false, compress: false, publish: false, record: Some(r.id.clone()) })? {
+                Response::Put { cap } => caps.push(cap),
+                other => return Err(format!("unexpected answer to Put: {other:?}")),
+            }
+        }
+        attrs.push(("block:thumb".into(), AttrValue::Int(1)));
+        attrs.push(("block:preview".into(), AttrValue::Int(2)));
+        blocks = Some(caps);
+    }
     // What earlier content had and this one hasn't.
     let unset: Vec<String> = r.attrs.iter().map(|(k, _)| k).filter(|k| is_extracted_key(k) && !attrs.iter().any(|(a, _)| a == *k)).cloned().collect();
     // Only what changes: the same values again would be a new version.
     attrs.retain(|(k, v)| attr(r, k) != Some(v));
-    conn.call(Request::RecordSet { ns: ns.into(), id: r.id.clone(), attrs, unset, data: None })?;
+    match blocks {
+        // Attributes and blocks in one commit.
+        Some(blocks) => conn.call(Request::Transaction { ns: ns.into(), steps: vec![TxStep::Set { id: r.id.clone(), attrs, unset, data: None, blocks: Some(blocks) }] })?,
+        None => conn.call(Request::RecordSet { ns: ns.into(), id: r.id.clone(), attrs, unset, data: None })?,
+    };
     Ok(true)
 }
 

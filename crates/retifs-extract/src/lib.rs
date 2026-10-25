@@ -12,15 +12,15 @@ use std::io::{BufReader, Read, Seek, SeekFrom};
 use libretifs::AttrValue;
 
 /// The keys extractors write, for the extractor to take back what new
-/// content no longer has: exact keys, and prefixes ending in `.`.
-pub const KEYS: &[&str] = &["mime", "width", "height", "taken", "camera", "geo", "duration", "exif.", "audio.", "doc."];
+/// content no longer has: exact keys, and prefixes ending in `.` or `:`.
+pub const KEYS: &[&str] = &["mime", "width", "height", "taken", "camera", "geo", "duration", "exif.", "audio.", "doc.", "block:"];
 
 /// The marker of the content attributes were taken from.
 pub const MARKER: &str = "extracted";
 
 /// Whether `key` is one extractors write.
 pub fn is_extracted_key(key: &str) -> bool {
-    key == MARKER || KEYS.iter().any(|k| if k.ends_with('.') { key.starts_with(k) } else { key == *k })
+    key == MARKER || KEYS.iter().any(|k| if k.ends_with('.') || k.ends_with(':') { key.starts_with(k) } else { key == *k })
 }
 
 /// What a file holds.
@@ -434,6 +434,35 @@ fn packaged<R: Read + Seek>(r: &mut R, mime: &str, out: &mut Extracted) {
     }
 }
 
+/// The thumbnail sizes (ADR-0026): the longest side in pixels.
+pub const THUMB_PX: u32 = 320;
+pub const PREVIEW_PX: u32 = 1600;
+
+/// A picture's thumbnail and preview (ADR-0026), JPEG, turned the way its
+/// EXIF `orientation` says (1–8). None if it can't be decoded. A picture
+/// already smaller than a size gets no larger.
+pub fn thumbnails(bytes: &[u8], orientation: Option<i64>) -> Option<(Vec<u8>, Vec<u8>)> {
+    let img = image::load_from_memory(bytes).ok()?;
+    let img = match orientation {
+        Some(2) => img.fliph(),
+        Some(3) => img.rotate180(),
+        Some(4) => img.flipv(),
+        Some(5) => img.rotate90().fliph(),
+        Some(6) => img.rotate90(),
+        Some(7) => img.rotate270().fliph(),
+        Some(8) => img.rotate270(),
+        _ => img,
+    };
+    let jpeg = |px: u32| -> Option<Vec<u8>> {
+        let small = if img.width().max(img.height()) > px { img.thumbnail(px, px) } else { img.clone() };
+        let mut out = Vec::new();
+        let enc = image::codecs::jpeg::JpegEncoder::new_with_quality(&mut out, 82);
+        small.to_rgb8().write_with_encoder(enc).ok()?;
+        Some(out)
+    };
+    Some((jpeg(THUMB_PX)?, jpeg(PREVIEW_PX)?))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -529,9 +558,27 @@ mod tests {
     }
 
     #[test]
+    fn thumbnails_are_small_and_turned() {
+        // A 400×200 PNG, wider than tall; orientation 6 turns it upright.
+        let img = image::RgbImage::from_pixel(400, 200, image::Rgb([200, 30, 30]));
+        let mut png = Vec::new();
+        image::DynamicImage::ImageRgb8(img).write_to(&mut Cursor::new(&mut png), image::ImageFormat::Png).unwrap();
+        let (thumb, preview) = thumbnails(&png, None).unwrap();
+        let t = image::load_from_memory(&thumb).unwrap();
+        assert_eq!((t.width(), t.height()), (320, 160));
+        let p = image::load_from_memory(&preview).unwrap();
+        assert_eq!((p.width(), p.height()), (400, 200), "not made larger");
+        let (turned, _) = thumbnails(&png, Some(6)).unwrap();
+        let t = image::load_from_memory(&turned).unwrap();
+        assert_eq!((t.width(), t.height()), (160, 320));
+        assert!(thumbnails(b"not a picture", None).is_none());
+    }
+
+    #[test]
     fn times_and_keys() {
         assert_eq!(exif_time("2026:07:14 18:22:05"), "2026-07-14T18:22:05");
         assert!(is_extracted_key("exif.iso") && is_extracted_key("audio.artist") && is_extracted_key("mime") && is_extracted_key(MARKER));
+        assert!(is_extracted_key("block:thumb") && !is_extracted_key("blocks"));
         assert!(!is_extracted_key("album") && !is_extracted_key("path") && !is_extracted_key("mimetype"));
     }
 }
