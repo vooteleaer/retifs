@@ -154,3 +154,13 @@ fn leaving_a_namespace_leaves_the_others() {
     st.put_record("map", &rec(5, &[("type", s("image"))])).unwrap();
     assert_eq!(ids(st.records("map").unwrap()), vec![5]);
 }
+
+#[test]
+fn a_joined_namespace_without_records_is_listed() {
+    let (_d, st) = store();
+    st.put_record("photos", &rec(1, &[])).unwrap();
+    st.set_ns_info("map", &[1; 32], &[2; 32]).unwrap();
+    assert_eq!(st.namespaces().unwrap(), vec!["map".to_string(), "photos".to_string()], "joined lazily, nothing fetched yet: still here");
+    st.leave_namespace("map").unwrap();
+    assert_eq!(st.namespaces().unwrap(), vec!["photos".to_string()]);
+}

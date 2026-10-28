@@ -16,7 +16,7 @@ use retifs_core::{channel::NsId, Cid, Seed};
 
 use crate::{wants::PeerId, SlabStore, StoreError};
 
-const NS_INFO: TableDefinition<&str, &[u8]> = TableDefinition::new("ns_info");
+pub(crate) const NS_INFO: TableDefinition<&str, &[u8]> = TableDefinition::new("ns_info");
 const MEMBER_CHANNELS: TableDefinition<&str, &[u8]> = TableDefinition::new("member_channels");
 const WRITER_HEADS: TableDefinition<&[u8], &[u8]> = TableDefinition::new("writer_heads");
 const NS_PEERS: TableDefinition<&str, &[u8]> = TableDefinition::new("ns_peers");

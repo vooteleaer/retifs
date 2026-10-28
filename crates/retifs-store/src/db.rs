@@ -199,10 +199,18 @@ impl SlabStore {
         Ok(())
     }
 
+    /// The namespaces here: those with records, and those joined that have
+    /// none yet (a lazy join before anything is fetched).
     pub fn namespaces(&self) -> Result<Vec<String>, StoreError> {
         let r = self.db.begin_read()?;
-        let t = r.open_table(NAMESPACES)?;
-        t.iter()?.map(|e| e.map(|(k, _)| k.value().to_string()).map_err(StoreError::from)).collect()
+        let mut names: std::collections::BTreeSet<String> = std::collections::BTreeSet::new();
+        for e in r.open_table(NAMESPACES)?.iter()? {
+            names.insert(e?.0.value().to_string());
+        }
+        for e in r.open_table(crate::namespaces::NS_INFO)?.iter()? {
+            names.insert(e?.0.value().to_string());
+        }
+        Ok(names.into_iter().collect())
     }
 
     /// Stores (or replaces) a record and reindexes its attributes.
