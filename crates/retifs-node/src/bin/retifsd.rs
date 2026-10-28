@@ -4145,7 +4145,9 @@ type Chains = std::collections::BTreeMap<[u8; 32], Vec<(u64, WriterCommit)>>;
 /// Every writer chain of a namespace held here: this node's and the others'.
 /// Resumed from a checkpoint, only commits after it, unless `full`.
 fn chains(d: &Daemon, ns: &str, full: bool) -> Result<(ChannelAddr, [u8; 32], Chains), String> {
-    let addr = ensure_namespace(d, ns)?;
+    // Reading never makes a namespace (writes do, in write_ops): a read of one
+    // just left made a new, empty one of the same name.
+    let addr = current_addr(d, ns)?;
     let mut heads: Vec<([u8; 32], Option<CommitRef>)> = Vec::new();
     let mut own_writer = addr.writer;
     if let Some(c) = d.store.own_channel(&ns_channel(ns)).map_err(|e| e.to_string())? {
