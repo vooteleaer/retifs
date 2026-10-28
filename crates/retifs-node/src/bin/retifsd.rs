@@ -5091,8 +5091,12 @@ fn review(d: &Daemon, file: &FileRef, want: Copies, sites: &HashMap<PeerId, Opti
         let n = d.store.release_chunks(&chunks).map_err(|e| e.to_string())?;
         println!("placement: {}: enough copies elsewhere; kept here only as cache now ({n} chunk(s))", file.root);
     }
-    // A storage-less node's own copy never counts.
-    let (copies, risk) = if d.no_storage { (views.len(), risk_elsewhere) } else { (views.len() + 1, risk) };
+    // The copy here counts only when it's really kept here: pinned, on a node
+    // with storage. A storage-less node's, or one only cached, doesn't (or
+    // trimming would take one too many and placement would add it again).
+    let here_counts = !d.no_storage && local <= 0.1;
+    let local_f = if here_counts { local } else { 1.0 };
+    let (copies, risk) = if here_counts { (views.len() + 1, risk) } else { (views.len(), risk_elsewhere) };
     if want.enough(d, risk, copies, own, elsewhere) {
         // Surplus after a repair (the absent holder came back): stop renewing
         // the worst copy once the target holds well without it, never below
@@ -5106,19 +5110,19 @@ fn review(d: &Daemon, file: &FileRef, want: Copies, sites: &HashMap<PeerId, Opti
             .filter(|h| !protected(&h.peer))
             .max_by(|a, b| same_site(d, sites, &a.peer).cmp(&same_site(d, sites, &b.peer)).then(a.loss.total_cmp(&b.loss)).then(a.hops.cmp(&b.hops)));
         let drop = match want {
-            Copies::Default if views.len() + 1 > want.floor(d, own) => retifs_store::surplus_holder(local, &views, d.loss_target).filter(|p| !protected(p)).or_else(|| {
+            Copies::Default if copies > want.floor(d, own) => retifs_store::surplus_holder(local_f, &views, d.loss_target).filter(|p| !protected(p)).or_else(|| {
                 // Over the count (a copy elsewhere came on top of three here):
                 // the worst one, if the rest still meet the target without it.
                 let worst = worst.filter(|_| all_confirmed)?;
-                let without = local * views.iter().filter(|h| h.peer != worst.peer).map(|h| h.loss).product::<f64>();
+                let without = local_f * views.iter().filter(|h| h.peer != worst.peer).map(|h| h.loss).product::<f64>();
                 met(without, d.loss_target).then_some(worst.peer)
             }),
-            Copies::Exactly(n) if views.len() + 1 > n && all_confirmed => worst.map(|h| h.peer),
+            Copies::Exactly(n) if copies > n && all_confirmed => worst.map(|h| h.peer),
             _ => None,
         };
         if let Some(drop) = drop {
             let n = d.store.drop_holder(&file.root, &drop).map_err(|e| e.to_string())?;
-            let without = local * views.iter().filter(|h| h.peer != drop).map(|h| h.loss).product::<f64>();
+            let without = local_f * views.iter().filter(|h| h.peer != drop).map(|h| h.loss).product::<f64>();
             println!(
                 "placement: {} trimmed at <{}> ({n} lease(s) no longer serve it), loss estimate without it {without:.1e}",
                 file.root,
