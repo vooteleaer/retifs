@@ -819,6 +819,10 @@ fn leave_now(d: &Daemon, ns: &str) -> Result<usize, String> {
     let mut seen = std::collections::HashSet::new();
     files.retain(|f| !others.contains(&f.root) && seen.insert(f.root));
     forget_all(d, &files)?;
+    // Joined again meanwhile: the leave is off, the library stays.
+    if !d.leaving.lock().unwrap().contains(ns) {
+        return Ok(0);
+    }
     d.store.leave_namespace(ns).map_err(|e| e.to_string())?;
     d.ns_cache.lock().unwrap().remove(ns);
     d.ns_seeking.lock().unwrap().remove(ns);
@@ -2201,6 +2205,16 @@ async fn handle(d: &Daemon, req: Request) -> Result<Response, String> {
         Request::NsJoin { ns, address, from, lazy } => {
             writable(&ns)?;
             if d.store.ns_info(&ns).map_err(|e| e.to_string())?.is_some() {
+                // Joined again while being left: the leave is called off and
+                // it's back; what was forgotten is fetched again as it's read.
+                let same = current_addr(d, &ns).map(|a| a.to_string() == address.trim()).unwrap_or(false);
+                if same && d.leaving.lock().unwrap().contains(&ns) {
+                    mark_leaving(d, &ns, false)?;
+                    d.store.add_ns_peers(&ns, &parse_peers(&from)?).map_err(|e| e.to_string())?;
+                    d.ns_wake.notify_one();
+                    println!("{ns}: joined again while being left; the leave is called off");
+                    return Ok(Response::Namespace(ns_view(d, &ns)?));
+                }
                 return Err(format!("{ns} already exists here"));
             }
             let addr: ChannelAddr = address.parse().map_err(|e: retifs_core::channel::ChannelError| e.to_string())?;

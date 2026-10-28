@@ -166,7 +166,11 @@ pub fn library_app_data(l: &LibraryAnnounce) -> Vec<u8> {
         }
         if l.about.len() > ABOUT_MIN {
             let keep = l.about.len().saturating_sub(out.len() - APP_DATA_MAX).max(ABOUT_MIN);
-            l.about = cut(&l.about, keep).to_string();
+            // At a word's end, with an ellipsis: "…vector map of Es" read badly.
+            let whole = l.about.trim_end_matches('…').to_string();
+            let short = cut(&whole, keep.saturating_sub(3));
+            let at_word = short.rfind(' ').filter(|i| *i >= ABOUT_MIN / 2).map_or(short, |i| &short[..i]);
+            l.about = format!("{}…", at_word.trim_end_matches([',', ':', ';']));
         } else if l.has.len() > 1 {
             l.has.pop();
         } else if !l.about.is_empty() {
@@ -216,8 +220,9 @@ fn encode_library(l: &LibraryAnnounce) -> Vec<u8> {
     out
 }
 
-/// What a heard library announce says. None when it isn't one (a node's
-/// announce, anything else) or names no channel. Unknown keys are skipped; an
+/// What a heard library announce says. None when it isn't one: every version
+/// carries `ch` (the library's address, 64 bytes in v1); without it, a map
+/// with a `v` is some other program's announce. Unknown keys are skipped; an
 /// announce of another `v` is returned with `v` so a node can say it needs a
 /// newer retifs (ADR-0030) without reading the rest.
 pub fn library_announce(app_data: &[u8]) -> Option<(u32, Option<LibraryAnnounce>)> {
@@ -229,7 +234,7 @@ pub fn library_announce(app_data: &[u8]) -> Option<(u32, Option<LibraryAnnounce>
         let value = r.value(1).ok()?;
         match (key.as_str(), value) {
             ("v", Value::Int(i)) => v = u32::try_from(i).ok(),
-            ("ch", Value::Bytes(b)) if b.len() == 64 => ch = Some(b),
+            ("ch", Value::Bytes(b)) => ch = Some(b),
             ("name", Value::Str(s)) => l.name = s,
             ("about", Value::Str(s)) => l.about = s,
             ("fmt", Value::Int(i)) => l.fmt = u32::try_from(i).unwrap_or(u32::MAX),
@@ -254,11 +259,13 @@ pub fn library_announce(app_data: &[u8]) -> Option<(u32, Option<LibraryAnnounce>
             _ => {}
         }
     }
-    let v = v?;
+    let (v, ch) = (v?, ch?);
     if v != 1 {
         return Some((v, None));
     }
-    let ch = ch?;
+    if ch.len() != 64 {
+        return None;
+    }
     l.writer.copy_from_slice(&ch[..32]);
     l.read_key.copy_from_slice(&ch[32..]);
     Some((v, Some(l)))
@@ -316,7 +323,11 @@ mod tests {
         // The description got shorter to make room; every type is still there.
         let read = library_announce(&data).unwrap().1.unwrap();
         assert_eq!(read.has, l.has);
-        assert!(read.about.len() >= ABOUT_MIN && l.about.starts_with(&read.about), "{}", read.about);
+        assert!(read.about == l.about || (read.about.ends_with('…') && l.about.starts_with(read.about.trim_end_matches('…'))), "{}", read.about);
+        // Too long to fit: cut at a word, with an ellipsis.
+        let wordy = LibraryAnnounce { about: "OpenStreetMap 2026-10-27: vector map of Estonia and the islands around it".into(), ..l.clone() };
+        let about = library_announce(&library_app_data(&wordy)).unwrap().1.unwrap().about;
+        assert!(about.ends_with('…') && !about.ends_with(" …") && wordy.about.starts_with(about.trim_end_matches('…')), "{about}");
         // retifs' own records aren't listed.
         let own = LibraryAnnounce { has: vec![("application/x-vnd.retifs.place".into(), 5), ("retifs.placement".into(), 1)], ..l.clone() };
         assert_eq!(library_announce(&library_app_data(&own)).unwrap().1.unwrap().has, vec![("application/x-vnd.retifs.place".to_string(), 5)]);
@@ -331,11 +342,19 @@ mod tests {
         assert_eq!(library_announce(&node_app_data(600, None, true)), None);
         let mut newer = Vec::new();
         write_map_len(&mut newer, 2);
-        write_str(&mut newer, "future");
-        write_int(&mut newer, 7);
+        write_str(&mut newer, "ch");
+        write_bin(&mut newer, &[1; 70]);
         write_str(&mut newer, "v");
         write_int(&mut newer, 2);
         assert_eq!(library_announce(&newer), Some((2, None)));
+        // Another program's announce with a v but no ch isn't a library's.
+        let mut other = Vec::new();
+        write_map_len(&mut other, 2);
+        write_str(&mut other, "name");
+        write_str(&mut other, "a chat");
+        write_str(&mut other, "v");
+        write_int(&mut other, 2);
+        assert_eq!(library_announce(&other), None);
         assert_eq!(library_announce(b"retifs/v0"), None);
     }
 
