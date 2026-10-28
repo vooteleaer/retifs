@@ -720,7 +720,10 @@ struct Daemon {
     follow_wake: Notify,
     /// Wakes namespace sync (joined, granted).
     ns_wake: Notify,
-    ns_cache: Mutex<HashMap<String, NsCache>>,
+    /// Per library, its merge state: each behind a lock of its own, so long
+    /// work on one (walking 77,000 operations, writing 38,000 records) doesn't
+    /// stop the others, nor every tokio worker waiting on one global lock.
+    ns_cache: Mutex<HashMap<String, Arc<Mutex<NsCache>>>>,
     /// Joined namespaces still looking for a checkpoint to start from.
     ns_seeking: Mutex<std::collections::HashSet<String>>,
     /// Peers announced since the seeker last looked (a set: each at most once).
@@ -747,6 +750,16 @@ struct Daemon {
     /// removed in the background by `leaver`.
     leaving: Mutex<std::collections::BTreeSet<String>>,
     leave_wake: Notify,
+}
+
+/// Library `ns`'s cache entry (made if missing); lock it for as short as can be.
+fn ns_entry(d: &Daemon, ns: &str) -> Arc<Mutex<NsCache>> {
+    d.ns_cache.lock().unwrap().entry(ns.to_string()).or_default().clone()
+}
+
+/// Library `ns`'s cache entry, if it has one.
+fn ns_entry_get(d: &Daemon, ns: &str) -> Option<Arc<Mutex<NsCache>>> {
+    d.ns_cache.lock().unwrap().get(ns).cloned()
 }
 
 /// Marks library `ns` as being left (or done), in memory and in the store's
@@ -2271,7 +2284,7 @@ async fn handle(d: &Daemon, req: Request) -> Result<Response, String> {
             if d.store.ns_lazy(&ns).map_err(|e| e.to_string())? {
                 return Err(format!("{ns} is held lazily (part of its state): nothing whole to verify"));
             }
-            d.ns_cache.lock().unwrap().entry(ns.clone()).or_default().fetch_whole = true;
+            ns_entry(d, &ns).lock().unwrap().fetch_whole = true;
             sync_ns(d, &ns).await?;
             let (ok, detail) = verify_checkpoint(d, &ns)?;
             Ok(Response::Verified { ok, detail })
@@ -2435,7 +2448,7 @@ async fn handle(d: &Daemon, req: Request) -> Result<Response, String> {
 
         Request::NsCheckpoint { ns } => {
             writable(&ns)?;
-            d.ns_cache.lock().unwrap().entry(ns.clone()).or_default().since_checkpoint = CHECKPOINT_EVERY;
+            ns_entry(d, &ns).lock().unwrap().since_checkpoint = CHECKPOINT_EVERY;
             materialize(d, &ns)?;
             publish_checkpoint(d, &ns).await?;
             Ok(Response::Namespace(ns_view(d, &ns)?))
@@ -2775,12 +2788,10 @@ async fn sync_ns(d: &Daemon, ns: &str) -> Result<(), String> {
     // a rebuild (or verification) needs it.
     let mut seeking = d.ns_seeking.lock().unwrap().contains(ns) && d.store.ns_checkpoint(ns).map_err(|e| e.to_string())?.is_none();
     let mut searched: std::collections::BTreeSet<[u8; 32]> = std::collections::BTreeSet::new();
-    let (whole, verify) = d
-        .ns_cache
-        .lock()
-        .unwrap()
-        .get(ns)
-        .map_or((false, false), |e| (e.needs_history || e.fetch_whole, e.needs_history && !e.fetch_whole));
+    let (whole, verify) = ns_entry_get(d, ns).map_or((false, false), |e| {
+        let e = e.lock().unwrap();
+        (e.needs_history || e.fetch_whole, e.needs_history && !e.fetch_whole)
+    });
     let mut floors = if whole { HashMap::new() } else { checkpoint_floors(d, ns) };
     for peer in peers {
         let link = match d.link_to(&peer).await {
@@ -2917,7 +2928,8 @@ async fn sync_ns(d: &Daemon, ns: &str) -> Result<(), String> {
                 Err(e) => println!("ns {ns}: checkpoint not verified: {e}"),
             }
         }
-        if let Some(e) = d.ns_cache.lock().unwrap().get_mut(ns) {
+        if let Some(e) = ns_entry_get(d, ns) {
+            let mut e = e.lock().unwrap();
             e.needs_history = false;
             e.fetch_whole = false;
             e.state = None;
@@ -2949,7 +2961,7 @@ async fn sync_ns(d: &Daemon, ns: &str) -> Result<(), String> {
 /// older version that trusted any held commit). Their next fetch ignores the
 /// last head marker and walks back until the gap is filled.
 fn chains_with_gaps(d: &Daemon, ns: &str) -> std::collections::HashSet<[u8; 32]> {
-    d.ns_cache.lock().unwrap().get(ns).map(|e| e.gaps.clone()).unwrap_or_default()
+    ns_entry_get(d, ns).map(|e| e.lock().unwrap().gaps.clone()).unwrap_or_default()
 }
 
 /// Where the local checkpoint's frontier is, per writer: chain walks stop there.
@@ -2978,7 +2990,7 @@ fn verify_checkpoint(d: &Daemon, ns: &str) -> Result<(bool, String), String> {
         .map_err(|e| e.to_string())
         .and_then(|b| Checkpoint::decode(&b).map_err(|e| e.to_string()))?;
     chains(d, ns, true)?;
-    let walked = d.ns_cache.lock().unwrap().get(ns).map(|e| e.chains.clone()).unwrap_or_default();
+    let walked = ns_entry_get(d, ns).map(|e| e.lock().unwrap().chains.clone()).unwrap_or_default();
     let mut upto: std::collections::BTreeMap<[u8; 32], Vec<WriterCommit>> = std::collections::BTreeMap::new();
     let mut problem = None;
     for f in &cp.frontier {
@@ -3004,8 +3016,8 @@ fn verify_checkpoint(d: &Daemon, ns: &str) -> Result<(bool, String), String> {
         Some(p) => {
             // Don't use it: rebuild from the history, and make a checkpoint of our own.
             d.store.remove_ns_checkpoint(ns).map_err(|e| e.to_string())?;
-            let mut cache = d.ns_cache.lock().unwrap();
-            let e = cache.entry(ns.to_string()).or_default();
+            let entry = ns_entry(d, ns);
+            let mut e = entry.lock().unwrap();
             e.state = None;
             e.floors.clear();
             Ok((false, format!("checkpoint {file} does NOT match the history ({p}); dropped, rebuilding from the history")))
@@ -3163,7 +3175,7 @@ async fn publish_index(d: &Daemon, ns: &str, force: bool) -> Result<Option<Strin
         return Ok(None);
     }
     if force {
-        d.ns_cache.lock().unwrap().entry(ns.to_string()).or_default().since_checkpoint = CHECKPOINT_EVERY;
+        ns_entry(d, ns).lock().unwrap().since_checkpoint = CHECKPOINT_EVERY;
         materialize(d, ns)?;
     }
     let Some(checkpoint) = d.store.ns_checkpoint(ns).map_err(|e| e.to_string())? else { return Ok(None) };
@@ -3400,8 +3412,8 @@ async fn fetch_paths(d: &Daemon, ns: &str, ids: &[RecordId], extra: &[PeerId], p
     if fetched > 0 {
         // Reload: the records of the new leaves come from the checkpoint,
         // then every commit since applies on top.
-        if let Some(e) = d.ns_cache.lock().unwrap().get_mut(ns) {
-            e.state = None;
+        if let Some(e) = ns_entry_get(d, ns) {
+            e.lock().unwrap().state = None;
         }
     }
     Ok(fetched)
@@ -3792,7 +3804,7 @@ async fn write_ops(d: &Daemon, ns: &str, mut ops: Vec<Op>) -> Result<u64, String
                 &hex(&own)[..12]
             ));
         }
-        d.ns_cache.lock().unwrap().get(ns).and_then(|e| e.applied.values().map(|(_, t, _)| t + 1).max()).unwrap_or(0)
+        ns_entry_get(d, ns).and_then(|e| e.lock().unwrap().applied.values().map(|(_, t, _)| t + 1).max()).unwrap_or(0)
     };
     // Only a change to keep tags or rules, or a deletion, can change what's
     // kept: own new content is kept anyway (deciding it read every record on
@@ -4131,8 +4143,9 @@ fn chains(d: &Daemon, ns: &str, full: bool) -> Result<(ChannelAddr, [u8; 32], Ch
             heads.push((h.writer, Some(h.commit)));
         }
     }
-    let mut cache = d.ns_cache.lock().unwrap();
-    let entry = cache.entry(ns.to_string()).or_default();
+    let arc = ns_entry(d, ns);
+    let mut cache = arc.lock().unwrap();
+    let entry = &mut *cache;
     if full && !entry.floors.is_empty() {
         entry.floors.clear();
         entry.chains.clear();
@@ -4156,8 +4169,9 @@ fn chains(d: &Daemon, ns: &str, full: bool) -> Result<(ChannelAddr, [u8; 32], Ch
 
 /// Writes the records that changed since the last merge (all of them the first time).
 fn apply_view(d: &Daemon, ns: &str) -> Result<(), String> {
-    let mut cache = d.ns_cache.lock().unwrap();
-    let entry = cache.entry(ns.to_string()).or_default();
+    let arc = ns_entry(d, ns);
+    let mut cache = arc.lock().unwrap();
+    let entry = &mut *cache;
     let changed;
     let dirty = entry.state.as_mut().map(|s| s.take_dirty()).unwrap_or_default();
     if let (true, Some(st)) = (entry.view_built, entry.state.as_ref()) {
@@ -4197,7 +4211,7 @@ fn ns_changed(d: &Daemon, ns: &str) {
 /// Resumes a namespace from its local checkpoint, if the cache is empty
 /// (after a restart): the state and the point each chain was applied to.
 fn resume(d: &Daemon, ns: &str) -> Result<(), String> {
-    if d.ns_cache.lock().unwrap().get(ns).is_some_and(|e| e.state.is_some()) {
+    if ns_entry_get(d, ns).is_some_and(|e| e.lock().unwrap().state.is_some()) {
         return Ok(());
     }
     let Some(file) = d.store.ns_checkpoint(ns).map_err(|e| e.to_string())? else { return Ok(()) };
@@ -4216,8 +4230,9 @@ fn resume(d: &Daemon, ns: &str) -> Result<(), String> {
             return Ok(());
         }
     };
-    let mut cache = d.ns_cache.lock().unwrap();
-    let entry = cache.entry(ns.to_string()).or_default();
+    let arc = ns_entry(d, ns);
+    let mut cache = arc.lock().unwrap();
+    let entry = &mut *cache;
     entry.applied = cp.frontier.iter().map(|f| (f.writer, (f.seq, f.time_ms, f.commit))).collect();
     entry.floors = cp.frontier.iter().map(|f| (f.writer, f.commit)).collect();
     entry.chains.clear();
@@ -4275,8 +4290,9 @@ fn materialize(d: &Daemon, ns: &str) -> Result<retifs_core::ops::Merged, String>
     let now = now_ms();
     let mut checkpoint = None;
     let merged = loop {
-        let mut cache = d.ns_cache.lock().unwrap();
-        let entry = cache.entry(ns.to_string()).or_default();
+        let arc = ns_entry(d, ns);
+        let mut cache = arc.lock().unwrap();
+        let entry = &mut *cache;
         if entry.needs_history
             && let Some(st) = &entry.state
         {
@@ -4387,8 +4403,8 @@ fn materialize(d: &Daemon, ns: &str) -> Result<retifs_core::ops::Merged, String>
                 // The commits it covers needn't stay in memory: chains are walked
                 // back only to it from now on, like after resuming from it, and
                 // a rebuild reads the history from the store.
-                let mut cache = d.ns_cache.lock().unwrap();
-                if let Some(e) = cache.get_mut(ns) {
+                let arc = ns_entry_get(d, ns);
+                if let Some(mut e) = arc.as_ref().map(|a| a.lock().unwrap()) {
                     for (w, seq, commit) in &reach {
                         e.floors.insert(*w, *commit);
                         if let Some(c) = e.chains.get_mut(w) {
