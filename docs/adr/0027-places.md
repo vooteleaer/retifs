@@ -17,7 +17,7 @@ A map app (its own repository, like the others) shows every record that has a pl
 - `alt` (metres) where known.
 - **A saved place** is a record of its own: `type = application/x-vnd.retifs.place`, `name`, `geo`, and `address` and `note` where given. It lives in whichever library the user saves it to, and is shared with it like anything else.
 - **Coordinates for an address come from the user:** the map app lets them place a contact or an event on the map, and writes `geo`. They may also **look an address up** in OpenStreetMap's Nominatim, but only after turning that on (once per device, asked the first time). Only the typed search text is sent, only when the user presses Enter (no search-as-you-type), at most once a second, with the app named in the User-Agent, as Nominatim's usage policy asks. The search result is only a suggestion: the user picks it, and `geo` is written as for a click.
-- **Map tiles** come from OpenStreetMap and are cached locally. Later they could be shared as a public channel in retifs, so maps work offline and over Reticulum.
+- **Map tiles** come from OpenStreetMap and are cached locally, for now. The direction is maps and address search from retifs alone, without the ordinary internet: [ADR-0028](0028-maps-over-retifs.md). The internet services below are fallbacks until then.
 - **Later: positions** reported over LXMF (Sideband's telemetry: place, altitude, speed, bearing, accuracy, time) become records of their own, `type = application/x-vnd.retifs.position` with `person:<contact id>`, `geo`, `at` and the rest, so the map shows where people were and are. That needs an LXMF receiver in Rust first.
 
 ## Impact on the threat model
