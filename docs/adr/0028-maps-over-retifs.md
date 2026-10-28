@@ -15,7 +15,7 @@ OpenStreetMap's data is open (ODbL), but its tile servers' usage policy forbids 
 - Any node may hold ciphertext and serve it (holders are never restricted).
 
 ## Decision
-- **A map is a public library**, published as a channel ([ADR-0016](0016-records-and-snapshots.md)). Its publisher builds it from an OpenStreetMap extract (for example Geofabrik's Estonia), and republishes it when the extract is updated.
+- **A map lives in a public library**, published as a channel ([ADR-0016](0016-records-and-snapshots.md)). Its publisher builds it from an OpenStreetMap extract (for example Geofabrik's Estonia), and republishes it when the extract is updated.
 - **Tiles:**
   - One record per tile, holding the tile as its content block.
   - Attributes: `path = /tiles/<z>/<x>/<y>.<ext>`, `tile:z`, `tile:x`, `tile:y`.
@@ -25,6 +25,7 @@ OpenStreetMap's data is open (ODbL), but its tile servers' usage policy forbids 
   - `name`, `bounds`, `minzoom`, `maxzoom`, `format`;
   - `attribution` ("© OpenStreetMap contributors"), `license` (ODbL), `source` and `source_date`;
   - a style (MapLibre style JSON) as a content block.
+- **A library has no kind** (vision 9): the same library may hold a map, its places, its addresses and anything else (a region's whole package, as OsmAnd's region files are), or only some of them, next to other data. Apps find what they use by type, never by what a library is called or meant for.
 - **Many maps, the user's choice:**
   - A map app finds maps in every library the user has joined, by their tileset records. It isn't tied to one map or one publisher.
   - The user adds a map as they add any public library, from its link. Examples are another country, a topographic or nautical map, a cycling map, a historical map, or a community's own map.
