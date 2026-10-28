@@ -22,9 +22,16 @@ A public library (a map, a country's places, a site, later an app store) is publ
   - `has`: what it holds, as the MIME types of its records with a count each, e.g. tileset 1, `application/x-vnd.retifs.place` 38822. Apps use this to show only what they can use (vision 9);
   - `bounds` (optional): west, south, east, north, for libraries tied to an area (maps, places);
   - `seq`: the channel's latest version, so a listener can see it's alive and current.
+  - `fmt`: the library's format version (channel and records), so a node knows before joining whether it can read it.
   - The whole app data stays under about 300 bytes, inside one announce.
 - **Listening:** every node keeps the library announces it hears (latest per destination, with the time heard and hop count), and answers `retifs heard` / the local API `HeardLibraries`.
 - **In the apps, an "Announces" view as in LXMF apps:** public libraries heard, newest first, with name, about, what they hold, hops and when. Each has a **Join** button (follows the channel lazily, ADR-0028). Each app shows the ones it can use: the map app the ones with tilesets or places in view, the desktop utility all of them.
+- **When it isn't compatible**, nothing breaks and nothing is joined that can't be used. Each kind of mismatch is shown for what it is:
+  1. **A newer announce** (`v` this node doesn't know): kept and listed as "needs a newer retifs", with only the fields it can read. Never parsed by guessing.
+  2. **A newer library format** (the channel and record formats, decision 2, carry their version; the announce repeats it as `fmt`): listed, but **Join** is off with "needs a newer retifs". Following it would fetch data the node can't read.
+  3. **Content no app here understands** (types in `has` that no installed app shows, say a music library on a device with only the map): each app lists only what it can use (vision 9). The desktop utility lists everything and says which of it nothing here opens. It can still be joined, to hold and pass on.
+  4. **Content an app half understands** (a map whose `format` or style the renderer can't draw, e.g. raster-only, or a style schema it doesn't know): the tileset record says what it is (`format`, `schema`, ADR-0028). The map app offers only maps it can draw, and says why it skips another ("this map needs raster support").
+  5. **Wrong for this device** (too big for the free space, or outside any area the user looks at): offered with its size, never joined without asking. Joining is lazy anyway (ADR-0028).
 - **The map app** can offer a heard map for the area on screen when it has none ("Eesti map heard from 2 nodes. Add?").
 
 ## Impact on the threat model
