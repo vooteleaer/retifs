@@ -3386,9 +3386,8 @@ async fn transaction(d: &Daemon, ns: &str, steps: Vec<TxStep>) -> Result<Vec<Rec
     for old in replaced.iter().filter(|b| !still_used.contains(&b.root)) {
         d.store.unneed_file(&old.root).map_err(|e| e.to_string())?;
     }
-    for gone in deleted.iter().filter(|b| !still_used.contains(&b.root)) {
-        forget(d, gone)?;
-    }
+    let gone: Vec<FileRef> = deleted.iter().filter(|b| !still_used.contains(&b.root)).cloned().collect();
+    forget_all(d, &gone)?;
     let mut out = Vec::new();
     for id in touched {
         let rec = d.store.get_record(ns, &id).map_err(|e| e.to_string())?.ok_or("record not visible after writing")?;
@@ -3649,14 +3648,12 @@ fn apply_keep(d: &Daemon, ns: &str, records: &[Record]) -> Result<(), String> {
             }
         }
     }
-    let mut released = 0;
-    for f in d.store.ns_kept(ns).map_err(|e| e.to_string())? {
-        if !keep.contains(&f.root) {
-            forget(d, &f)?;
-            d.store.set_ns_kept(ns, &f, false).map_err(|e| e.to_string())?;
-            released += 1;
-        }
+    let dropped: Vec<FileRef> = d.store.ns_kept(ns).map_err(|e| e.to_string())?.into_iter().filter(|f| !keep.contains(&f.root)).collect();
+    forget_all(d, &dropped)?;
+    for f in &dropped {
+        d.store.set_ns_kept(ns, f, false).map_err(|e| e.to_string())?;
     }
+    let released = dropped.len();
     if pulled > 0 || released > 0 {
         let how = if all { "everything".to_string() } else { format!("by tags and {} rule(s) for {}", rules.len(), d.device) };
         println!("ns {ns}: keeping {how}: {pulled} file(s) newly kept, {released} no longer kept");
@@ -4112,23 +4109,41 @@ fn parse_record_id(s: &str) -> Result<RecordId, String> {
 /// Ends this node's need for `cap` (ADR-0014): leases run out, own copies of
 /// chunks no other needed file uses become evictable.
 fn forget(d: &Daemon, cap: &FileRef) -> Result<(), String> {
+    forget_all(d, std::slice::from_ref(cap))
+}
+
+/// [`forget`] for many files at once: the chunks every other needed file
+/// uses are gathered once, not once per file (deleting thousands of records
+/// in one transaction was quadratic).
+fn forget_all(d: &Daemon, caps: &[FileRef]) -> Result<(), String> {
+    if caps.is_empty() {
+        return Ok(());
+    }
+    let going: std::collections::HashSet<Cid> = caps.iter().map(|c| c.root).collect();
     // Chunks other needed files still use stay (versions share most of theirs).
     let mut keep = std::collections::HashSet::new();
     for other in d.store.needed_files().map_err(|e| e.to_string())? {
-        if other.root != cap.root {
+        if !going.contains(&other.root) {
             keep.extend(file_chunks(&d.store, &other).unwrap_or_default().into_iter().map(|(c, _)| c));
         }
     }
-    let all: Vec<Cid> = file_chunks(&d.store, cap).unwrap_or_default().into_iter().map(|(c, _)| c).collect();
-    let shared = all.iter().filter(|c| keep.contains(c)).count();
-    let mine: Vec<Cid> = all.into_iter().filter(|c| !keep.contains(c)).collect();
-    let leases = d.store.forget_file(&cap.root).map_err(|e| e.to_string())?;
-    let released = d.store.release_chunks(&mine).map_err(|e| e.to_string())?;
-    d.deferred.lock().unwrap().remove(&cap.root);
-    println!(
-        "forget {}: {leases} lease(s) no longer serve it, {released} chunk(s) evictable, {shared} kept (other needed files use them)",
-        cap.root
-    );
+    for cap in caps {
+        let all: Vec<Cid> = file_chunks(&d.store, cap).unwrap_or_default().into_iter().map(|(c, _)| c).collect();
+        let shared = all.iter().filter(|c| keep.contains(c)).count();
+        let mine: Vec<Cid> = all.into_iter().filter(|c| !keep.contains(c)).collect();
+        let leases = d.store.forget_file(&cap.root).map_err(|e| e.to_string())?;
+        let released = d.store.release_chunks(&mine).map_err(|e| e.to_string())?;
+        d.deferred.lock().unwrap().remove(&cap.root);
+        if caps.len() == 1 {
+            println!(
+                "forget {}: {leases} lease(s) no longer serve it, {released} chunk(s) evictable, {shared} kept (other needed files use them)",
+                cap.root
+            );
+        }
+    }
+    if caps.len() > 1 {
+        println!("forget: {} files no longer needed here", caps.len());
+    }
     Ok(())
 }
 
@@ -4234,9 +4249,8 @@ async fn follow_pass(d: &Daemon, mut f: retifs_store::Follow) -> Result<(), Stri
         && version_complete
     {
         let keep: std::collections::HashSet<Cid> = files.iter().map(|x| x.root).collect();
-        for old in version_files(&d.store, &prev).iter().filter(|x| !keep.contains(&x.root)) {
-            forget(d, old)?;
-        }
+        let old: Vec<FileRef> = version_files(&d.store, &prev).into_iter().filter(|x| !keep.contains(&x.root)).collect();
+        forget_all(d, &old)?;
         f.previous = None;
         d.store.update_follow(&f).map_err(|e| e.to_string())?;
     }
