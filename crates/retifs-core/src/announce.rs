@@ -133,24 +133,35 @@ fn cut(s: &str, max: usize) -> &str {
 }
 
 /// The most app data a library announce carries: a Reticulum announce has
-/// room for about 330 bytes; this leaves a margin.
-pub const APP_DATA_MAX: usize = 280;
+/// room for 316 bytes (an MTU of 500 less the header and the announce's
+/// keys, name hash, random part and signature); this leaves a margin.
+pub const APP_DATA_MAX: usize = 300;
 
-/// The app data of a library's announce, cut to fit `APP_DATA_MAX`: the least
-/// common types go first, then the description gets shorter.
+/// How short the description may get before types are left out: what a
+/// library holds tells apps whether it's for them, so it matters more.
+pub const ABOUT_MIN: usize = 24;
+
+/// The app data of a library's announce, cut to fit `APP_DATA_MAX`. retifs'
+/// own records (`retifs.*`: placement, shares) aren't content and aren't
+/// listed. Then the description gets shorter, down to `ABOUT_MIN`, then the
+/// least common types go (a single map record is worth more than that, but
+/// the order is the publisher's to choose: the most telling first).
 pub fn library_app_data(l: &LibraryAnnounce) -> Vec<u8> {
     let mut l = l.clone();
+    l.has.retain(|(t, _)| !t.starts_with("retifs."));
     l.has.truncate(HAS_MAX);
     loop {
         let out = encode_library(&l);
         if out.len() <= APP_DATA_MAX {
             return out;
         }
-        if l.has.len() > 1 {
+        if l.about.len() > ABOUT_MIN {
+            let keep = l.about.len().saturating_sub(out.len() - APP_DATA_MAX).max(ABOUT_MIN);
+            l.about = cut(&l.about, keep).to_string();
+        } else if l.has.len() > 1 {
             l.has.pop();
         } else if !l.about.is_empty() {
-            let keep = l.about.len().saturating_sub(out.len() - APP_DATA_MAX).min(l.about.len() - 1);
-            l.about = cut(&l.about, keep).to_string();
+            l.about.clear();
         } else {
             l.has.clear();
             l.bounds = None;
@@ -287,15 +298,19 @@ mod tests {
         };
         let data = library_app_data(&l);
         assert!(data.len() <= APP_DATA_MAX, "{} bytes", data.len());
-        // The least common type went to make room; the rest is as it was.
+        // The description got shorter to make room; every type is still there.
         let read = library_announce(&data).unwrap().1.unwrap();
-        assert_eq!(read, LibraryAnnounce { has: l.has[..2].to_vec(), ..l.clone() });
+        assert_eq!(read.has, l.has);
+        assert!(read.about.len() >= ABOUT_MIN && l.about.starts_with(&read.about), "{}", read.about);
+        // retifs' own records aren't listed.
+        let own = LibraryAnnounce { has: vec![("application/x-vnd.retifs.place".into(), 5), ("retifs.placement".into(), 1)], ..l.clone() };
+        assert_eq!(library_announce(&library_app_data(&own)).unwrap().1.unwrap().has, vec![("application/x-vnd.retifs.place".to_string(), 5)]);
         let small = LibraryAnnounce { has: l.has[..1].to_vec(), ..l.clone() };
         assert_eq!(library_announce(&library_app_data(&small)), Some((1, Some(small))));
         // Too long: cut, still read.
         let long = LibraryAnnounce { name: "ä".repeat(40), about: "x".repeat(200), has: (0..20).map(|i| (format!("t/{i}"), i)).collect(), bounds: None, ..l.clone() };
         let read = library_announce(&library_app_data(&long)).unwrap().1.unwrap();
-        assert_eq!((read.name.len(), read.about.len()), (32, 80));
+        assert_eq!(read.name.len(), 32);
         assert!(!read.has.is_empty() && read.has.len() <= HAS_MAX && library_app_data(&long).len() <= APP_DATA_MAX);
         // A node's announce isn't a library's; a newer one says only its v.
         assert_eq!(library_announce(&node_app_data(600, None, true)), None);

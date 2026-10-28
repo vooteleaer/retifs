@@ -23,7 +23,7 @@ A public library (a map, a country's places, a site, later an app store) is publ
   - `bounds` (optional): west, south, east, north, for libraries tied to an area (maps, places);
   - `seq`: the channel's latest version, so a listener can see it's alive and current.
   - `fmt`: the library's format version (channel and records), so a node knows before joining whether it can read it.
-  - The whole app data stays within 280 bytes (an announce has room for about 330): the least common types are left out first, then the description is shortened.
+  - The whole app data stays within 300 bytes (an announce has room for 316). `retifs.*` records (placement, shares) aren't content and aren't listed; to fit, the description is shortened first (to 24 bytes), then the least common types are left out.
 - **Listening:** every node keeps the library announces it hears (the latest per library, with the announcing node, hop count and time heard; at most 500, the oldest dropped), and answers `retifs heard` / the local API `HeardLibraries`, which also says which of them are here already.
 - **In the apps, an "Announces" view as in LXMF apps:** public libraries heard, newest first, with name, about, what they hold, hops and when. Each has a **Join** button (follows the channel lazily, ADR-0028). Each app shows the ones it can use: the map app the ones with tilesets or places in view, the desktop utility all of them.
 - **When it isn't compatible**, the general rules of [ADR-0030](0030-data-outlives-apps.md) apply: nothing breaks, and nothing is joined that can't be used. For announced libraries they mean:
