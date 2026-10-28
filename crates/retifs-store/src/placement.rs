@@ -167,7 +167,7 @@ impl SlabStore {
     /// A `retifs.node` announce was heard `hops` away, saying it announces
     /// every `announce_s` seconds (None: it didn't say).
     pub fn heard_storage_node(&self, peer: &PeerId, hops: u8, announce_s: Option<u32>, site: Option<[u8; 8]>, now_ms: u64) -> Result<(), StoreError> {
-        let w = self.db.begin_write()?;
+        let w = self.write()?;
         {
             let mut t = w.open_table(STORAGE_NODES)?;
             let old = t.get(peer.as_slice())?.map(|v| parse_node(*peer, v.value()));
@@ -200,7 +200,7 @@ impl SlabStore {
     /// Forgets storage nodes silent for longer than `silent(node)` ms at
     /// `now_ms` (gone test nodes, replaced identities). Returns how many.
     pub fn forget_silent_storage_nodes(&self, now_ms: u64, silent: impl Fn(&StorageNode) -> u64) -> Result<usize, StoreError> {
-        let w = self.db.begin_write()?;
+        let w = self.write()?;
         let mut n = 0;
         {
             let mut t = w.open_table(STORAGE_NODES)?;
@@ -222,7 +222,7 @@ impl SlabStore {
 
     /// Don't offer `peer` leases until `until_ms` (no room, unreachable).
     pub fn avoid_storage_node(&self, peer: &PeerId, until_ms: u64) -> Result<(), StoreError> {
-        let w = self.db.begin_write()?;
+        let w = self.write()?;
         {
             let mut t = w.open_table(STORAGE_NODES)?;
             let old = t.get(peer.as_slice())?.map(|v| parse_node(*peer, v.value()));
@@ -237,7 +237,7 @@ impl SlabStore {
 
     /// Records one upkeep contact with a holder.
     pub fn holder_result(&self, peer: &PeerId, ok: bool, now_ms: u64) -> Result<HolderStats, StoreError> {
-        let w = self.db.begin_write()?;
+        let w = self.write()?;
         let s = {
             let mut t = w.open_table(HOLDER_STATS)?;
             let mut s = t.get(peer.as_slice())?.map(|v| parse_stats(v.value())).unwrap_or_default();
@@ -285,7 +285,7 @@ impl SlabStore {
     }
 
     fn update_quality(&self, peer: &PeerId, f: impl FnOnce(&mut LinkQuality)) -> Result<(), StoreError> {
-        let w = self.db.begin_write()?;
+        let w = self.write()?;
         {
             let mut t = w.open_table(LINK_QUALITY)?;
             let mut q = t.get(peer.as_slice())?.map(|v| parse_quality(v.value())).unwrap_or_default();
@@ -299,7 +299,7 @@ impl SlabStore {
 
     /// This node needs `file` kept (it wrote or sought it).
     pub fn need_file(&self, file: &FileRef) -> Result<(), StoreError> {
-        let w = self.db.begin_write()?;
+        let w = self.write()?;
         {
             let v = [&file.seed.0[..], &file.size.to_be_bytes()].concat();
             w.open_table(NEEDED)?.insert(file.root.as_bytes().as_slice(), v.as_slice())?;
@@ -319,7 +319,7 @@ impl SlabStore {
     /// holders release the chunks when the leases run out. Returns how many
     /// leases were dropped. Chunks stay where they are; see `release_chunks`.
     pub fn forget_file(&self, root: &Cid) -> Result<usize, StoreError> {
-        let w = self.db.begin_write()?;
+        let w = self.write()?;
         w.open_table(NEEDED)?.remove(root.as_bytes().as_slice())?;
         w.commit()?;
         let n = self.unlist_root(root, None)?;
@@ -332,7 +332,7 @@ impl SlabStore {
     /// Stops keeping `root` elsewhere (no longer needed, leases run out) but
     /// leaves the local copy as it is: an older version kept here as history.
     pub fn unneed_file(&self, root: &Cid) -> Result<usize, StoreError> {
-        let w = self.db.begin_write()?;
+        let w = self.write()?;
         w.open_table(NEEDED)?.remove(root.as_bytes().as_slice())?;
         w.commit()?;
         self.unlist_root(root, None)
@@ -354,7 +354,7 @@ impl SlabStore {
                 }
             }
         }
-        let w = self.db.begin_write()?;
+        let w = self.write()?;
         {
             let mut serve = w.open_table(crate::SERVE)?;
             let mut published = w.open_table(crate::PUBLISHED)?;

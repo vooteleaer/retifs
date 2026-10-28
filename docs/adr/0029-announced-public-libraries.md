@@ -21,10 +21,11 @@ A public library (a map, a country's places, a site, later an app store) is publ
   - `ch` (64 bytes): the channel's writer key and read key, so the library can be followed directly. It's public: the read key of a public library is meant to be known;
   - `has`: what it holds, as the MIME types of its records with a count each, e.g. tileset 1, `application/x-vnd.retifs.place` 38822. Apps use this to show only what they can use (vision 9);
   - `bounds` (optional): west, south, east, north, for libraries tied to an area (maps, places);
+  - `node` (16 bytes): the announcing node's `retifs.node` address, which serves the library (the `retifs.library` destination itself serves nothing; joining asks this node first);
   - `seq`: the channel's latest version, so a listener can see it's alive and current.
   - `fmt`: the library's format version (channel and records), so a node knows before joining whether it can read it.
   - The whole app data stays within 300 bytes (an announce has room for 316). `retifs.*` records (placement, shares) aren't content and aren't listed; to fit, the description is shortened first (to 24 bytes), then the least common types are left out.
-- **Listening:** every node keeps the library announces it hears (the latest per library, with the announcing node, hop count and time heard; at most 500, the oldest dropped), and answers `retifs heard` / the local API `HeardLibraries`, which also says which of them are here already.
+- **Listening:** every node keeps the library announces it hears (the latest per library, with the announcing node (its `retifs.node` address, from the announcing identity: joining asks it first), hop count and time heard; at most 500, the oldest dropped), and answers `retifs heard` / the local API `HeardLibraries`, which also says which of them are here already.
 - **In the apps, an "Announces" view as in LXMF apps:** public libraries heard, newest first, with name, about, what they hold, hops and when. Each has a **Join** button (follows the channel lazily, ADR-0028). Each app shows the ones it can use: the map app the ones with tilesets or places in view, the desktop utility all of them.
 - **When it isn't compatible**, the general rules of [ADR-0030](0030-data-outlives-apps.md) apply: nothing breaks, and nothing is joined that can't be used. For announced libraries they mean:
   1. **A newer announce** (`v` this node doesn't know): kept and listed as "needs a newer retifs", with only the fields it can read. Never parsed by guessing.

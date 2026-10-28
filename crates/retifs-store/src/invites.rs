@@ -43,7 +43,7 @@ fn decode(v: &[u8]) -> Option<MadeInvite> {
 
 impl SlabStore {
     pub fn put_invite(&self, m: &MadeInvite) -> Result<(), StoreError> {
-        let w = self.db.begin_write()?;
+        let w = self.write()?;
         w.open_table(INVITES)?.insert(m.invitation.id().as_slice(), encode(m).as_slice())?;
         w.commit()?;
         Ok(())
@@ -67,14 +67,14 @@ impl SlabStore {
     }
 
     pub fn remove_invite(&self, id: &[u8; 32]) -> Result<bool, StoreError> {
-        let w = self.db.begin_write()?;
+        let w = self.write()?;
         let removed = w.open_table(INVITES)?.remove(id.as_slice())?.is_some();
         w.commit()?;
         Ok(removed)
     }
 
     pub fn put_redeem(&self, ns: &str, invitation: &Invitation) -> Result<(), StoreError> {
-        let w = self.db.begin_write()?;
+        let w = self.write()?;
         w.open_table(REDEEMS)?.insert(ns, invitation.encode().as_slice())?;
         w.commit()?;
         Ok(())
@@ -94,7 +94,7 @@ impl SlabStore {
     }
 
     pub fn remove_redeem(&self, ns: &str) -> Result<(), StoreError> {
-        let w = self.db.begin_write()?;
+        let w = self.write()?;
         w.open_table(REDEEMS)?.remove(ns)?;
         w.commit()?;
         Ok(())

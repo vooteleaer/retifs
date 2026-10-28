@@ -155,7 +155,7 @@ impl SlabStore {
     /// Chunks already local get the SERVING flag at once; the rest are pulled.
     pub fn accept_lease(&self, lease: &Lease, sources: &[PeerId], hold_limit: u64) -> Result<Accept, StoreError> {
         let id = lease.id.as_slice();
-        let w = self.db.begin_write()?;
+        let w = self.write()?;
         {
             let mut leases = w.open_table(LEASES)?;
             if let Some(old) = leases.get(id)? {
@@ -193,7 +193,7 @@ impl SlabStore {
 
     /// Moves a held lease's expiry, if the renewal is signed by its signer and later.
     pub fn renew_lease(&self, renewal: &Renewal) -> Result<bool, StoreError> {
-        let w = self.db.begin_write()?;
+        let w = self.write()?;
         let ok = {
             let mut leases = w.open_table(LEASES)?;
             let found = leases.get(renewal.id.as_slice())?.map(|v| v.value().to_vec());
@@ -292,7 +292,7 @@ impl SlabStore {
                 .collect()
         };
         for lease in &expired {
-            let w = self.db.begin_write()?;
+            let w = self.write()?;
             let mut orphans = Vec::new();
             {
                 w.open_table(LEASES)?.remove(lease.id.as_slice())?;
@@ -323,7 +323,7 @@ impl SlabStore {
                     None => gone.push(cid),
                 }
             }
-            let w = self.db.begin_write()?;
+            let w = self.write()?;
             {
                 let mut serve = w.open_table(SERVE)?;
                 for cid in gone {
@@ -361,7 +361,7 @@ impl SlabStore {
             receipt_until: 0,
             proof: ProofState::Unchecked,
         };
-        let w = self.db.begin_write()?;
+        let w = self.write()?;
         w.open_table(OWN_LEASES)?.insert(lease.id.as_slice(), own_value(&own).as_slice())?;
         w.commit()?;
         Ok(())
@@ -381,7 +381,7 @@ impl SlabStore {
 
     /// Stops tracking an own lease (it's not renewed and runs out).
     pub fn remove_own_lease(&self, id: &LeaseId) -> Result<(), StoreError> {
-        let w = self.db.begin_write()?;
+        let w = self.write()?;
         w.open_table(OWN_LEASES)?.remove(id.as_slice())?;
         w.commit()?;
         Ok(())
@@ -397,7 +397,7 @@ impl SlabStore {
             .into_iter()
             .filter(|o| holder.is_none_or(|h| o.holder == *h))
             .collect();
-        let w = self.db.begin_write()?;
+        let w = self.write()?;
         {
             let mut t = w.open_table(OWN_LEASES)?;
             for mut o in affected.iter().cloned() {
@@ -415,7 +415,7 @@ impl SlabStore {
     }
 
     pub fn update_own_lease(&self, own: &OwnLease) -> Result<(), StoreError> {
-        let w = self.db.begin_write()?;
+        let w = self.write()?;
         w.open_table(OWN_LEASES)?.insert(own.lease.id.as_slice(), own_value(own).as_slice())?;
         w.commit()?;
         Ok(())

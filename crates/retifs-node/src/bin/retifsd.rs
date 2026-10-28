@@ -800,6 +800,7 @@ fn library_announce_now(d: &Daemon, ns: &str, name: &str, about: &str) -> Result
         has,
         bounds: bounds.or(extent),
         seq,
+        node: Some(d.node_id),
     })
 }
 
@@ -1101,10 +1102,21 @@ async fn serve(store: Arc<SlabStore>, identity: node::IdentitySecret, endpoint: 
     // oldest dropped beyond HEARD_LIBS_MAX.
     let listener = daemon.clone();
     tokio::spawn(async move {
-        while let Some((node, hops, v, lib)) = lib_rx.recv().await {
-            if node == *lib_hash.as_bytes() {
+        while let Some((from, hops, v, lib)) = lib_rx.recv().await {
+            if from == *lib_hash.as_bytes() {
                 continue;
             }
+            // The announcing node's retifs.node address (its identity's other
+            // destination): where joining asks first.
+            // The announce says (`node`); else from the announcing identity.
+            let Some(dest) = parse_destination(&hex(&from)) else { continue };
+            let node = match lib.as_ref().and_then(|l| l.node) {
+                Some(n) => n,
+                None => match listener.transport.handle.destination_identity(DestinationIdentityQuery::Destination(dest)).await {
+                    Some(id) => node_destination(id.public.as_bytes()),
+                    None => from,
+                },
+            };
             let key = match &lib {
                 Some(l) => [l.writer, l.read_key].concat(),
                 None => [node.as_slice(), &v.to_be_bytes()].concat(),
@@ -2023,6 +2035,40 @@ async fn handle(d: &Daemon, req: Request) -> Result<Response, String> {
                 set_announced(&d.store, &ns, None)?;
             }
             d.lib_wake.notify_one();
+            Ok(Response::Done)
+        }
+        Request::NsLeave { ns, mine } => {
+            if ns.starts_with("ch-") {
+                return Err(format!("{ns} is a followed channel, not a joined library"));
+            }
+            let (creator, _) = d.store.ns_info(&ns).map_err(|e| e.to_string())?.ok_or_else(|| format!("no library {ns}"))?;
+            let (_, own, _) = chains(d, &ns, false)?;
+            if creator == own && !mine {
+                return Err(format!("{ns} was created here: leaving it deletes it unless someone else holds it (repeat with --mine)"));
+            }
+            // Its files: what its records name, its checkpoint, what it kept;
+            // those no other library here uses are forgotten.
+            let mut files: Vec<FileRef> = d.store.records(&ns).map_err(|e| e.to_string())?.into_iter().flat_map(|r| r.blocks).collect();
+            files.extend(d.store.ns_checkpoint(&ns).map_err(|e| e.to_string())?);
+            files.extend(d.store.ns_kept(&ns).map_err(|e| e.to_string())?);
+            let others: std::collections::HashSet<Cid> = d
+                .store
+                .namespaces()
+                .map_err(|e| e.to_string())?
+                .iter()
+                .filter(|n| **n != ns)
+                .flat_map(|n| d.store.records(n).unwrap_or_default())
+                .flat_map(|r| r.blocks.into_iter().map(|b| b.root))
+                .collect();
+            let mut seen = std::collections::HashSet::new();
+            files.retain(|f| !others.contains(&f.root) && seen.insert(f.root));
+            forget_all(d, &files)?;
+            set_announced(&d.store, &ns, None)?;
+            d.store.leave_namespace(&ns).map_err(|e| e.to_string())?;
+            d.ns_cache.lock().unwrap().remove(&ns);
+            d.ns_seeking.lock().unwrap().remove(&ns);
+            d.changes.lock().unwrap().remove(&ns);
+            println!("left {ns}: {} file(s) no longer needed here", files.len());
             Ok(Response::Done)
         }
         Request::HeardLibraries => {
@@ -4337,20 +4383,27 @@ fn forget_all(d: &Daemon, caps: &[FileRef]) -> Result<(), String> {
             keep.extend(file_chunks(&d.store, &other).unwrap_or_default().into_iter().map(|(c, _)| c));
         }
     }
-    for cap in caps {
-        let all: Vec<Cid> = file_chunks(&d.store, cap).unwrap_or_default().into_iter().map(|(c, _)| c).collect();
-        let shared = all.iter().filter(|c| keep.contains(c)).count();
-        let mine: Vec<Cid> = all.into_iter().filter(|c| !keep.contains(c)).collect();
-        let leases = d.store.forget_file(&cap.root).map_err(|e| e.to_string())?;
-        let released = d.store.release_chunks(&mine).map_err(|e| e.to_string())?;
-        d.deferred.lock().unwrap().remove(&cap.root);
-        if caps.len() == 1 {
-            println!(
-                "forget {}: {leases} lease(s) no longer serve it, {released} chunk(s) evictable, {shared} kept (other needed files use them)",
-                cap.root
-            );
-        }
-    }
+    // One durable commit for the lot, not several per file (leaving a
+    // library of 95,000 tiles took about an hour of fsyncs otherwise).
+    d.store
+        .bulk(|| -> Result<(), String> {
+            for cap in caps {
+                let all: Vec<Cid> = file_chunks(&d.store, cap).unwrap_or_default().into_iter().map(|(c, _)| c).collect();
+                let shared = all.iter().filter(|c| keep.contains(c)).count();
+                let mine: Vec<Cid> = all.into_iter().filter(|c| !keep.contains(c)).collect();
+                let leases = d.store.forget_file(&cap.root).map_err(|e| e.to_string())?;
+                let released = d.store.release_chunks(&mine).map_err(|e| e.to_string())?;
+                d.deferred.lock().unwrap().remove(&cap.root);
+                if caps.len() == 1 {
+                    println!(
+                        "forget {}: {leases} lease(s) no longer serve it, {released} chunk(s) evictable, {shared} kept (other needed files use them)",
+                        cap.root
+                    );
+                }
+            }
+            Ok(())
+        })
+        .map_err(|e| e.to_string())??;
     if caps.len() > 1 {
         println!("forget: {} files no longer needed here", caps.len());
     }

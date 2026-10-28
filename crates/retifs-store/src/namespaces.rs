@@ -11,7 +11,7 @@
 //! KEY_HEADS        ns_id (16) ‖ writer (32) ‖ key id (16) → that writer's latest head under that key
 //! ```
 
-use redb::TableDefinition;
+use redb::{ReadableTable, TableDefinition};
 use retifs_core::{channel::NsId, Cid, Seed};
 
 use crate::{wants::PeerId, SlabStore, StoreError};
@@ -66,7 +66,7 @@ pub struct WriterHead {
 impl SlabStore {
     /// Which namespace `name` is: its creator and read key.
     pub fn set_ns_info(&self, name: &str, creator: &[u8; 32], read_key: &[u8; 32]) -> Result<(), StoreError> {
-        let w = self.db.begin_write()?;
+        let w = self.write()?;
         w.open_table(NS_INFO)?.insert(name, [creator.as_slice(), read_key].concat().as_slice())?;
         w.commit()?;
         Ok(())
@@ -83,7 +83,7 @@ impl SlabStore {
 
     /// This node's writer identity in namespace `name` (X25519 secret ‖ Ed25519 seed).
     pub fn set_ns_identity(&self, name: &str, identity: &[u8; 64]) -> Result<(), StoreError> {
-        let w = self.db.begin_write()?;
+        let w = self.write()?;
         w.open_table(NS_IDENTITY)?.insert(name, identity.as_slice())?;
         w.commit()?;
         Ok(())
@@ -102,8 +102,37 @@ impl SlabStore {
         }))
     }
 
+    /// Leaves namespace `name` here: its records and index, keys, writer
+    /// identity, peers, checkpoints, keep settings and member channel. The
+    /// files its records name are the caller's to forget first. Others'
+    /// copies and other members aren't touched.
+    pub fn leave_namespace(&self, name: &str) -> Result<(), StoreError> {
+        self.remove_records_of(name)?;
+        let kept_prefix = [name.as_bytes(), &[0]].concat();
+        let w = self.write()?;
+        {
+            for t in [NS_INFO, NS_PEERS, NS_IDENTITY, NS_KEYS, NS_CHECKPOINT, NS_CHECKPOINT_PUBLISHED] {
+                w.open_table(t)?.remove(name)?;
+            }
+            w.open_table(NS_KEEP_MODE)?.remove(name)?;
+            w.open_table(NS_LAZY)?.remove(name)?;
+            w.open_table(MEMBER_CHANNELS)?.remove(format!("ns:{name}").as_str())?;
+            let mut kept = w.open_table(NS_KEPT)?;
+            let keys: Vec<Vec<u8>> = kept
+                .range(kept_prefix.as_slice()..)?
+                .map_while(|e| e.ok().map(|(k, _)| k.value().to_vec()).filter(|k| k.starts_with(&kept_prefix)))
+                .collect();
+            for k in keys {
+                kept.remove(k.as_slice())?;
+            }
+        }
+        w.commit()?;
+        self.remove_own_channel(&format!("ns:{name}"))?;
+        Ok(())
+    }
+
     pub fn remove_ns_checkpoint(&self, name: &str) -> Result<(), StoreError> {
-        let w = self.db.begin_write()?;
+        let w = self.write()?;
         w.open_table(NS_CHECKPOINT)?.remove(name)?;
         w.commit()?;
         Ok(())
@@ -111,7 +140,7 @@ impl SlabStore {
 
     pub fn set_ns_checkpoint(&self, name: &str, file: &retifs_core::FileRef) -> Result<(), StoreError> {
         let v = [file.root.as_bytes().as_slice(), &file.seed.0, &file.size.to_be_bytes()].concat();
-        let w = self.db.begin_write()?;
+        let w = self.write()?;
         w.open_table(NS_CHECKPOINT)?.insert(name, v.as_slice())?;
         w.commit()?;
         Ok(())
@@ -130,14 +159,14 @@ impl SlabStore {
     }
 
     pub fn set_ns_lazy(&self, name: &str, lazy: bool) -> Result<(), StoreError> {
-        let w = self.db.begin_write()?;
+        let w = self.write()?;
         w.open_table(NS_LAZY)?.insert(name, lazy as u8)?;
         w.commit()?;
         Ok(())
     }
 
     pub fn set_ns_keep_by_rules(&self, name: &str, by_rules: bool) -> Result<(), StoreError> {
-        let w = self.db.begin_write()?;
+        let w = self.write()?;
         w.open_table(NS_KEEP_MODE)?.insert(name, by_rules as u8)?;
         w.commit()?;
         Ok(())
@@ -168,7 +197,7 @@ impl SlabStore {
 
     pub fn set_ns_kept(&self, name: &str, file: &retifs_core::FileRef, kept: bool) -> Result<(), StoreError> {
         let key = [name.as_bytes(), &[0], file.root.as_bytes().as_slice()].concat();
-        let w = self.db.begin_write()?;
+        let w = self.write()?;
         {
             let mut t = w.open_table(NS_KEPT)?;
             if kept {
@@ -188,7 +217,7 @@ impl SlabStore {
     }
 
     pub fn set_ns_checkpoint_published(&self, name: &str, root: &Cid) -> Result<(), StoreError> {
-        let w = self.db.begin_write()?;
+        let w = self.write()?;
         w.open_table(NS_CHECKPOINT_PUBLISHED)?.insert(name, root.as_bytes().as_slice())?;
         w.commit()?;
         Ok(())
@@ -217,7 +246,7 @@ impl SlabStore {
             return Ok(false);
         }
         keys.push(*key);
-        let w = self.db.begin_write()?;
+        let w = self.write()?;
         w.open_table(NS_KEYS)?.insert(name, keys[1..].concat().as_slice())?;
         w.commit()?;
         Ok(true)
@@ -227,7 +256,7 @@ impl SlabStore {
     /// (own or fetched): lets members cross a key rotation (ADR-0017).
     pub fn set_key_head(&self, ns_id: &NsId, writer: &[u8; 32], key_id: &[u8; 16], head: &[u8]) -> Result<(), StoreError> {
         let key = [ns_id.as_slice(), writer, key_id].concat();
-        let w = self.db.begin_write()?;
+        let w = self.write()?;
         w.open_table(KEY_HEADS)?.insert(key.as_slice(), head)?;
         w.commit()?;
         Ok(())
@@ -255,7 +284,7 @@ impl SlabStore {
                 all.push(*p);
             }
         }
-        let w = self.db.begin_write()?;
+        let w = self.write()?;
         w.open_table(NS_PEERS)?.insert(name, all.concat().as_slice())?;
         w.commit()?;
         Ok(())
@@ -271,7 +300,7 @@ impl SlabStore {
 
     /// Own channel `channel` writes to namespace `ns_id` (not its own).
     pub fn set_member_channel(&self, channel: &str, ns_id: &NsId) -> Result<(), StoreError> {
-        let w = self.db.begin_write()?;
+        let w = self.write()?;
         w.open_table(MEMBER_CHANNELS)?.insert(channel, ns_id.as_slice())?;
         w.commit()?;
         Ok(())
@@ -285,7 +314,7 @@ impl SlabStore {
     pub fn set_writer_head(&self, ns_id: &NsId, h: &WriterHead) -> Result<(), StoreError> {
         let key = [ns_id.as_slice(), &h.writer].concat();
         let value = [h.head.as_slice(), h.commit.0.as_bytes(), &h.commit.1.0].concat();
-        let w = self.db.begin_write()?;
+        let w = self.write()?;
         w.open_table(WRITER_HEADS)?.insert(key.as_slice(), value.as_slice())?;
         w.commit()?;
         Ok(())

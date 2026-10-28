@@ -133,3 +133,24 @@ fn string_terms_match_exactly_not_by_prefix() {
     assert_eq!(q(&st, "album>=a7"), vec![1, 2, 3, 4]);
     assert_eq!(q(&st, "album^=a7"), vec![1, 2, 3]);
 }
+
+#[test]
+fn leaving_a_namespace_leaves_the_others() {
+    let (_d, st) = store();
+    let s = |v: &str| Value::Str(v.into());
+    // "map" and "map2": one name a prefix of the other, nothing of map2 may go.
+    st.put_record("map", &rec(1, &[("type", s("image"))])).unwrap();
+    st.put_record("map", &rec(2, &[("type", s("place"))])).unwrap();
+    st.put_record("map2", &rec(3, &[("type", s("image"))])).unwrap();
+    st.set_ns_info("map", &[1; 32], &[2; 32]).unwrap();
+    st.set_ns_info("map2", &[3; 32], &[4; 32]).unwrap();
+    st.leave_namespace("map").unwrap();
+    assert_eq!(st.namespaces().unwrap(), vec!["map2".to_string()]);
+    assert!(st.records("map").unwrap().is_empty() && st.ns_info("map").unwrap().is_none());
+    assert_eq!(ids(st.records("map2").unwrap()), vec![3]);
+    assert_eq!(ids(st.query("map2", &[Term::parse("type=image").unwrap()]).unwrap()), vec![3]);
+    assert!(st.query("map", &[Term::parse("type=image").unwrap()]).unwrap().is_empty(), "its index went too");
+    // Joined again later: empty, as new.
+    st.put_record("map", &rec(5, &[("type", s("image"))])).unwrap();
+    assert_eq!(ids(st.records("map").unwrap()), vec![5]);
+}

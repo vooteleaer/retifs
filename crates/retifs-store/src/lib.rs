@@ -216,6 +216,9 @@ pub struct SlabStore {
     root: PathBuf,
     pub(crate) db: Database,
     sync: bool,
+    /// Batches under way (`bulk`): commits meanwhile aren't each forced to
+    /// disk; the batch's last one is, which makes the earlier ones durable too.
+    bulk: std::sync::atomic::AtomicUsize,
     budget: RwLock<Budget>,
     /// Recent accesses not yet written to the ACCESS table.
     touched: Mutex<HashMap<Cid, u64>>,
@@ -263,6 +266,7 @@ impl SlabStore {
             root,
             db,
             sync: true,
+            bulk: std::sync::atomic::AtomicUsize::new(0),
             budget: RwLock::new(Budget::default()),
             touched: Mutex::new(HashMap::new()),
             disk: Mutex::new(None),
@@ -273,6 +277,28 @@ impl SlabStore {
     /// fsynced, since they can be refetched. Off only for tests and benchmarks.
     pub fn set_sync(&mut self, on: bool) {
         self.sync = on;
+    }
+
+    /// A write transaction: durable, unless a batch is under way (see `bulk`).
+    pub(crate) fn write(&self) -> Result<redb::WriteTransaction, redb::TransactionError> {
+        let mut w = self.db.begin_write()?;
+        if self.bulk.load(std::sync::atomic::Ordering::Relaxed) > 0 {
+            w.set_durability(redb::Durability::None);
+        }
+        Ok(w)
+    }
+
+    /// Runs `f`, a batch of many small writes (forgetting thousands of files),
+    /// without forcing each commit to disk, then commits durably once: a crash
+    /// in between loses the batch (repeating it finishes it), never corrupts.
+    pub fn bulk<T>(&self, f: impl FnOnce() -> T) -> Result<T, StoreError> {
+        self.bulk.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        let out = f();
+        if self.bulk.fetch_sub(1, std::sync::atomic::Ordering::Relaxed) == 1 {
+            let w = self.db.begin_write()?;
+            w.commit()?;
+        }
+        Ok(out)
     }
 
     /// The directory the store lives in.
@@ -298,7 +324,7 @@ impl SlabStore {
         if let Some((c, seg, slot, flags)) = self.lookup(cid)? {
             // Already stored: merge flags, moving its bytes between tiers if needed.
             if flags | tier != flags {
-                let w = self.db.begin_write()?;
+                let w = self.write()?;
                 {
                     w.open_table(INDEX)?.insert(key, (c, seg, slot, flags | tier))?;
                     move_usage(&w, Tier::of(flags), Tier::of(flags | tier), SLOT_SIZES[c as usize] as u64)?;
@@ -316,7 +342,7 @@ impl SlabStore {
         // Only pinned data (own writes) must survive a crash; cached and served
         // chunks can be fetched again, so they skip fsync of both slot and index.
         let durable = self.sync && tier & tier::PINNED != 0;
-        let mut w = self.db.begin_write()?;
+        let mut w = self.write()?;
         if !durable {
             w.set_durability(redb::Durability::None);
         }
@@ -361,7 +387,7 @@ impl SlabStore {
             return Ok(out);
         }
         let durable = self.sync && tier & tier::PINNED != 0;
-        let mut w = self.db.begin_write()?;
+        let mut w = self.write()?;
         if !durable {
             w.set_durability(redb::Durability::None);
         }
@@ -422,7 +448,7 @@ impl SlabStore {
 
     /// Replaces a chunk's tier flags. Moving between tiers copies no bytes.
     pub fn set_tier(&self, cid: &Cid, tier: u8) -> Result<bool, StoreError> {
-        let w = self.db.begin_write()?;
+        let w = self.write()?;
         let found = {
             let mut index = w.open_table(INDEX)?;
             let key = cid.as_bytes().as_slice();
@@ -514,7 +540,7 @@ impl SlabStore {
         if touched.is_empty() {
             return Ok(());
         }
-        let mut w = self.db.begin_write()?;
+        let mut w = self.write()?;
         w.set_durability(redb::Durability::None);
         {
             let index = w.open_table(INDEX)?;
@@ -531,7 +557,7 @@ impl SlabStore {
 
     /// Serves these chunks to anyone proving their seed (own writes).
     pub fn register_serving(&self, chunks: &[(Cid, ChunkToken)]) -> Result<(), StoreError> {
-        let w = self.db.begin_write()?;
+        let w = self.write()?;
         {
             let mut serve = w.open_table(SERVE)?;
             for (cid, token) in chunks {
@@ -544,7 +570,7 @@ impl SlabStore {
 
     /// Serves `cids` to anyone, without proof (deliberate publishing, like a micron page).
     pub fn publish(&self, cids: &[Cid]) -> Result<(), StoreError> {
-        let w = self.db.begin_write()?;
+        let w = self.write()?;
         {
             let mut published = w.open_table(PUBLISHED)?;
             for cid in cids {
@@ -660,7 +686,7 @@ impl SlabStore {
             return Ok(0);
         }
         let mut holes = Vec::new();
-        let w = self.db.begin_write()?;
+        let w = self.write()?;
         {
             let mut index = w.open_table(INDEX)?;
             let mut free = w.open_table(FREE)?;

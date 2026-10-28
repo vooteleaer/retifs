@@ -134,7 +134,7 @@ fn parse_follow(v: &[u8]) -> Follow {
 
 impl SlabStore {
     pub fn create_channel(&self, name: &str, signing_seed: [u8; 32], read_key: [u8; 32]) -> Result<bool, StoreError> {
-        let w = self.db.begin_write()?;
+        let w = self.write()?;
         let created = {
             let mut t = w.open_table(OWN_CHANNELS)?;
             if t.get(name)?.is_some() {
@@ -160,8 +160,15 @@ impl SlabStore {
         t.iter()?.map(|e| e.map(|(k, v)| parse_own(k.value(), v.value())).map_err(StoreError::from)).collect()
     }
 
+    pub fn remove_own_channel(&self, name: &str) -> Result<(), StoreError> {
+        let w = self.write()?;
+        w.open_table(OWN_CHANNELS)?.remove(name)?;
+        w.commit()?;
+        Ok(())
+    }
+
     pub fn update_own_channel(&self, c: &OwnChannel) -> Result<(), StoreError> {
-        let w = self.db.begin_write()?;
+        let w = self.write()?;
         w.open_table(OWN_CHANNELS)?.insert(c.name.as_str(), own_value(c).as_slice())?;
         w.commit()?;
         Ok(())
@@ -199,7 +206,7 @@ impl SlabStore {
     }
 
     pub fn update_follow(&self, f: &Follow) -> Result<(), StoreError> {
-        let w = self.db.begin_write()?;
+        let w = self.write()?;
         w.open_table(FOLLOWS)?.insert(f.addr.ns_id().as_slice(), follow_value(f).as_slice())?;
         w.commit()?;
         Ok(())

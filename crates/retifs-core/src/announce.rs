@@ -97,7 +97,14 @@ pub fn node_announce_s(app_data: &[u8]) -> Option<u32> {
 ///
 /// ```text
 /// { "about": str, "bounds": [w, s, e, n], "ch": bin 64 (writer ‖ read key),
-///   "fmt": 1, "has": [[type, count], ...], "name": str, "seq": uint, "v": 1 }
+///   "fmt": 1, "has": [[type, count], ...], "name": str, "node": bin 16,
+///   "seq": uint, "v": 1 }
+/// ```
+///
+/// `node`: the announcing node's `retifs.node` address, which serves the
+/// library (the announce comes from its `retifs.library` destination, which
+/// serves nothing).
+/// ```text
 /// ```
 #[derive(Debug, Clone, PartialEq)]
 pub struct LibraryAnnounce {
@@ -114,6 +121,8 @@ pub struct LibraryAnnounce {
     pub bounds: Option<[f64; 4]>,
     /// Its latest version.
     pub seq: u64,
+    /// The node that serves it (its `retifs.node` address).
+    pub node: Option<[u8; 16]>,
 }
 
 /// The library format this node reads and writes.
@@ -172,7 +181,7 @@ pub fn library_app_data(l: &LibraryAnnounce) -> Vec<u8> {
 
 fn encode_library(l: &LibraryAnnounce) -> Vec<u8> {
     let mut out = Vec::new();
-    write_map_len(&mut out, 7 + l.bounds.is_some() as usize);
+    write_map_len(&mut out, 7 + l.bounds.is_some() as usize + l.node.is_some() as usize);
     write_str(&mut out, "about");
     write_str(&mut out, cut(&l.about, ABOUT_MAX));
     if let Some(b) = l.bounds {
@@ -196,6 +205,10 @@ fn encode_library(l: &LibraryAnnounce) -> Vec<u8> {
     }
     write_str(&mut out, "name");
     write_str(&mut out, cut(&l.name, NAME_MAX));
+    if let Some(n) = l.node {
+        write_str(&mut out, "node");
+        write_bin(&mut out, &n);
+    }
     write_str(&mut out, "seq");
     write_int(&mut out, l.seq as i64);
     write_str(&mut out, "v");
@@ -210,7 +223,7 @@ fn encode_library(l: &LibraryAnnounce) -> Vec<u8> {
 pub fn library_announce(app_data: &[u8]) -> Option<(u32, Option<LibraryAnnounce>)> {
     let mut r = Reader(app_data);
     let n = r.map_len().ok()?;
-    let (mut v, mut ch, mut l) = (None, None, LibraryAnnounce { name: String::new(), about: String::new(), writer: [0; 32], read_key: [0; 32], fmt: 0, has: Vec::new(), bounds: None, seq: 0 });
+    let (mut v, mut ch, mut l) = (None, None, LibraryAnnounce { name: String::new(), about: String::new(), writer: [0; 32], read_key: [0; 32], fmt: 0, has: Vec::new(), bounds: None, seq: 0, node: None });
     for _ in 0..n {
         let key = r.str().ok()?;
         let value = r.value(1).ok()?;
@@ -221,6 +234,7 @@ pub fn library_announce(app_data: &[u8]) -> Option<(u32, Option<LibraryAnnounce>
             ("about", Value::Str(s)) => l.about = s,
             ("fmt", Value::Int(i)) => l.fmt = u32::try_from(i).unwrap_or(u32::MAX),
             ("seq", Value::Int(i)) => l.seq = u64::try_from(i).unwrap_or(0),
+            ("node", Value::Bytes(b)) => l.node = b.try_into().ok(),
             ("bounds", Value::List(b)) => {
                 let f: Vec<f64> = b.iter().filter_map(|x| if let Value::Float(f) = x { Some(*f) } else { None }).collect();
                 l.bounds = (f.len() == 4).then(|| [f[0], f[1], f[2], f[3]]);
@@ -292,9 +306,10 @@ mod tests {
             writer: [1; 32],
             read_key: [2; 32],
             fmt: LIBRARY_FMT,
-            has: vec![("application/vnd.mapbox-vector-tile".into(), 95332), ("application/x-vnd.retifs.place".into(), 38822), ("application/x-vnd.retifs.tileset".into(), 1)],
+            has: vec![("application/vnd.mapbox-vector-tile".into(), 95332), ("application/x-vnd.retifs.tileset".into(), 1)],
             bounds: Some([20.85, 57.49, 28.22, 60.0]),
             seq: 191,
+            node: Some([9; 16]),
         };
         let data = library_app_data(&l);
         assert!(data.len() <= APP_DATA_MAX, "{} bytes", data.len());

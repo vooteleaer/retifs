@@ -170,8 +170,31 @@ impl SlabStore {
         if ns.is_empty() || ns.contains('\0') {
             return Err(StoreError::Full("namespace names are non-empty, without NUL"));
         }
-        let w = self.db.begin_write()?;
+        let w = self.write()?;
         w.open_table(NAMESPACES)?.insert(ns, ())?;
+        w.commit()?;
+        Ok(())
+    }
+
+    /// Removes namespace `ns` and every record and index entry of it (leaving
+    /// it, `leave_namespace`).
+    pub(crate) fn remove_records_of(&self, ns: &str) -> Result<(), StoreError> {
+        let start = ns_prefix(ns);
+        let end = after(&start);
+        let w = self.write()?;
+        {
+            w.open_table(NAMESPACES)?.remove(ns)?;
+            let mut records = w.open_table(RECORDS)?;
+            let keys: Vec<Vec<u8>> = records.range(start.as_slice()..end.as_slice())?.filter_map(|e| e.ok().map(|(k, _)| k.value().to_vec())).collect();
+            for k in keys {
+                records.remove(k.as_slice())?;
+            }
+            let mut attrs = w.open_table(ATTRS)?;
+            let keys: Vec<Vec<u8>> = attrs.range(start.as_slice()..end.as_slice())?.filter_map(|e| e.ok().map(|(k, _)| k.value().to_vec())).collect();
+            for k in keys {
+                attrs.remove(k.as_slice())?;
+            }
+        }
         w.commit()?;
         Ok(())
     }
@@ -188,7 +211,7 @@ impl SlabStore {
             return Err(StoreError::Full("attribute keys may not contain NUL"));
         }
         let key = [ns_prefix(ns).as_slice(), &rec.id].concat();
-        let w = self.db.begin_write()?;
+        let w = self.write()?;
         {
             w.open_table(NAMESPACES)?.insert(ns, ())?;
             let mut records = w.open_table(RECORDS)?;
@@ -219,7 +242,7 @@ impl SlabStore {
         if changes.iter().any(|(_, r)| r.as_ref().is_some_and(|r| r.attrs.keys().any(|k| k.contains(' ')))) {
             return Err(StoreError::Full("attribute keys may not contain NUL"));
         }
-        let w = self.db.begin_write()?;
+        let w = self.write()?;
         {
             w.open_table(NAMESPACES)?.insert(ns, ())?;
             let mut records = w.open_table(RECORDS)?;
@@ -253,7 +276,7 @@ impl SlabStore {
 
     pub fn delete_record(&self, ns: &str, id: &RecordId) -> Result<bool, StoreError> {
         let key = [ns_prefix(ns).as_slice(), id].concat();
-        let w = self.db.begin_write()?;
+        let w = self.write()?;
         let found = {
             let mut records = w.open_table(RECORDS)?;
             let old = records.remove(key.as_slice())?.map(|v| v.value().to_vec());

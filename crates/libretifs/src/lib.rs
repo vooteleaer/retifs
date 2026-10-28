@@ -265,6 +265,15 @@ pub enum Request {
     },
     /// Public libraries heard announced on the network (ADR-0029), newest first.
     HeardLibraries,
+    /// Leaves library `ns` on this node: its records, keys and settings go,
+    /// and the files only it used become evictable. Others' copies and other
+    /// members aren't touched. A library created here is refused unless
+    /// `mine` (if no one else holds it, leaving deletes it).
+    NsLeave {
+        ns: String,
+        #[serde(default)]
+        mine: bool,
+    },
     /// Joins another's namespace under local name `ns`, with a new writer key
     /// (returned; the creator grants it). `from`: other members' nodes.
     /// `lazy`: hold only the records needed (those changed since the

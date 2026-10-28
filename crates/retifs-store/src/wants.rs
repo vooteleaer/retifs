@@ -90,7 +90,7 @@ impl SlabStore {
     /// Starts seeking `file` (until it's complete), asking `hints` first.
     pub fn want_file(&self, file: &FileRef, hints: &[PeerId]) -> Result<(), StoreError> {
         let root = file.root.as_bytes();
-        let w = self.db.begin_write()?;
+        let w = self.write()?;
         {
             let mut v = file.seed.0.to_vec();
             v.extend_from_slice(&file.size.to_be_bytes());
@@ -161,7 +161,7 @@ impl SlabStore {
 
     /// Adds wants for a file (e.g. the children of an arrived node).
     pub fn add_wants(&self, root: &Cid, wants: &[Want]) -> Result<(), StoreError> {
-        let w = self.db.begin_write()?;
+        let w = self.write()?;
         {
             let mut t = w.open_table(WANTS)?;
             for want in wants {
@@ -174,7 +174,7 @@ impl SlabStore {
 
     /// A wanted chunk arrived (or was found locally).
     pub fn satisfied(&self, root: &Cid, cid: &Cid) -> Result<(), StoreError> {
-        let w = self.db.begin_write()?;
+        let w = self.write()?;
         w.open_table(WANTS)?.remove(pair(root.as_bytes(), cid.as_bytes()).as_slice())?;
         w.commit()?;
         Ok(())
@@ -184,7 +184,7 @@ impl SlabStore {
     pub fn finish_file(&self, root: &Cid) -> Result<(), StoreError> {
         let start = root.as_bytes().to_vec();
         let end = range_end(&start);
-        let w = self.db.begin_write()?;
+        let w = self.write()?;
         {
             w.open_table(WANT_FILES)?.remove(start.as_slice())?;
             for table in [WANTS, HINTS] {
@@ -222,7 +222,7 @@ impl SlabStore {
     /// back-off; failure (unreachable, or nothing new) doubles it (30 s … 30 min).
     pub fn hint_result(&self, root: &Cid, peer: &PeerId, ok: bool, now_ms: u64) -> Result<(), StoreError> {
         let key = pair(root.as_bytes(), peer);
-        let w = self.db.begin_write()?;
+        let w = self.write()?;
         {
             let mut t = w.open_table(HINTS)?;
             let mut h = t
@@ -246,7 +246,7 @@ impl SlabStore {
 
     /// A peer announced itself: try it again right away for every file it's hinted for.
     pub fn wake_peer(&self, peer: &PeerId) -> Result<bool, StoreError> {
-        let w = self.db.begin_write()?;
+        let w = self.write()?;
         let woke = {
             let mut t = w.open_table(HINTS)?;
             let hits: Vec<(Vec<u8>, Hint)> = t

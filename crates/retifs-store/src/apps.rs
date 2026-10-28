@@ -94,14 +94,14 @@ fn decode(name: &str, v: &[u8]) -> Option<App> {
 
 impl SlabStore {
     pub fn put_app(&self, app: &App) -> Result<(), StoreError> {
-        let w = self.db.begin_write()?;
+        let w = self.write()?;
         w.open_table(APPS)?.insert(app.name.as_str(), encode(app).as_slice())?;
         w.commit()?;
         Ok(())
     }
 
     pub fn remove_app(&self, name: &str) -> Result<bool, StoreError> {
-        let w = self.db.begin_write()?;
+        let w = self.write()?;
         let removed = w.open_table(APPS)?.remove(name)?.is_some();
         w.commit()?;
         Ok(removed)
