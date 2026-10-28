@@ -42,7 +42,9 @@ OpenStreetMap's data is open (ODbL), but its tile servers' usage policy forbids 
   - A device joins a map library lazily, fetching what it reads rather than the whole world.
   - It pins the areas the user marks (home country, a trip) for offline use.
   - Tiles it has read are cached like any other block, and served on to others.
-- **The internet services stay only as fallbacks.** OpenStreetMap's tiles and Nominatim (ADR-0027) are used only where no map library covers the area, and only while the user leaves them on. They are to go once map libraries cover what users need.
+- **A map from the start.** The map app comes with the address of a default public map library (the retifs project's, built from OpenStreetMap) and follows it lazily on first start, so there is a map without any setup. It is an ordinary followed library: the user can remove it, or add others next to it.
+- **No internet tiles.** Tiles come only from map libraries. Without one, the map is blank, places still show on it, and the app suggests joining a map library.
+- **Nominatim stays only until the gazetteer exists.** It remains as an opt-in address search (ADR-0027), off unless the user turns it on, and is to go once map libraries carry addresses.
 
 ## Impact on the threat model
 - A map library is public: nothing in it is secret.
