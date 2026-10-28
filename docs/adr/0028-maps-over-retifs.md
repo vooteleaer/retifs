@@ -25,6 +25,15 @@ OpenStreetMap's data is open (ODbL), but its tile servers' usage policy forbids 
   - `name`, `bounds`, `minzoom`, `maxzoom`, `format`;
   - `attribution` ("© OpenStreetMap contributors"), `license` (ODbL), `source` and `source_date`;
   - a style (MapLibre style JSON) as a content block.
+- **Many maps, the user's choice:**
+  - A map app finds maps in every library the user has joined, by their tileset records. It isn't tied to one map or one publisher.
+  - The user adds a map as they add any public library, from its link. Examples are another country, a topographic or nautical map, a cycling map, a historical map, or a community's own map.
+  - Maps covering different areas are used side by side, each where it covers. Where several cover the same area, the user picks the base map. Transparent ones (`overlay = true`, for example hiking trails) are drawn on top.
+- **Places from public libraries:**
+  - Any record with `geo` ([ADR-0027](0027-places.md)) in a joined public library is a place the map can show, for example shelters and campsites, a town's events, or charging points.
+  - Each such library is a layer of its own that the user can turn on and off.
+  - The user can copy a place into their own library, to keep it or add notes, as with any record.
+  - These are ordinary libraries, so the same data serves a map app, a list, or anything else (vision 9).
 - **Address search (a gazetteer):**
   - Records `type = application/x-vnd.retifs.address` for settlements, streets and addresses: `name`, `geo`, `in` (the enclosing place's name, for example "Viimsi vald, Harju maakond"), `kind` (city, village, street, house) and `housenumber` where it has one.
   - Packed into one block per area, so a device fetches the areas it needs and searches them locally, offline.
