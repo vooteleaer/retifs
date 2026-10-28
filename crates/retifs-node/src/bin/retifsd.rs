@@ -2441,10 +2441,27 @@ async fn handle(d: &Daemon, req: Request) -> Result<Response, String> {
             Ok(Response::Namespace(ns_view(d, &ns)?))
         }
 
-        Request::Query { ns, terms, at } => {
-            let terms: Vec<retifs_store::Term> = terms.iter().map(|t| retifs_store::Term::parse(t)).collect::<Result<_, _>>()?;
+        Request::Query { ns, terms: texts, at } => {
+            let terms: Vec<retifs_store::Term> = texts.iter().map(|t| retifs_store::Term::parse(t)).collect::<Result<_, _>>()?;
             let found = match at {
-                None => d.store.query(&ns, &terms).map_err(|e| e.to_string())?,
+                None => {
+                    // Held lazily: the whole answer, as of now, whatever is
+                    // here. A peer that holds it all is asked through its
+                    // blind index (ADR-0019) every time; what it finds is
+                    // fetched, and what's here (perhaps newer) is merged in.
+                    if d.store.ns_lazy(&ns).unwrap_or(false) {
+                        if let Some(mut records) = lazy_search(d, &ns, &texts).await {
+                            let here = d.store.query(&ns, &terms).map_err(|e| e.to_string())?;
+                            let mut seen: std::collections::HashSet<String> = records.iter().map(|r| r.id.clone()).collect();
+                            records.retain(|r| here.iter().all(|h| hex(&h.id) != r.id));
+                            records.extend(here.iter().map(view));
+                            seen.clear();
+                            records.retain(|r| seen.insert(r.id.clone()));
+                            return Ok(Response::Records { records });
+                        }
+                    }
+                    d.store.query(&ns, &terms).map_err(|e| e.to_string())?
+                }
                 Some(seq) => {
                     let mut at = None;
                     versions(d, &ns, |v, _, st| {
@@ -3291,6 +3308,20 @@ async fn search_query(d: &Daemon, ns: &str, node: &str, terms: &[String]) -> Res
         }
     }
     Ok(Response::Searched { records, unresolved, as_of_ms })
+}
+
+/// A query on a lazily held library, asked of its peers in turn (the first
+/// that answers): their blind index for the exact terms, the matches fetched
+/// here. None when no peer could answer (no index, unreachable, other terms).
+async fn lazy_search(d: &Daemon, ns: &str, terms: &[String]) -> Option<Vec<RecordView>> {
+    for peer in d.store.ns_peers(ns).ok()? {
+        match search_query(d, ns, &hex(&peer), terms).await {
+            Ok(Response::Searched { records, .. }) => return Some(records),
+            Ok(_) => {}
+            Err(e) => eprintln!("ns {ns}: searching at <{}>: {e}", hex(&peer)),
+        }
+    }
+    None
 }
 
 /// Fetches the state tree paths to `ids` from the checkpoint held here, from
