@@ -219,6 +219,8 @@ pub struct SlabStore {
     /// Batches under way (`bulk`): commits meanwhile aren't each forced to
     /// disk; the batch's last one is, which makes the earlier ones durable too.
     bulk: std::sync::atomic::AtomicUsize,
+    /// Writes during batches, to make every BULK_DURABLE-th one durable.
+    bulk_writes: std::sync::atomic::AtomicUsize,
     budget: RwLock<Budget>,
     /// Recent accesses not yet written to the ACCESS table.
     touched: Mutex<HashMap<Cid, u64>>,
@@ -229,6 +231,9 @@ pub struct SlabStore {
 }
 
 const DISK_SAMPLE: Duration = Duration::from_secs(1);
+
+/// In a batch, one write in this many is durable (see `SlabStore::write`).
+const BULK_DURABLE: usize = 256;
 
 /// The index's page cache by default. redb's own default is 1 GiB, which a
 /// growing store fills: a daemon on a 1 GB Raspberry Pi would end up killed
@@ -267,6 +272,7 @@ impl SlabStore {
             db,
             sync: true,
             bulk: std::sync::atomic::AtomicUsize::new(0),
+            bulk_writes: std::sync::atomic::AtomicUsize::new(0),
             budget: RwLock::new(Budget::default()),
             touched: Mutex::new(HashMap::new()),
             disk: Mutex::new(None),
@@ -282,7 +288,10 @@ impl SlabStore {
     /// A write transaction: durable, unless a batch is under way (see `bulk`).
     pub(crate) fn write(&self) -> Result<redb::WriteTransaction, redb::TransactionError> {
         let mut w = self.db.begin_write()?;
-        if self.bulk.load(std::sync::atomic::Ordering::Relaxed) > 0 {
+        // Pages freed by non-durable commits are reused only after a durable
+        // one: every BULK_DURABLE-th write is durable, or a batch of 95,000
+        // forgets grew the index from 1 to 8 GB.
+        if self.bulk.load(std::sync::atomic::Ordering::Relaxed) > 0 && self.bulk_writes.fetch_add(1, std::sync::atomic::Ordering::Relaxed) % BULK_DURABLE != BULK_DURABLE - 1 {
             w.set_durability(redb::Durability::None);
         }
         Ok(w)
@@ -299,6 +308,12 @@ impl SlabStore {
             w.commit()?;
         }
         Ok(out)
+    }
+
+    /// Gives the index file's free space back to the system (redb compaction).
+    /// Needs the store to itself: call it before anything else uses it.
+    pub fn compact(&mut self) -> Result<bool, StoreError> {
+        self.db.compact().map_err(|e| StoreError::Io(std::io::Error::other(e.to_string())))
     }
 
     /// The directory the store lives in.

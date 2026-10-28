@@ -474,6 +474,8 @@ struct Args {
     lease_term: u64,
     loss_target: f64,
     min_copies: usize,
+    /// Compact the index file before starting (gives freed space back).
+    compact: bool,
     site: Option<String>,
     slow_budget: u64,
     treat_as_slow: Vec<PeerId>,
@@ -537,6 +539,7 @@ fn args() -> Args {
         lease_term: 30 * 86_400,
         loss_target: 1e-3,
         min_copies: 3,
+        compact: false,
         site: None,
         slow_budget: 600,
         treat_as_slow: Vec::new(),
@@ -579,6 +582,7 @@ fn args() -> Args {
             "--nomadnet-name" => a.nomadnet_name = it.next().expect("--nomadnet-name NAME"),
             "--loss-target" => a.loss_target = it.next().and_then(|v| v.parse().ok()).expect("--loss-target P (e.g. 0.001)"),
             "--site" => a.site = Some(it.next().filter(|s| !s.trim().is_empty()).expect("--site NAME")),
+            "--compact" => a.compact = true,
             "--min-copies" => a.min_copies = it.next().and_then(|v| v.parse().ok()).filter(|n| *n >= 1).expect("--min-copies N (1 or more)"),
             "--lease-term" => a.lease_term = duration_secs(&it.next().expect("--lease-term DURATION")).max(60),
             "--device" => a.device = it.next().expect("--device NAME").to_lowercase(),
@@ -586,7 +590,7 @@ fn args() -> Args {
             "-h" | "--help" => {
                 println!(
                     "retifsd [--store DIR] [--max-store SIZE] [--min-free SIZE] [--cache-max SIZE] [--private-requests]
-                             [--hold-for-others SIZE] [--db-cache SIZE] [--lease-term DURATION] [--loss-target P] [--min-copies N] [--site NAME] [--slow-link-budget DURATION]\n        \
+                             [--hold-for-others SIZE] [--db-cache SIZE] [--lease-term DURATION] [--loss-target P] [--min-copies N] [--compact] [--site NAME] [--slow-link-budget DURATION]\n        \
                      [--stamp-cost BITS] [--max-stamp-cost BITS] [--announce-every DURATION]\n        \
                      [--nomadnet NAMESPACE [--nomadnet-name NAME]] [--device NAME] [--public] [--put FILE]..."
                 );
@@ -632,8 +636,15 @@ fn main() {
     let args = args();
     std::fs::create_dir_all(&args.store).expect("create store dir");
     let store = match SlabStore::open_with_cache(&args.store, args.db_cache) {
-        Ok(s) => {
+        Ok(mut s) => {
             s.set_budget(args.budget.clone());
+            if args.compact {
+                let before = std::fs::metadata(args.store.join("index.redb")).map(|m| m.len()).unwrap_or(0);
+                match s.compact() {
+                    Ok(_) => println!("index compacted: {} MB to {} MB", before >> 20, std::fs::metadata(args.store.join("index.redb")).map(|m| m.len()).unwrap_or(0) >> 20),
+                    Err(e) => eprintln!("compacting the index: {e}"),
+                }
+            }
             s
         }
         Err(retifs_store::StoreError::Db(e)) if matches!(*e, redb::Error::DatabaseAlreadyOpen) => {
