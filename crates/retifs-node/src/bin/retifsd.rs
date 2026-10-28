@@ -2136,6 +2136,9 @@ async fn handle(d: &Daemon, req: Request) -> Result<Response, String> {
             d.store.add_ns_peers(&ns, &parse_peers(&from)?).map_err(|e| e.to_string())?;
             if lazy {
                 d.store.set_ns_lazy(&ns, true).map_err(|e| e.to_string())?;
+                // Lazy means content too: kept by rules (tags, what's read),
+                // not all of it pulled (a map's 95,000 tiles).
+                d.store.set_ns_keep_by_rules(&ns, true).map_err(|e| e.to_string())?;
             }
             write_ops(d, &ns, vec![Op::Identity(keywrap::public(&identity))]).await?;
             d.ns_seeking.lock().unwrap().insert(ns.clone());
