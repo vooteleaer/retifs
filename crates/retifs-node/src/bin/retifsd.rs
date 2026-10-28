@@ -474,6 +474,8 @@ struct Args {
     lease_term: u64,
     loss_target: f64,
     min_copies: usize,
+    /// No data of its own kept on the device (ADR-0031).
+    no_storage: bool,
     /// Compact the index file before starting (gives freed space back).
     compact: bool,
     site: Option<String>,
@@ -539,6 +541,7 @@ fn args() -> Args {
         lease_term: 30 * 86_400,
         loss_target: 1e-3,
         min_copies: 3,
+        no_storage: false,
         compact: false,
         site: None,
         slow_budget: 600,
@@ -583,6 +586,7 @@ fn args() -> Args {
             "--loss-target" => a.loss_target = it.next().and_then(|v| v.parse().ok()).expect("--loss-target P (e.g. 0.001)"),
             "--site" => a.site = Some(it.next().filter(|s| !s.trim().is_empty()).expect("--site NAME")),
             "--compact" => a.compact = true,
+            "--no-storage" => a.no_storage = true,
             "--min-copies" => a.min_copies = it.next().and_then(|v| v.parse().ok()).filter(|n| *n >= 1).expect("--min-copies N (1 or more)"),
             "--lease-term" => a.lease_term = duration_secs(&it.next().expect("--lease-term DURATION")).max(60),
             "--device" => a.device = it.next().expect("--device NAME").to_lowercase(),
@@ -590,7 +594,7 @@ fn args() -> Args {
             "-h" | "--help" => {
                 println!(
                     "retifsd [--store DIR] [--max-store SIZE] [--min-free SIZE] [--cache-max SIZE] [--private-requests]
-                             [--hold-for-others SIZE] [--db-cache SIZE] [--lease-term DURATION] [--loss-target P] [--min-copies N] [--compact] [--site NAME] [--slow-link-budget DURATION]\n        \
+                             [--hold-for-others SIZE] [--db-cache SIZE] [--lease-term DURATION] [--loss-target P] [--min-copies N] [--compact] [--no-storage] [--site NAME] [--slow-link-budget DURATION]\n        \
                      [--stamp-cost BITS] [--max-stamp-cost BITS] [--announce-every DURATION]\n        \
                      [--nomadnet NAMESPACE [--nomadnet-name NAME]] [--device NAME] [--public] [--put FILE]..."
                 );
@@ -633,7 +637,13 @@ fn namespace_key(store: &SlabStore) -> [u8; 32] {
 }
 
 fn main() {
-    let args = args();
+    let mut args = args();
+    if args.no_storage {
+        // Holds nothing for others, and only a cache of what it reads.
+        args.hold_limit = Some(0);
+        args.budget.cache_max.get_or_insert(128 << 20);
+        println!("no storage: nothing of its own kept here beyond a cache of {} MB (ADR-0031)", args.budget.cache_max.unwrap_or(0) >> 20);
+    }
     std::fs::create_dir_all(&args.store).expect("create store dir");
     let store = match SlabStore::open_with_cache(&args.store, args.db_cache) {
         Ok(mut s) => {
@@ -694,6 +704,9 @@ struct Daemon {
     loss_target: f64,
     /// Copies of each needed file, this node's own included, whatever the estimate.
     min_copies: usize,
+    /// Keeps no data of its own (ADR-0031): its own copies don't count, and
+    /// stay only as cache once enough copies are elsewhere.
+    no_storage: bool,
     /// This node's site, if its owner named one: then one copy is kept elsewhere.
     site: Option<retifs_core::announce::SiteTag>,
     slow_budget: u64,
@@ -1145,6 +1158,7 @@ async fn serve(store: Arc<SlabStore>, identity: node::IdentitySecret, endpoint: 
         upkeep_wake: Notify::new(),
         loss_target: args.loss_target,
         min_copies: args.min_copies,
+        no_storage: args.no_storage,
         site: args.site.as_deref().map(retifs_core::announce::site_tag),
         slow_budget: args.slow_budget,
         treat_as_slow: args.treat_as_slow.clone(),
@@ -2187,7 +2201,7 @@ async fn handle(d: &Daemon, req: Request) -> Result<Response, String> {
             d.store.set_ns_info(&ns, &addr.writer, &addr.read_key).map_err(|e| e.to_string())?;
             d.store.set_ns_identity(&ns, &identity).map_err(|e| e.to_string())?;
             d.store.add_ns_peers(&ns, &parse_peers(&from)?).map_err(|e| e.to_string())?;
-            if lazy {
+            if lazy || d.no_storage {
                 d.store.set_ns_lazy(&ns, true).map_err(|e| e.to_string())?;
                 // Lazy means content too: kept by rules (tags, what's read),
                 // not all of it pulled (a map's 95,000 tiles).
@@ -3936,7 +3950,8 @@ fn serve_if_kept(d: &Daemon, file: &FileRef) -> Result<(), String> {
 /// pulled for records no longer kept (or for replaced versions) becomes
 /// evictable again. Content this node wrote is never released here.
 fn apply_keep(d: &Daemon, ns: &str, records: &[Record]) -> Result<(), String> {
-    if ns.starts_with("ch-") {
+    // Followed channels keep by version; a storage-less node keeps nothing.
+    if ns.starts_with("ch-") || d.no_storage {
         return Ok(());
     }
     let all = !d.store.ns_keep_by_rules(ns).map_err(|e| e.to_string())?;
@@ -5013,6 +5028,15 @@ impl Copies {
     }
 }
 
+/// Whether the store is short of room for its own copies: pinned and leased
+/// data at nine tenths of the store's limit or more (ADR-0031).
+fn short_of_space(d: &Daemon) -> bool {
+    match (d.store.usage(), d.store.limits()) {
+        (Ok(u), Ok(l)) => (u.pinned + u.leased) * 10 >= l.hard_max * 9,
+        _ => false,
+    }
+}
+
 /// Each storage node's site, as its announces say.
 fn node_sites(d: &Daemon) -> HashMap<PeerId, Option<retifs_core::announce::SiteTag>> {
     d.store.storage_nodes().unwrap_or_default().into_iter().map(|n| (n.peer, n.site)).collect()
@@ -5052,10 +5076,24 @@ fn review(d: &Daemon, file: &FileRef, want: Copies, sites: &HashMap<PeerId, Opti
         println!("placement: {}: lease at <{}> ran out unrenewed, its copy is gone", file.root, hex(&h));
     }
     let (local, views, risk) = loss_now(d, file);
-    let own = local <= 0.1;
+    // Short of room (a small store, or none at all: ADR-0031): this node's
+    // own files are still its own once only cached here.
+    let short = d.no_storage || short_of_space(d);
+    let own = local <= 0.1 || (short && d.store.is_needed(&file.root).unwrap_or(false));
     let elsewhere_without = |drop: Option<&PeerId>| views.iter().any(|h| Some(&h.peer) != drop && !same_site(d, sites, &h.peer));
     let elsewhere = elsewhere_without(None);
-    if want.enough(d, risk, views.len() + 1, own, elsewhere) {
+    // Its own copy not counted: enough copies elsewhere, all confirmed?
+    let risk_elsewhere = views.iter().map(|h| h.loss).product::<f64>();
+    let safe_elsewhere = !views.is_empty() && views.iter().all(|h| h.confirmed) && want.enough(d, risk_elsewhere, views.len(), true, elsewhere);
+    if short && local <= 0.1 && safe_elsewhere {
+        // Then the copy here is only a cache: evictable when room is needed.
+        let chunks: Vec<Cid> = file_chunks(&d.store, file).unwrap_or_default().into_iter().map(|(c, _)| c).collect();
+        let n = d.store.release_chunks(&chunks).map_err(|e| e.to_string())?;
+        println!("placement: {}: enough copies elsewhere; kept here only as cache now ({n} chunk(s))", file.root);
+    }
+    // A storage-less node's own copy never counts.
+    let (copies, risk) = if d.no_storage { (views.len(), risk_elsewhere) } else { (views.len() + 1, risk) };
+    if want.enough(d, risk, copies, own, elsewhere) {
         // Surplus after a repair (the absent holder came back): stop renewing
         // the worst copy once the target holds well without it, never below
         // the floor; with a namespace's own number, whatever is over it.
