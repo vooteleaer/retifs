@@ -1,4 +1,4 @@
-//! `retifs-gateway [--store DIR] [--listen 127.0.0.1:8740]`: every namespace
+//! `retifs-gateway [--store DIR] [--listen 127.0.0.1:8740] [--via NODE]`: every namespace
 //! as a local, read-only website (`http://<namespace>.localhost:8740/`),
 //! through `retifsd`'s local API. The base for the browser extension (plan,
 //! phase 1). Content not here yet is fetched as it's read (ADR-0002).
@@ -12,7 +12,7 @@ use libretifs::{AttrValue, Client, RecordView, Request, Response};
 use tiny_http::{Header, Method, Response as HttpResponse, Server};
 
 fn usage() -> ! {
-    eprintln!("retifs-gateway [--store DIR] [--listen 127.0.0.1:8740]");
+    eprintln!("retifs-gateway [--store DIR] [--listen 127.0.0.1:8740] [--via NODE]");
     std::process::exit(2)
 }
 
@@ -20,6 +20,9 @@ struct Gateway {
     rt: tokio::runtime::Runtime,
     client: Client,
     store: PathBuf,
+    /// Every request to this own node over a Link (`--via`, ADR-0019): a
+    /// thin client serving another node's libraries.
+    via: Option<String>,
 }
 
 impl Gateway {
@@ -31,7 +34,8 @@ impl Gateway {
         self.client = self
             .rt
             .block_on(Client::connect(&self.store))
-            .map_err(|e| e.to_string())?;
+            .map_err(|e| e.to_string())?
+            .via(self.via.clone());
         self.rt
             .block_on(self.client.call(req))
             .map_err(|e| e.to_string())
@@ -125,11 +129,13 @@ fn page(status: u16, title: &str, body: &str) -> HttpResponse<std::io::Cursor<Ve
 fn main() {
     let mut store = libretifs::default_store_dir();
     let mut listen = "127.0.0.1:8740".to_string();
+    let mut via = None;
     let mut args = std::env::args().skip(1);
     while let Some(a) = args.next() {
         match a.as_str() {
             "--store" => store = args.next().unwrap_or_else(|| usage()).into(),
             "--listen" => listen = args.next().unwrap_or_else(|| usage()),
+            "--via" => via = Some(args.next().unwrap_or_else(|| usage())),
             _ => usage(),
         }
     }
@@ -144,6 +150,7 @@ fn main() {
         );
         std::process::exit(1)
     });
+    let client = client.via(via.clone());
     let server = Server::http(&listen).unwrap_or_else(|e| {
         eprintln!("retifs-gateway: can't listen on {listen}: {e}");
         std::process::exit(1)
@@ -152,7 +159,7 @@ fn main() {
     eprintln!(
         "retifs-gateway: http://localhost:{port}/ (sites at http://<namespace>.localhost:{port}/)"
     );
-    let mut gw = Gateway { rt, client, store };
+    let mut gw = Gateway { rt, client, store, via };
     for req in server.incoming_requests() {
         let _ = serve(&mut gw, req, &port);
     }

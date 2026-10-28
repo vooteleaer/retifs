@@ -730,6 +730,74 @@ struct Daemon {
     heard_libs: Mutex<HashMap<Vec<u8>, HeardLib>>,
     /// Woken when the libraries this node announces change.
     lib_wake: Notify,
+    /// Libraries being left (`leaving` in the store): hidden, their data
+    /// removed in the background by `leaver`.
+    leaving: Mutex<std::collections::BTreeSet<String>>,
+    leave_wake: Notify,
+}
+
+/// Marks library `ns` as being left (or done), in memory and in the store's
+/// `leaving` file, so a restart carries on with it.
+fn mark_leaving(d: &Daemon, ns: &str, on: bool) -> Result<(), String> {
+    let mut leaving = d.leaving.lock().unwrap();
+    if on {
+        leaving.insert(ns.to_string());
+    } else {
+        leaving.remove(ns);
+    }
+    let text: String = leaving.iter().map(|n| format!("{n}\n")).collect();
+    std::fs::write(d.store.root().join("leaving"), text).map_err(|e| e.to_string())
+}
+
+/// The libraries here, less those being left.
+fn visible_namespaces(d: &Daemon) -> Result<Vec<String>, String> {
+    let leaving = d.leaving.lock().unwrap().clone();
+    Ok(d.store.namespaces().map_err(|e| e.to_string())?.into_iter().filter(|n| !leaving.contains(n)).collect())
+}
+
+/// Removes the data of libraries being left, one at a time.
+async fn leaver(d: Arc<Daemon>) {
+    loop {
+        let next = d.leaving.lock().unwrap().iter().next().cloned();
+        let Some(ns) = next else {
+            d.leave_wake.notified().await;
+            continue;
+        };
+        let d2 = d.clone();
+        let ns2 = ns.clone();
+        let done = tokio::task::spawn_blocking(move || leave_now(&d2, &ns2)).await;
+        match done {
+            Ok(Ok(n)) => println!("left {ns}: {n} file(s) no longer needed here"),
+            Ok(Err(e)) => eprintln!("leaving {ns}: {e}"),
+            Err(e) => eprintln!("leaving {ns}: {e}"),
+        }
+        let _ = mark_leaving(&d, &ns, false);
+    }
+}
+
+/// Leaving's work: the files only this library used are forgotten, then its
+/// records, index, keys and settings go.
+fn leave_now(d: &Daemon, ns: &str) -> Result<usize, String> {
+    let mut files: Vec<FileRef> = d.store.records(ns).map_err(|e| e.to_string())?.into_iter().flat_map(|r| r.blocks).collect();
+    files.extend(d.store.ns_checkpoint(ns).map_err(|e| e.to_string())?);
+    files.extend(d.store.ns_kept(ns).map_err(|e| e.to_string())?);
+    let others: std::collections::HashSet<Cid> = d
+        .store
+        .namespaces()
+        .map_err(|e| e.to_string())?
+        .iter()
+        .filter(|n| n.as_str() != ns)
+        .flat_map(|n| d.store.records(n).unwrap_or_default())
+        .flat_map(|r| r.blocks.into_iter().map(|b| b.root))
+        .collect();
+    let mut seen = std::collections::HashSet::new();
+    files.retain(|f| !others.contains(&f.root) && seen.insert(f.root));
+    forget_all(d, &files)?;
+    d.store.leave_namespace(ns).map_err(|e| e.to_string())?;
+    d.ns_cache.lock().unwrap().remove(ns);
+    d.ns_seeking.lock().unwrap().remove(ns);
+    d.changes.lock().unwrap().remove(ns);
+    Ok(files.len())
 }
 
 /// A library announce heard.
@@ -1097,6 +1165,11 @@ async fn serve(store: Arc<SlabStore>, identity: node::IdentitySecret, endpoint: 
         next_session: std::sync::atomic::AtomicU64::new(1),
         heard_libs: Mutex::new(HashMap::new()),
         lib_wake: Notify::new(),
+        // Left before a restart and not finished: carried on.
+        leaving: Mutex::new(
+            std::fs::read_to_string(store.root().join("leaving")).unwrap_or_default().lines().map(str::trim).filter(|l| !l.is_empty()).map(String::from).collect(),
+        ),
+        leave_wake: Notify::new(),
     });
     println!("attached to shared instance {of}");
     println!("serving {} chunks as retifs.node <{}>", store.len().unwrap_or(0), daemon.node_hex);
@@ -1195,6 +1268,7 @@ async fn serve(store: Arc<SlabStore>, identity: node::IdentitySecret, endpoint: 
     tokio::spawn(follower(daemon.clone()));
     tokio::spawn(ns_sync(daemon.clone()));
     tokio::spawn(share_keeper(daemon.clone()));
+    tokio::spawn(leaver(daemon.clone()));
     let redeemer = daemon.clone();
     tokio::spawn(async move {
         // Invitations whose creator's node wasn't reachable (ADR-0020).
@@ -1896,7 +1970,7 @@ async fn handle(d: &Daemon, req: Request) -> Result<Response, String> {
 
         Request::Channels => channels(d),
 
-        Request::Namespaces => Ok(Response::Names { names: d.store.namespaces().map_err(|e| e.to_string())? }),
+        Request::Namespaces => Ok(Response::Names { names: visible_namespaces(d)? }),
 
         Request::RecordCreate { ns, attrs, data } => {
             let records = transaction(d, &ns, vec![TxStep::Create { attrs, data }]).await?;
@@ -2057,37 +2131,16 @@ async fn handle(d: &Daemon, req: Request) -> Result<Response, String> {
             if creator == own && !mine {
                 return Err(format!("{ns} was created here: leaving it deletes it unless someone else holds it (repeat with --mine)"));
             }
-            // Its files: what its records name, its checkpoint, what it kept;
-            // those no other library here uses are forgotten.
-            let mut files: Vec<FileRef> = d.store.records(&ns).map_err(|e| e.to_string())?.into_iter().flat_map(|r| r.blocks).collect();
-            files.extend(d.store.ns_checkpoint(&ns).map_err(|e| e.to_string())?);
-            files.extend(d.store.ns_kept(&ns).map_err(|e| e.to_string())?);
-            let others: std::collections::HashSet<Cid> = d
-                .store
-                .namespaces()
-                .map_err(|e| e.to_string())?
-                .iter()
-                .filter(|n| **n != ns)
-                .flat_map(|n| d.store.records(n).unwrap_or_default())
-                .flat_map(|r| r.blocks.into_iter().map(|b| b.root))
-                .collect();
-            let mut seen = std::collections::HashSet::new();
-            files.retain(|f| !others.contains(&f.root) && seen.insert(f.root));
-            forget_all(d, &files)?;
+            // Gone from view at once; its data is removed in the background
+            // (a map's 95,000 files take minutes), even across a restart.
             set_announced(&d.store, &ns, None)?;
-            d.store.leave_namespace(&ns).map_err(|e| e.to_string())?;
-            d.ns_cache.lock().unwrap().remove(&ns);
-            d.ns_seeking.lock().unwrap().remove(&ns);
-            d.changes.lock().unwrap().remove(&ns);
-            println!("left {ns}: {} file(s) no longer needed here", files.len());
+            mark_leaving(d, &ns, true)?;
+            d.leave_wake.notify_one();
             Ok(Response::Done)
         }
         Request::HeardLibraries => {
             // Which heard ones are here already: our own and joined ones, by address.
-            let here: HashMap<String, String> = d
-                .store
-                .namespaces()
-                .map_err(|e| e.to_string())?
+            let here: HashMap<String, String> = visible_namespaces(d)?
                 .into_iter()
                 .filter_map(|n| current_addr(d, &n).ok().map(|a| (a.to_string(), n)))
                 .collect();

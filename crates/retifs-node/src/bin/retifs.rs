@@ -519,7 +519,7 @@ async fn main() {
                     // Off this node: records, keys and settings; others' copies stay.
                     let req = libretifs::Request::NsLeave { ns: ns.clone(), mine: rest.iter().any(|a| a == "--mine") };
                     match client.call(req).await.unwrap_or_else(|e| fail(e)) {
-                        libretifs::Response::Done => println!("left {ns}: it's no longer on this node"),
+                        libretifs::Response::Done => println!("left {ns}: gone from view now; its data is removed in the background"),
                         libretifs::Response::Error { message } => fail(message),
                         _ => fail("unexpected response"),
                     }
