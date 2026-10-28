@@ -253,6 +253,18 @@ pub enum Request {
     RecordHistory { ns: String, id: String },
     /// The namespace's address: lets others read it, and join it if granted (ADR-0017).
     NsAddress { ns: String },
+    /// Announces public library `ns` on the network, or stops (ADR-0029):
+    /// `name` and `about` as others will see them (the name defaults to `ns`).
+    NsAnnounce {
+        ns: String,
+        on: bool,
+        #[serde(default)]
+        name: Option<String>,
+        #[serde(default)]
+        about: Option<String>,
+    },
+    /// Public libraries heard announced on the network (ADR-0029), newest first.
+    HeardLibraries,
     /// Joins another's namespace under local name `ns`, with a new writer key
     /// (returned; the creator grants it). `from`: other members' nodes.
     /// `lazy`: hold only the records needed (those changed since the
@@ -526,6 +538,9 @@ pub enum Response {
         own: Vec<ChannelInfo>,
         follows: Vec<FollowInfo>,
     },
+    Heard {
+        libraries: Vec<HeardLibrary>,
+    },
     Records {
         records: Vec<RecordView>,
     },
@@ -586,6 +601,31 @@ pub struct ChannelInfo {
     pub name: String,
     pub address: String,
     pub seq: u64,
+}
+
+/// A public library heard announced (ADR-0029).
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct HeardLibrary {
+    pub name: String,
+    pub about: String,
+    /// Its address, for `NsJoin` (empty when the announce is too new to read).
+    pub address: String,
+    /// What it holds: record types and counts, most first.
+    pub has: Vec<(String, u64)>,
+    /// west, south, east, north
+    pub bounds: Option<[f64; 4]>,
+    pub seq: u64,
+    /// The announce's version and the library's format, and whether this node
+    /// reads both (ADR-0030): if not, it says it needs a newer retifs.
+    pub v: u32,
+    pub fmt: u32,
+    pub readable: bool,
+    /// The node that announced it, how far, and when last heard.
+    pub node: String,
+    pub hops: u8,
+    pub heard_ms: u64,
+    /// The library here, if already joined (or our own).
+    pub here: Option<String>,
 }
 
 /// A channel this node follows.

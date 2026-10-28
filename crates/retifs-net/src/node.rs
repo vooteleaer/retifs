@@ -111,6 +111,24 @@ pub fn destination_announcing(identity: IdentitySecret, serve: bool, announce_s:
     }
 }
 
+/// The node's `retifs.library` destination: it announces the node's public
+/// libraries, one per announce, each with its own app data (ADR-0029). It
+/// serves nothing; joining goes to the library's holders.
+pub fn library_destination(identity: IdentitySecret) -> PreConfiguredDestination<'static> {
+    PreConfiguredDestination::Single {
+        request_endpoints: ServeMyRequestEndpoints::No,
+        resource_strategy: ResourceStrategy::Accept { max_uncompressed_bytes: 0, accept_compressed: false },
+        maximum_request_bytes: Default::default(),
+        app_name: APP_NAME,
+        aspects: &["library"],
+        identity,
+        announce_app_data: b"",
+        proof: ProofStrategy::ProveAll,
+        link_requests: LinkRequestPolicy::AcceptAll,
+        ratchet: RatchetPolicy::NoRatchets,
+    }
+}
+
 pub fn parse_destination(hex_str: &str) -> Option<DestinationHash> {
     let bytes = hex::decode(hex_str.trim().trim_start_matches('<').trim_end_matches('>')).ok()?;
     DestinationHash::from_slice(&bytes)

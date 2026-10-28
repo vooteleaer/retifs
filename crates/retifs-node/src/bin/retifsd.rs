@@ -714,6 +714,93 @@ struct Daemon {
     /// stored) gets the same result instead of "no such write session".
     commits: Mutex<HashMap<u64, PendingCommit>>,
     next_session: std::sync::atomic::AtomicU64,
+    /// Public libraries heard announced (ADR-0029), by address (or, for an
+    /// announce too new to read, by the announcing destination and version).
+    heard_libs: Mutex<HashMap<Vec<u8>, HeardLib>>,
+    /// Woken when the libraries this node announces change.
+    lib_wake: Notify,
+}
+
+/// A library announce heard.
+struct HeardLib {
+    lib: Option<retifs_core::announce::LibraryAnnounce>,
+    v: u32,
+    node: PeerId,
+    hops: u8,
+    heard_ms: u64,
+}
+
+/// The most library announces kept: the oldest heard go first.
+const HEARD_LIBS_MAX: usize = 500;
+
+/// The libraries this node announces (`announce.toml` in the store): local
+/// name → the name and description others see.
+fn announced_libraries(store: &SlabStore) -> Vec<(String, String, String)> {
+    let Ok(text) = std::fs::read_to_string(store.root().join("announce.toml")) else { return Vec::new() };
+    let Ok(table) = text.parse::<toml::Table>() else { return Vec::new() };
+    table
+        .iter()
+        .map(|(ns, v)| {
+            let get = |k: &str| v.get(k).and_then(|x| x.as_str()).unwrap_or("").to_string();
+            let name = get("name");
+            (ns.clone(), if name.is_empty() { ns.clone() } else { name }, get("about"))
+        })
+        .collect()
+}
+
+fn set_announced(store: &SlabStore, ns: &str, entry: Option<(String, String)>) -> Result<(), String> {
+    let path = store.root().join("announce.toml");
+    let mut table = std::fs::read_to_string(&path).ok().and_then(|t| t.parse::<toml::Table>().ok()).unwrap_or_default();
+    match entry {
+        Some((name, about)) => {
+            let mut e = toml::Table::new();
+            e.insert("name".into(), toml::Value::String(name));
+            e.insert("about".into(), toml::Value::String(about));
+            table.insert(ns.into(), toml::Value::Table(e));
+        }
+        None => {
+            table.remove(ns);
+        }
+    }
+    std::fs::write(&path, table.to_string()).map_err(|e| e.to_string())
+}
+
+/// What a library's announce says about it now: what it holds by type, its
+/// area (a map's bounds, else where its places are), its version.
+fn library_announce_now(d: &Daemon, ns: &str, name: &str, about: &str) -> Result<retifs_core::announce::LibraryAnnounce, String> {
+    let addr = current_addr(d, ns)?;
+    let mut types: HashMap<String, u64> = HashMap::new();
+    let (mut bounds, mut extent): (Option<[f64; 4]>, Option<[f64; 4]>) = (None, None);
+    for r in d.store.records(ns).map_err(|e| e.to_string())? {
+        if let Some(Value::Str(t)) = r.attrs.get("type") {
+            *types.entry(t.clone()).or_default() += 1;
+        }
+        if let Some(Value::List(b)) = r.attrs.get("bounds") {
+            let f: Vec<f64> = b.iter().filter_map(|x| if let Value::Float(f) = x { Some(*f) } else { None }).collect();
+            if f.len() == 4 {
+                bounds = Some([f[0], f[1], f[2], f[3]]);
+            }
+        }
+        if let Some(Value::List(g)) = r.attrs.get("geo") {
+            if let [Value::Float(lat), Value::Float(lon)] = g.as_slice() {
+                let e = extent.get_or_insert([*lon, *lat, *lon, *lat]);
+                *e = [e[0].min(*lon), e[1].min(*lat), e[2].max(*lon), e[3].max(*lat)];
+            }
+        }
+    }
+    let mut has: Vec<(String, u64)> = types.into_iter().collect();
+    has.sort_by(|a, b| b.1.cmp(&a.1).then(a.0.cmp(&b.0)));
+    let seq = d.changes.lock().unwrap().get(ns).copied().unwrap_or(0);
+    Ok(retifs_core::announce::LibraryAnnounce {
+        name: name.into(),
+        about: about.into(),
+        writer: addr.writer,
+        read_key: addr.read_key,
+        fmt: retifs_core::announce::LIBRARY_FMT,
+        has,
+        bounds: bounds.or(extent),
+        seq,
+    })
 }
 
 /// A record's content being written in place: written ranges are spooled to
@@ -889,6 +976,8 @@ impl Daemon {
 
 async fn serve(store: Arc<SlabStore>, identity: node::IdentitySecret, endpoint: String, args: Args) {
     let identity_bytes: [u8; 64] = identity[..].try_into().expect("RNS identity secrets are 64 bytes");
+    let lib_dest = node::library_destination(identity.clone());
+    let lib_hash = lib_dest.destination_hash().expect("valid destination");
     let dest = node::destination_announcing(identity, true, args.announce_s, args.site.as_deref().map(retifs_core::announce::site_tag), args.hold_limit != Some(0));
     if let Some(site) = &args.site {
         println!("site: {site} (one copy of this node's files is kept at another site)");
@@ -915,6 +1004,7 @@ async fn serve(store: Arc<SlabStore>, identity: node::IdentitySecret, endpoint: 
     // queue grew without limit on a busy transport node while passes waited
     // on the network (found by the overnight soak test).
     let (heard_tx, mut heard_rx) = mpsc::channel::<(PeerId, u8, retifs_core::announce::NodeAnnounce)>(4096);
+    let (lib_tx, mut lib_rx) = mpsc::channel::<(PeerId, u8, u32, Option<retifs_core::announce::LibraryAnnounce>)>(1024);
     // Optionally a NomadNet node (its own identity and destination) serving a namespace.
     let nomadnet = args.nomadnet.as_ref().map(|_| {
         let id = load_or_create_identity(&store.root().join("nomadnet_identity")).expect("nomadnet identity");
@@ -923,7 +1013,7 @@ async fn serve(store: Arc<SlabStore>, identity: node::IdentitySecret, endpoint: 
     });
     let nn_hash = nomadnet.as_ref().map(|d| d.destination_hash().expect("valid destination"));
     let (nn_tx, nn_rx) = mpsc::unbounded_channel::<(RequestPathHash, RespondToken)>();
-    let mut destinations = vec![dest];
+    let mut destinations = vec![dest, lib_dest];
     destinations.extend(nomadnet);
     let node = PrnsNode::new(PrnsNodeRecipe {
         transport_identity: None,
@@ -934,7 +1024,14 @@ async fn serve(store: Arc<SlabStore>, identity: node::IdentitySecret, endpoint: 
         on_event: move |event, _state| {
             match event {
                 PrnsEvent::Diagnostic(Diagnostic::AnnounceHeard { destination, hops, app_data, .. }) => {
-                    let _ = heard_tx.try_send((*destination.as_bytes(), hops, retifs_core::announce::node_announce(app_data)));
+                    match retifs_core::announce::library_announce(app_data) {
+                        Some((v, lib)) => {
+                            let _ = lib_tx.try_send((*destination.as_bytes(), hops, v, lib));
+                        }
+                        None => {
+                            let _ = heard_tx.try_send((*destination.as_bytes(), hops, retifs_core::announce::node_announce(app_data)));
+                        }
+                    }
                 }
                 // Page requests to the NomadNet destination (dynamically registered paths).
                 PrnsEvent::Message(Message::Request { destination, link_id, request_id, path_hash, rtt, .. })
@@ -986,6 +1083,8 @@ async fn serve(store: Arc<SlabStore>, identity: node::IdentitySecret, endpoint: 
         sessions: Mutex::new(HashMap::new()),
         commits: Mutex::new(HashMap::new()),
         next_session: std::sync::atomic::AtomicU64::new(1),
+        heard_libs: Mutex::new(HashMap::new()),
+        lib_wake: Notify::new(),
     });
     println!("attached to shared instance {of}");
     println!("serving {} chunks as retifs.node <{}>", store.len().unwrap_or(0), daemon.node_hex);
@@ -998,6 +1097,71 @@ async fn serve(store: Arc<SlabStore>, identity: node::IdentitySecret, endpoint: 
         None => println!("holding data for others up to the store limit"),
     }
 
+    // Public libraries heard announced (ADR-0029): the latest of each, the
+    // oldest dropped beyond HEARD_LIBS_MAX.
+    let listener = daemon.clone();
+    tokio::spawn(async move {
+        while let Some((node, hops, v, lib)) = lib_rx.recv().await {
+            if node == *lib_hash.as_bytes() {
+                continue;
+            }
+            let key = match &lib {
+                Some(l) => [l.writer, l.read_key].concat(),
+                None => [node.as_slice(), &v.to_be_bytes()].concat(),
+            };
+            let mut heard = listener.heard_libs.lock().unwrap();
+            let new = !heard.contains_key(&key);
+            if let (true, Some(l)) = (new, &lib) {
+                println!("library heard: \"{}\" from <{}>, {hops} hop(s) away", l.name, hex(&node));
+            }
+            heard.insert(key, HeardLib { lib, v, node, hops, heard_ms: now_ms() });
+            if heard.len() > HEARD_LIBS_MAX {
+                if let Some(oldest) = heard.iter().min_by_key(|(_, h)| h.heard_ms).map(|(k, _)| k.clone()) {
+                    heard.remove(&oldest);
+                }
+            }
+        }
+    });
+    // This node's announced libraries, one announce each, every announce
+    // interval and when the list changes.
+    let lib_announcer = daemon.clone();
+    let lib_handle = handle.clone();
+    let lib_every = Duration::from_secs(args.announce_s.max(60) as u64);
+    tokio::spawn(async move {
+        tokio::time::sleep(Duration::from_secs(20)).await;
+        loop {
+            for (ns, name, about) in announced_libraries(&lib_announcer.store) {
+                let d = lib_announcer.clone();
+                let made = tokio::task::spawn_blocking(move || library_announce_now(&d, &ns, &name, &about).map(|l| (ns, l))).await;
+                let (ns, lib) = match made {
+                    Ok(Ok(x)) => x,
+                    Ok(Err(e)) => {
+                        eprintln!("announce: {e}");
+                        continue;
+                    }
+                    Err(_) => continue,
+                };
+                let data = retifs_core::announce::library_app_data(&lib);
+                let Ok(bytes) = personal_rns::routing::announce::emit::AnnounceAppDataBytes::from_slice(&data) else {
+                    eprintln!("announce {ns}: {} bytes don't fit an announce", data.len());
+                    continue;
+                };
+                if lib_handle
+                    .issue(PrnsCommand::AnnounceNow(AnnounceNow { destination: lib_hash, target: AnnounceTarget::AllInterfaces, app_data: AnnounceAppData::Data(bytes) }))
+                    .is_none()
+                {
+                    return;
+                }
+                println!("announced library {ns} as \"{}\" ({} bytes)", lib.name, data.len());
+                // Spaced, so transport nodes' announce limits don't drop them.
+                tokio::time::sleep(Duration::from_secs(15)).await;
+            }
+            tokio::select! {
+                _ = tokio::time::sleep(lib_every) => {}
+                _ = lib_announcer.lib_wake.notified() => {}
+            }
+        }
+    });
     let daemon_for_nn = daemon.clone();
     tokio::spawn(local_api(endpoint, daemon.clone(), false));
     tokio::spawn(local_api(libretifs::app_endpoint(&args.store), daemon.clone(), true));
@@ -1306,7 +1470,7 @@ fn authorize(d: &Daemon, s: &AppScope, req: &Request) -> Result<(), String> {
             }
             Ok(())
         }
-        Request::Ping | Request::Namespaces => Ok(()),
+        Request::Ping | Request::Namespaces | Request::HeardLibraries => Ok(()),
         Request::RecordGet { ns, .. } | Request::Query { ns, .. } | Request::SearchQuery { ns, .. } | Request::RecordHistory { ns, .. } | Request::NsInfo { ns } | Request::Watch { ns, .. } => read(ns),
         Request::ReadRange { ns: Some(ns), .. } => read(ns),
         Request::WriteAt { session, .. }
@@ -1849,6 +2013,52 @@ async fn handle(d: &Daemon, req: Request) -> Result<Response, String> {
             writable(&ns)?;
             ensure_namespace(d, &ns)?;
             Ok(Response::Channel { address: current_addr(d, &ns)?.to_string() })
+        }
+        Request::NsAnnounce { ns, on, name, about } => {
+            if on {
+                current_addr(d, &ns)?;
+                let name = name.filter(|n| !n.trim().is_empty()).unwrap_or_else(|| ns.clone());
+                set_announced(&d.store, &ns, Some((name, about.unwrap_or_default())))?;
+            } else {
+                set_announced(&d.store, &ns, None)?;
+            }
+            d.lib_wake.notify_one();
+            Ok(Response::Done)
+        }
+        Request::HeardLibraries => {
+            // Which heard ones are here already: our own and joined ones, by address.
+            let here: HashMap<String, String> = d
+                .store
+                .namespaces()
+                .map_err(|e| e.to_string())?
+                .into_iter()
+                .filter_map(|n| current_addr(d, &n).ok().map(|a| (a.to_string(), n)))
+                .collect();
+            let heard = d.heard_libs.lock().unwrap();
+            let mut libraries: Vec<libretifs::HeardLibrary> = heard
+                .values()
+                .map(|h| {
+                    let addr = h.lib.as_ref().map(|l| ChannelAddr { writer: l.writer, read_key: l.read_key }.to_string()).unwrap_or_default();
+                    let l = h.lib.clone();
+                    libretifs::HeardLibrary {
+                        name: l.as_ref().map(|l| l.name.clone()).unwrap_or_default(),
+                        about: l.as_ref().map(|l| l.about.clone()).unwrap_or_default(),
+                        has: l.as_ref().map(|l| l.has.clone()).unwrap_or_default(),
+                        bounds: l.as_ref().and_then(|l| l.bounds),
+                        seq: l.as_ref().map(|l| l.seq).unwrap_or(0),
+                        fmt: l.as_ref().map(|l| l.fmt).unwrap_or(0),
+                        readable: l.as_ref().is_some_and(|l| l.fmt <= retifs_core::announce::LIBRARY_FMT),
+                        v: h.v,
+                        here: here.get(&addr).cloned(),
+                        address: addr,
+                        node: hex(&h.node),
+                        hops: h.hops,
+                        heard_ms: h.heard_ms,
+                    }
+                })
+                .collect();
+            libraries.sort_by(|a, b| b.heard_ms.cmp(&a.heard_ms));
+            Ok(Response::Heard { libraries })
         }
 
         Request::NsJoin { ns, address, from, lazy } => {

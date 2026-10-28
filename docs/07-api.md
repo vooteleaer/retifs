@@ -8,7 +8,7 @@ The implemented local API is the `Request`/`Response` enums in `crates/libretifs
 | Section | Implemented as | Differences from the draft |
 |---|---|---|
 | §3 Connection and access | owner socket `retifs.sock`; app socket `apps.sock` with `Hello { token }`, `AppAdd/List/Remove` | apps get a namespace list and read/write, not per-key scopes; the token is pinned to the executable on Linux |
-| §4 Namespaces | `Namespaces`, `NsInfo`, `NsAddress`, `NsJoin`, `NsKeep`, `NsCheckpoint`, `NsVerify` | namespaces are created on first write (or by `NsAddress`); `NsInfo` on an unknown name is an error |
+| §4 Namespaces | `Namespaces`, `NsInfo`, `NsAddress`, `NsJoin`, `NsKeep`, `NsCheckpoint`, `NsVerify`, `NsAnnounce`, `HeardLibraries` | namespaces are created on first write (or by `NsAddress`); `NsInfo` on an unknown name is an error; `NsAnnounce` and `HeardLibraries` announce public libraries and list the ones heard (ADR-0029) |
 | §5–6 Records, attributes | `RecordCreate`, `RecordSet`, `RecordGet`, `RecordDelete` | |
 | §7 Blocks | `ReadRange` (fetches missing chunks within a wait), `WriteBegin/At/Read/Truncate/Commit/Abort` | content is one `content` block per record; write sessions instead of `put_block` |
 | §8 Queries | `Query` with the CLI's terms, optionally `at` a version; `SearchQuery` through a search node's blind index; `NsSearch` publishes the index | remote queries without the read key are exact matches on declared keys ([ADR-0019](adr/0019-remote-query-and-blind-index.md)) |

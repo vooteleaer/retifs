@@ -75,6 +75,7 @@ fn usage() -> ! {
          retifs [--store DIR] rec add NS [KEY=VALUE]... [--file PATH] | rec set NS ID [KEY=VALUE]... [--unset KEY]... [--file PATH]\n\
          retifs [--store DIR] rec get NS ID | rec rm NS ID | rec history NS ID | rec import NS < LINES | query NS[,NS]... [--at VERSION] [TERM]... [--search NODE]\n\
          retifs [--store DIR] ns address NS | ns info NS | ns checkpoint NS | ns search NS | ns verify NS | ns keep NS all|rules | ns copies NS [N] | ns join NAME ADDRESS [--from NODE]... [--lazy]\n\
+         retifs [--store DIR] ns announce NS [off] [--name LABEL] [--about TEXT] | heard
          retifs [--store DIR] ns grant NS WRITER [--grant] [--from NODE]... | ns revoke NS WRITER\n\
          retifs [--store DIR] share create NAME --from NS [TERM]... [--id ID]... [--omit KEY]... [--qr] | share list NS | share rm NS ID\n\
          retifs [--store DIR] ns link NS [--name LABEL] [--q TERMS] [--qr] | open LINK [--as NAME] | ns join NAME LINK\n\
@@ -295,6 +296,35 @@ async fn main() {
             let (own, follows) = client.channels().await.unwrap_or_else(|e| fail(e));
             print_channels(&own, &follows);
         }
+        "heard" => {
+            // Public libraries heard announced (ADR-0029), newest first.
+            let libraries = match client.call(libretifs::Request::HeardLibraries).await.unwrap_or_else(|e| fail(e)) {
+                libretifs::Response::Heard { libraries } => libraries,
+                libretifs::Response::Error { message } => fail(message),
+                _ => fail("unexpected response"),
+            };
+            if libraries.is_empty() {
+                println!("no public libraries heard yet");
+            }
+            let now = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map(|d| d.as_millis() as u64).unwrap_or(0);
+            for l in libraries {
+                let ago = now.saturating_sub(l.heard_ms) / 1000;
+                if !l.readable {
+                    println!("(needs a newer retifs: announce v{}, format {}) from <{}>, {} hop(s), {ago} s ago", l.v, l.fmt, l.node, l.hops);
+                    continue;
+                }
+                let here = l.here.as_deref().map(|n| format!(" [here as {n}]")).unwrap_or_default();
+                println!("{}{here}: {}", l.name, l.about);
+                println!("  from <{}>, {} hop(s), {ago} s ago, version {}", l.node, l.hops, l.seq);
+                for (t, n) in &l.has {
+                    println!("  {n:>8} {t}");
+                }
+                if let Some(b) = l.bounds {
+                    println!("  area {:.3},{:.3} – {:.3},{:.3}", b[0], b[1], b[2], b[3]);
+                }
+                println!("  join: retifs ns join NAME {} --lazy", l.address);
+            }
+        }
         "rec" => {
             let sub = it.next().unwrap_or_else(|| usage());
             let ns = it.next().unwrap_or_else(|| usage());
@@ -470,6 +500,19 @@ async fn main() {
                         fail(message);
                     }
                     println!("{ns}: {n} copies of each file, the writer's own included; every member's node follows it");
+                    return;
+                }
+                "announce" => {
+                    // A public library announced on the network (ADR-0029), or no more.
+                    let opt = |k: &str| rest.windows(2).find(|w| w[0] == k).map(|w| w[1].clone());
+                    let on = rest.first().map(String::as_str) != Some("off");
+                    let req = libretifs::Request::NsAnnounce { ns: ns.clone(), on, name: opt("--name"), about: opt("--about") };
+                    match client.call(req).await.unwrap_or_else(|e| fail(e)) {
+                        libretifs::Response::Done if on => println!("{ns}: announced as a public library (its address is public to whoever hears it)"),
+                        libretifs::Response::Done => println!("{ns}: no longer announced"),
+                        libretifs::Response::Error { message } => fail(message),
+                        _ => fail("unexpected response"),
+                    }
                     return;
                 }
                 "verify" => libretifs::Request::NsVerify { ns },

@@ -1,6 +1,6 @@
 # ADR-0029: Announced public libraries
 
-- **Status:** proposed
+- **Status:** accepted (prototype)
 - **Date:** 2026-10-28
 - **Irreversible:** no while proposed. Once nodes and apps rely on it, the announce's app data is a network format: versioned (`v`), and changes need a new version.
 
@@ -13,8 +13,8 @@ A public library (a map, a country's places, a site, later an app store) is publ
 - The user decides what to join; an announce is a suggestion, not a subscription.
 
 ## Decision
-- **Announcing is the publisher's choice, per library:** `retifs channel announce NAME on|off`, and a switch in the apps beside a public library. Off by default.
-- **A Reticulum destination per announced library**, aspect `retifs.library`, announced by the node that publishes it, at the node's announce interval and when the library gets a new version.
+- **Announcing is the publisher's choice, per library:** `retifs ns announce NS [off] [--name LABEL] [--about TEXT]` (kept in the store's `announce.toml`), and a switch in the apps beside a public library. Off by default.
+- **One `retifs.library` destination per node** (the node's identity, aspect `library`) announces each of the node's announced libraries in turn, one library per announce with its own app data, 15 s apart, at the node's announce interval and when the list changes. (Prns registers destinations when the node starts; one destination whose announces each carry a library avoids a restart per library.) What it announces is the library's address, as `retifs ns address` gives it, so whoever hears it joins with `ns join … --lazy`.
 - **App data** (the same compact map as the node announce, ADR-0014):
   - `v` = 1;
   - `name` (≤ 32 bytes) and `about` (≤ 80 bytes), as the publisher wrote them;
@@ -23,8 +23,8 @@ A public library (a map, a country's places, a site, later an app store) is publ
   - `bounds` (optional): west, south, east, north, for libraries tied to an area (maps, places);
   - `seq`: the channel's latest version, so a listener can see it's alive and current.
   - `fmt`: the library's format version (channel and records), so a node knows before joining whether it can read it.
-  - The whole app data stays under about 300 bytes, inside one announce.
-- **Listening:** every node keeps the library announces it hears (latest per destination, with the time heard and hop count), and answers `retifs heard` / the local API `HeardLibraries`.
+  - The whole app data stays within 280 bytes (an announce has room for about 330): the least common types are left out first, then the description is shortened.
+- **Listening:** every node keeps the library announces it hears (the latest per library, with the announcing node, hop count and time heard; at most 500, the oldest dropped), and answers `retifs heard` / the local API `HeardLibraries`, which also says which of them are here already.
 - **In the apps, an "Announces" view as in LXMF apps:** public libraries heard, newest first, with name, about, what they hold, hops and when. Each has a **Join** button (follows the channel lazily, ADR-0028). Each app shows the ones it can use: the map app the ones with tilesets or places in view, the desktop utility all of them.
 - **When it isn't compatible**, the general rules of [ADR-0030](0030-data-outlives-apps.md) apply: nothing breaks, and nothing is joined that can't be used. For announced libraries they mean:
   1. **A newer announce** (`v` this node doesn't know): kept and listed as "needs a newer retifs", with only the fields it can read. Never parsed by guessing.
