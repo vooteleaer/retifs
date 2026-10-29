@@ -35,22 +35,23 @@ OpenStreetMap's data is open (ODbL), but its tile servers' usage policy forbids 
   - Each such library is a layer of its own that the user can turn on and off.
   - The user can copy a place into their own library, to keep it or add notes, as with any record.
   - These are ordinary libraries, so the same data serves a map app, a list, or anything else (vision 9).
-- **Address search (a gazetteer):**
-  - Records `type = application/x-vnd.retifs.address` for settlements, streets and addresses: `name`, `geo`, `in` (the enclosing place's name, for example "Viimsi vald, Harju maakond"), `kind` (city, village, street, house) and `housenumber` where it has one.
-  - Packed into one block per area, so a device fetches the areas it needs and searches them locally, offline.
-  - Search happens on the device. The question doesn't leave it.
+- **Address search (a gazetteer):** address libraries, one per region, built from OpenStreetMap (`osm-addresses.py`).
+  - Not a record per house (a country has hundreds of thousands): a record `type = application/x-vnd.retifs.address` per street and per settlement. `kind` (`street`, `settlement`), `name`, `in` (the settlement a street is in), `geo` (the middle of its houses), `count`, and `houses`: each house's number (or, in the countryside, its name) with its coordinates, as `label|lat|lon;…`. A street with more than 300 houses is split into parts (`part`), so a record stays a few KB.
+  - `find`: the search terms, a list. The beginnings (from 2 letters) of each word of the name and of the settlement, and the whole words of house names. Words are folded: lower case, no diacritics, letters and digits of any script.
+  - The library declares `find` and `type` as its index keys, so a device that holds it lazily searches it through a search node's blind index ([ADR-0019](0019-remote-query-and-blind-index.md)), exact terms only: each typed word is one term (`find="raek"`), all must match, and a word starting with a digit is a house number, looked for in the matching records' `houses` on the device. Holding the library whole, the device searches it locally.
+  - The map app searches as the user types, every joined library at once. No internet service is asked, not even as a fallback.
 - **Following lazily:**
   - A device joins a map library lazily, fetching what it reads rather than the whole world.
   - It pins the areas the user marks (home country, a trip) for offline use.
   - Tiles it has read are cached like any other block, and served on to others.
 - **A map from the start.** The map app comes with the address of a default public map library (the retifs project's, built from OpenStreetMap) and follows it lazily on first start, so there is a map without any setup. It is an ordinary followed library: the user can remove it, or add others next to it.
 - **No internet tiles.** Tiles come only from map libraries. Without one, the map is blank, places still show on it, and the app suggests joining a map library.
-- **Nominatim stays only until the gazetteer exists.** It remains as an opt-in address search (ADR-0027), off unless the user turns it on, and is to go once map libraries carry addresses.
+- **No internet address search.** The opt-in Nominatim search that stood in for the gazetteer is gone.
 
 ## Impact on the threat model
 - A map library is public: nothing in it is secret.
 - Fetching a tile tells the holder it is fetched from which tile is wanted, as OpenStreetMap's servers learn now. Pinning an area or fetching a whole block of tiles reveals less.
-- Address search on the device reveals nothing. Fetching a gazetteer area reveals only the area.
+- Address search on a device holding the library reveals nothing. Through a search node, the node sees the terms' tokens. An address library is public, so its read key is too: the search node can compute tokens for guessed words and so learn what is searched for. The records fetched afterwards tell their holders the same. A device that wants its searches to itself holds the library whole (a few tens of MB a country).
 - The publisher's identity signs every version, so tiles and addresses can't be altered on the way. A wrong map is the publisher's error, not an attacker's.
 
 ## Consequences
@@ -58,3 +59,4 @@ OpenStreetMap's data is open (ODbL), but its tile servers' usage policy forbids 
 - Someone has to build and publish map libraries (a tool: OSM extract → tiles and gazetteer → library). One publisher per region is enough, since anyone can follow it.
 - Size: a country's vector tiles are tens to a few hundred MB, and its addresses a few tens of MB. That is fine for a PC or a server and too much for a phone's whole-country pin, so pinning is per area.
 - Lazy following with partial pinning must work well for libraries of hundreds of thousands of records (a test case for the store and placement).
+- **The whole world** is the same done per region: a map library and an address library per country or smaller (OpenStreetMap's regional extracts), built by the same tools and announced. A device joins the regions it needs, lazily; the map app draws and searches every joined one. Address formats differ by country (OSM's `addr:*` tagging, scripts), so the builder folds any script and takes what each region tags.
