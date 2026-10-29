@@ -70,6 +70,10 @@ See the [architecture](docs/01-architecture.md) for details.
 
 retifs runs on Linux and Windows (Haiku later). The daemon, `retifsd`, attaches to the machine's Reticulum shared instance, so start [prnsd](https://github.com/KenAKAFrosty/Prns) or Python `rnsd` first.
 
+**Debian, Ubuntu, Raspberry Pi OS (amd64, arm64):** install a `retifs_*.deb` (built by `packaging/deb/build-deb.sh`) with `sudo apt install ./retifs_*.deb`. It brings prnsd along, started only where no Reticulum runs yet, and starts `retifsd` in every user's session; see `/usr/share/doc/retifs/README.Debian`. It needs glibc 2.36 or newer (Debian 12).
+
+**From source:**
+
 retifs builds against Prns 0.3.8, which isn't on crates.io yet. Check it out next to retifs (Cargo can't fetch the Prns repository on Windows: its paths are too long):
 
 ```sh

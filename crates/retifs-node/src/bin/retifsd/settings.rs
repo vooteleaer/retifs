@@ -19,6 +19,7 @@ const SETTINGS: &[(&str, &str, &str, Kind)] = &[
     ("store", "min_free", "--min-free", Kind::Value),
     ("store", "cache_max", "--cache-max", Kind::Value),
     ("store", "db_cache", "--db-cache", Kind::Value),
+    ("store", "no_storage", "--no-storage", Kind::Switch),
     ("node", "device", "--device", Kind::Value),
     ("node", "announce_every", "--announce-every", Kind::Value),
     ("node", "private_requests", "--private-requests", Kind::Switch),
@@ -44,6 +45,7 @@ const TEMPLATE: &str = r#"# retifs node settings. Flags given to retifsd overrid
 # min_free = "..."           # always leave this free on the volume (default: max(10 %, 5G))
 # cache_max = "..."          # cache for others' content read here (default: 20 % of the limit)
 # db_cache = "64M"           # the index's page cache in RAM
+# no_storage = false         # keep nothing of its own on this device, only a keyring (ADR-0031)
 
 [node]
 # device = "..."             # this device's name for keep tags and rules (default: the hostname)

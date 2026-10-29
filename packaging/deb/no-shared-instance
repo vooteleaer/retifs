@@ -1,0 +1,6 @@
+#!/bin/sh
+# Succeeds when no Reticulum shared instance runs on this machine: neither on
+# the abstract socket (Linux default) nor on the TCP port 37428.
+if grep -q '@rns/default' /proc/net/unix 2>/dev/null; then exit 1; fi
+if grep -qiE ':9234 [0-9A-F]+:[0-9A-F]+ 0A ' /proc/net/tcp /proc/net/tcp6 2>/dev/null; then exit 1; fi
+exit 0

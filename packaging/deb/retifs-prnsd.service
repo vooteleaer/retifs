@@ -1,0 +1,16 @@
+# Reticulum for retifs: the prnsd that comes with the package, started only
+# when the machine has no Reticulum shared instance yet (rnsd, or a prnsd of
+# its own). Its configuration is ~/.reticulum, as for any Reticulum program.
+[Unit]
+Description=Reticulum (prnsd, bundled with retifs)
+Before=retifsd.service
+
+[Service]
+Type=simple
+ExecCondition=/usr/lib/retifs/no-shared-instance
+ExecStart=/usr/lib/retifs/prnsd run
+Restart=on-failure
+RestartSec=10
+
+[Install]
+WantedBy=default.target

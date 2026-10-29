@@ -1,0 +1,10 @@
+#!/bin/sh
+# Waits up to 30 s for a Reticulum shared instance (retifsd attaches to it).
+i=0
+while [ $i -lt 30 ]; do
+    grep -q '@rns/default' /proc/net/unix 2>/dev/null && exit 0
+    grep -qiE ':9234 [0-9A-F]+:[0-9A-F]+ 0A ' /proc/net/tcp /proc/net/tcp6 2>/dev/null && exit 0
+    sleep 1; i=$((i + 1))
+done
+echo "no Reticulum shared instance after 30 s; starting anyway" >&2
+exit 0

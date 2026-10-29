@@ -1,0 +1,14 @@
+#!/bin/sh
+set -e
+# Every user's session starts retifsd (and Reticulum where none runs yet).
+if [ "$1" = configure ] && command -v systemctl >/dev/null; then
+    systemctl --global enable retifsd.service retifs-prnsd.service >/dev/null 2>&1 || true
+    cat <<MSG
+retifs is installed. It starts with your next login; to start it now, as yourself:
+    systemctl --user daemon-reload
+    systemctl --user start retifsd
+Then: retifs ping, retifs heard, retifs ns join ... (see /usr/share/doc/retifs/README.Debian).
+On a machine without a desktop session: sudo loginctl enable-linger USER.
+MSG
+fi
+exit 0

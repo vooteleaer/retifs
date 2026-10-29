@@ -1,0 +1,35 @@
+retifs on Debian, Ubuntu and Raspberry Pi OS
+============================================
+
+This is a prototype. The formats still change and the crypto awaits an
+external review: keep nothing in it you can't lose.
+
+What runs
+---------
+- retifsd, as a systemd user service in every user's session
+  (`systemctl --user status retifsd`). Its store is ~/.local/share/retifs.
+- Reticulum: retifsd needs a shared instance on the machine. If none runs
+  (no rnsd, no prnsd of your own), the bundled prnsd starts with your
+  config in ~/.reticulum (`systemctl --user status retifs-prnsd`).
+  Out of the box it only finds others on the local network. To reach
+  further, add an interface, e.g. a TCP connection to a node you trust:
+      /usr/lib/retifs/prnsd interfaces add
+      /usr/lib/retifs/prnsd status
+  or use the retifs-desktop utility.
+
+First steps
+-----------
+    retifs ping                 the daemon and this node's address
+    retifs heard                public libraries announced on the network
+    retifs ns join NAME ADDRESS --lazy
+    retifs nodes                storage nodes heard
+    retifs mount NAME           a library as files under ~/retifs/NAME
+
+Optional services (systemctl --user enable --now ...):
+    retifs-gateway              libraries as websites at http://NAME.localhost:8740/
+    retifs-mount@NAME           a library mounted at login
+    retifs-extractd             attributes from files (see the unit for its token)
+
+Settings: ~/.local/share/retifs/retifs.toml (the daemon writes a commented
+one at first start). Headless machines: `sudo loginctl enable-linger USER`
+keeps the user services running without a login.

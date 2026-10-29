@@ -1,0 +1,6 @@
+#!/bin/sh
+set -e
+if [ "$1" = remove ] && command -v systemctl >/dev/null; then
+    systemctl --global disable retifsd.service retifs-prnsd.service retifs-gateway.service retifs-extractd.service >/dev/null 2>&1 || true
+fi
+exit 0
