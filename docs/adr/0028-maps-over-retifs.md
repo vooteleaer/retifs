@@ -35,6 +35,7 @@ OpenStreetMap's data is open (ODbL), but its tile servers' usage policy forbids 
   - Each such library is a layer of its own that the user can turn on and off.
   - The user can copy a place into their own library, to keep it or add notes, as with any record.
   - These are ordinary libraries, so the same data serves a map app, a list, or anything else (vision 9).
+  - A place library may be searched too: its places carry `find` terms (the beginnings of their name's words, and the whole words of what they are and their address) and its index declares `find`. The map's search then finds "kumu" or "cafe tartu" as it finds addresses. One's own things (photos, contacts, events, saved places) are matched by name on the device, first.
 - **Address search (a gazetteer):** address libraries, one per region, built from OpenStreetMap (`osm-addresses.py`).
   - Not a record per house (a country has hundreds of thousands): a record `type = application/x-vnd.retifs.address` per street and per settlement. `kind` (`street`, `settlement`), `name`, `in` (the settlement a street is in), `geo` (the middle of its houses), `count`, and `houses`: each house's number (or, in the countryside, its name) with its coordinates, as `label|lat|lon;…`. A street with more than 300 houses is split into parts (`part`), so a record stays a few KB.
   - `find`: the search terms, a list. The beginnings (from 2 letters) of each word of the name and of the settlement, and the whole words of house names. Words are folded: lower case, no diacritics, letters and digits of any script.
