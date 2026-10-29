@@ -764,6 +764,10 @@ struct Daemon {
     ns_cache: Mutex<HashMap<String, Arc<Mutex<NsCache>>>>,
     /// Joined namespaces still looking for a checkpoint to start from.
     ns_seeking: Mutex<std::collections::HashSet<String>>,
+    /// When a storage-less node last tried to fetch its own chain back, per
+    /// library: tried again only after a while (an old chain whose commits
+    /// were never placed can't come back).
+    own_tried: Mutex<HashMap<String, Instant>>,
     /// Peers announced since the seeker last looked (a set: each at most once).
     announced: Mutex<std::collections::HashSet<PeerId>>,
     announced_wake: Notify,
@@ -826,6 +830,10 @@ fn write_keyring(store: &SlabStore, leaving: &std::collections::BTreeSet<String>
         let peers: Vec<toml::Value> = d.store.ns_peers(&ns).unwrap_or_default().iter().map(|p| hex(p).into()).collect();
         e.insert("peers".into(), peers.into());
         e.insert("keep_by_rules".into(), d.store.ns_keep_by_rules(&ns).unwrap_or(true).into());
+        // Made here (this node writes as its creator): held whole again after
+        // a restart, its state fetched back from the nodes holding its files.
+        let made_here = d.store.own_channel(&ns_channel(&ns)).ok().flatten().is_some_and(|c| channel_key_in(d.store, &c).writer() == creator);
+        e.insert("made_here".into(), made_here.into());
         libs.insert(ns, e.into());
     }
     let mut channels = toml::Table::new();
@@ -848,6 +856,13 @@ fn write_keyring(store: &SlabStore, leaving: &std::collections::BTreeSet<String>
     if std::fs::write(&tmp, all.to_string()).is_ok() {
         let _ = std::fs::rename(&tmp, path);
     }
+    // Where its own data is kept: its leases are renewed after a restart.
+    if let Ok(bytes) = d.store.export_placement() {
+        let (p, tmp) = (path.with_file_name("placement"), path.with_file_name("placement.new"));
+        if std::fs::write(&tmp, bytes).is_ok() {
+            let _ = std::fs::rename(&tmp, p);
+        }
+    }
 }
 
 /// What a keyring is written from.
@@ -855,8 +870,8 @@ struct Keyring<'a> {
     store: &'a SlabStore,
 }
 
-/// Puts a keyring's libraries and own channels into a fresh (in-memory)
-/// store, held lazily; returns how many libraries.
+/// Puts a keyring's libraries, own channels and placement into a fresh
+/// (in-memory) store, those joined held lazily; returns how many libraries.
 fn restore_keyring(store: &SlabStore, path: &std::path::Path) -> usize {
     let Some(all) = std::fs::read_to_string(path).ok().and_then(|t| t.parse::<toml::Table>().ok()) else { return 0 };
     let unhex = |h: &str| -> Option<Vec<u8>> { (0..h.len()).step_by(2).map(|i| h.get(i..i + 2).and_then(|b| u8::from_str_radix(b, 16).ok())).collect() };
@@ -875,9 +890,13 @@ fn restore_keyring(store: &SlabStore, path: &std::path::Path) -> usize {
         }
         let peers: Vec<PeerId> = e.get("peers").and_then(|p| p.as_array()).map(|a| a.iter().filter_map(|p| bytes(Some(p)).and_then(|b| b.try_into().ok())).collect()).unwrap_or_default();
         let _ = store.add_ns_peers(&ns, &peers);
-        let _ = store.set_ns_lazy(&ns, true);
+        let made_here = e.get("made_here").and_then(|b| b.as_bool()).unwrap_or(false);
+        let _ = store.set_ns_lazy(&ns, !made_here);
         let _ = store.set_ns_keep_by_rules(&ns, e.get("keep_by_rules").and_then(|b| b.as_bool()).unwrap_or(true));
         n += 1;
+    }
+    if let Ok(bytes) = std::fs::read(path.with_file_name("placement")) {
+        let _ = store.import_placement(&bytes);
     }
     for (name, e) in all.get("channel").and_then(|l| l.as_table()).cloned().unwrap_or_default() {
         let (Some(seed), Some(key)) = (bytes(e.get("signing_seed")).and_then(|b| b.try_into().ok()), bytes(e.get("read_key")).and_then(|b| b.try_into().ok())) else { continue };
@@ -1332,6 +1351,7 @@ async fn serve(store: Arc<SlabStore>, identity: node::IdentitySecret, endpoint: 
         follow_wake: Notify::new(),
         ns_wake: Notify::new(),
         ns_cache: Mutex::new(HashMap::new()),
+        own_tried: Mutex::new(HashMap::new()),
         ns_seeking: Mutex::new(if args.no_storage { store.ns_names().unwrap_or_default().into_iter().collect() } else { std::collections::HashSet::new() }),
         announced: Mutex::new(std::collections::HashSet::new()),
         announced_wake: Notify::new(),
@@ -2815,7 +2835,12 @@ async fn publish_channel(d: &Daemon, name: &str, data: Vec<u8>, compress: bool, 
     c.last = Some((sealed.cid, sealed.seed));
     c.head = head.encode().to_vec();
     d.store.update_own_channel(&c).map_err(|e| e.to_string())?;
-    d.store.need_file(&file).map_err(|e| e.to_string())?;
+    // The commit is kept elsewhere with the file it names: the chain can then
+    // be fetched back from the file's holders (ADR-0031).
+    d.store.need_file_with(&file, &[(sealed.cid, sealed.seed)]).map_err(|e| e.to_string())?;
+    // A storage-less node's head is only in its keyring: written at once, or
+    // a restart would go back to an older head and reuse its numbers.
+    save_keyring(d);
     d.upkeep_wake.notify_one();
     println!("channel {name}: published version {} ({file})", c.seq);
     Ok((c.seq, file))
@@ -2899,6 +2924,19 @@ async fn ns_sync(d: Arc<Daemon>) {
             _ = tick.tick() => {}
         }
         for ns in d.store.ns_names().unwrap_or_default() {
+            // A storage-less node's own chain after a restart: back from the
+            // nodes holding its files first. Until then, nothing is merged
+            // (or checkpointed) from the part of it that is here.
+            if own_chain_missing(&d, &ns) {
+                let due = d.own_tried.lock().unwrap().get(&ns).is_none_or(|t| t.elapsed() > Duration::from_secs(600));
+                if due && let Err(e) = restore_own(&d, &ns).await {
+                    d.own_tried.lock().unwrap().insert(ns.clone(), Instant::now());
+                    eprintln!("ns {ns}: own chain: {e}");
+                }
+                if own_chain_missing(&d, &ns) && d.store.ns_peers(&ns).unwrap_or_default().is_empty() {
+                    continue;
+                }
+            }
             if let Err(e) = publish_checkpoint(&d, &ns).await {
                 eprintln!("ns {ns}: checkpoint: {e}");
             }
@@ -3618,6 +3656,81 @@ async fn fill_lazy(d: &Daemon, ns: &str) -> Result<usize, String> {
     fetch_paths(d, ns, &ids.into_iter().collect::<Vec<_>>(), &[], true).await
 }
 
+/// Whether this node's own chain in `ns` is not all here: a storage-less
+/// node's, after a restart (its head is in the keyring, its commits
+/// elsewhere). Merged without it, the namespace would lack this node's own
+/// operations, and write them again on every round.
+fn own_chain_missing(d: &Daemon, ns: &str) -> bool {
+    if !d.no_storage {
+        return false;
+    }
+    let Some(c) = d.store.own_channel(&ns_channel(ns)).ok().flatten() else { return false };
+    let Some((last, _)) = c.last else { return false };
+    if d.store.fetch(&last).ok().flatten().is_none() {
+        return true;
+    }
+    let own = channel_key(d, &c).writer();
+    chains(d, ns, false).is_ok() && ns_entry_get(d, ns).is_some_and(|e| e.lock().unwrap().gaps.contains(&own))
+}
+
+/// Fetches a storage-less node's own chain in `ns` back from the nodes
+/// holding its files (ADR-0031): its commits went there with the operations
+/// files, and its latest checkpoint with its state. The walk stops at that
+/// checkpoint's frontier; a library made here then starts from it.
+async fn restore_own(d: &Daemon, ns: &str) -> Result<(), String> {
+    let Some(c) = d.store.own_channel(&ns_channel(ns)).map_err(|e| e.to_string())? else { return Ok(()) };
+    let Some(last) = c.last else { return Ok(()) };
+    let own = channel_key(d, &c).writer();
+    let addr = current_addr(d, ns)?;
+    let mut holders: Vec<PeerId> = Vec::new();
+    for o in d.store.own_leases().map_err(|e| e.to_string())? {
+        if !holders.contains(&o.holder) {
+            holders.push(o.holder);
+        }
+    }
+    if holders.is_empty() {
+        return Err("no node is known to hold this node's files".into());
+    }
+    let seeking = d.ns_seeking.lock().unwrap().contains(ns) && d.store.ns_checkpoint(ns).map_err(|e| e.to_string())?.is_none();
+    let walk = if seeking && own == addr.writer { Walk::ToCheckpoint } else { Walk::ToHeld };
+    let mut last_err = String::new();
+    for h in holders {
+        let link = match d.link_to(&h).await {
+            Ok(l) => l,
+            Err(e) => {
+                last_err = format!("<{}>: {e}", hex(&h));
+                continue;
+            }
+        };
+        let got = match fetch_chain(d, link, &addr, last, &own, None, None, walk).await {
+            Ok(got) => got,
+            Err(e) => {
+                last_err = format!("<{}>: {e}", hex(&h));
+                continue;
+            }
+        };
+        if let Some(cp) = got.checkpoint {
+            install_checkpoint(d, ns, link, &cp).await?;
+            // Named by this node already: not named again.
+            d.store.set_ns_checkpoint_published(ns, &cp.root).map_err(|e| e.to_string())?;
+            println!("ns {ns}: own chain back from <{}> ({} commit(s)), starting from its checkpoint {cp}", hex(&h), got.commits);
+        } else {
+            println!("ns {ns}: own chain back from <{}> ({} commit(s), {})", hex(&h), got.commits, got.stopped);
+        }
+        d.ns_seeking.lock().unwrap().remove(ns);
+        if let Some(e) = ns_entry_get(d, ns) {
+            let mut e = e.lock().unwrap();
+            e.state = None;
+            e.gaps.remove(&own);
+        }
+        let merged = materialize(d, ns)?;
+        println!("ns {ns}: merged, {} record(s), {} writer(s)", d.store.records(ns).map_err(|e| e.to_string())?.len(), merged.writers.len());
+        d.ns_wake.notify_one();
+        return Ok(());
+    }
+    Err(format!("no holder gave it back yet ({last_err})"))
+}
+
 /// Names this node's latest checkpoint in its chain, if it holds `grant`
 /// and hasn't named this one yet (ADR-0018). The checkpoint file (with its
 /// state tree) is then needed and placed like the history.
@@ -3668,6 +3781,13 @@ async fn ensure_local(d: &Daemon, file: &FileRef, range: std::ops::Range<u64>, n
     for h in d.store.hints(&file.root).unwrap_or_default() {
         if !peers.contains(&h.peer) {
             peers.push(h.peer);
+        }
+    }
+    // This node's own file: the nodes holding it for this node (a
+    // storage-less node's only copies).
+    for o in d.store.own_leases_for(&file.root).unwrap_or_default() {
+        if !peers.contains(&o.holder) {
+            peers.push(o.holder);
         }
     }
     loop {
@@ -3787,7 +3907,11 @@ fn use_key(d: &Daemon, ns: &str, key: &[u8; 32]) -> Result<(), String> {
 /// The signing key of an own channel: its own namespace, or a member's key
 /// writing to another's (ADR-0017).
 fn channel_key(d: &Daemon, c: &retifs_store::OwnChannel) -> ChannelKey {
-    match d.store.member_channel(&c.name).ok().flatten() {
+    channel_key_in(&d.store, c)
+}
+
+fn channel_key_in(store: &SlabStore, c: &retifs_store::OwnChannel) -> ChannelKey {
+    match store.member_channel(&c.name).ok().flatten() {
         Some(ns_id) => ChannelKey::member(c.signing_seed, c.read_key, ns_id),
         None => ChannelKey::from_secrets(c.signing_seed, c.read_key),
     }
@@ -3953,6 +4077,10 @@ async fn transaction(d: &Daemon, ns: &str, steps: Vec<TxStep>) -> Result<Vec<Rec
 /// committed to this node's writer chain, then the namespace is rebuilt by
 /// merging every writer chain held here.
 async fn write_ops(d: &Daemon, ns: &str, mut ops: Vec<Op>) -> Result<u64, String> {
+    // A storage-less node writes on top of its own chain: back first.
+    if own_chain_missing(d, ns) {
+        restore_own(d, ns).await.map_err(|e| format!("{ns}: this node's own changes aren't back yet after the restart: {e}"))?;
+    }
     let new = d.store.ns_info(ns).map_err(|e| e.to_string())?.is_none();
     ensure_namespace(d, ns)?;
     if new && let Some(identity) = d.store.ns_identity(ns).map_err(|e| e.to_string())? {
@@ -4903,6 +5031,8 @@ fn now_s() -> u64 {
 /// token, from the local store: what a lease for the whole file lists.
 fn file_chunks(store: &SlabStore, file: &FileRef) -> Result<Vec<(Cid, ChunkToken)>, String> {
     let mut out = manifest_chunks(store, file)?;
+    // With it, chunks attached to it (a channel commit with its file).
+    out.extend(store.attached(&file.root).unwrap_or_default().iter().map(|(c, s)| (*c, ChunkToken::for_seed(s))));
     // A checkpoint file comes with its state tree (ADR-0018).
     if file.size <= 1 << 20
         && let Some(root) = manifest::read_all(store, file).ok().and_then(|b| Checkpoint::decode(&b).ok()).and_then(|c| c.state)
@@ -5103,6 +5233,11 @@ async fn place_all(d: &Daemon) -> Result<(), String> {
     for file in d.store.needed_files().map_err(|e| e.to_string())? {
         let want = wanted.get(&file.root).map_or(Copies::Default, |&n| Copies::Exactly(n));
         let Some(Need { mut risk, holders, own, mut elsewhere }) = review(d, &file, want, &sites)? else { continue };
+        // Not all here (a storage-less node's file, only cached and evicted):
+        // nothing to place from; its holders keep it meanwhile.
+        if file_chunks(&d.store, &file).is_err() {
+            continue;
+        }
         if ranked.is_none() {
             ranked = Some(rank_candidates(d).await?);
         }

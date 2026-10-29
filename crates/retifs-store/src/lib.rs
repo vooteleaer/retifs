@@ -31,6 +31,7 @@ use std::{
 };
 
 mod apps;
+mod carry;
 mod invites;
 mod channels;
 mod db;

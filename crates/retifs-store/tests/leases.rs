@@ -288,3 +288,27 @@ fn storage_nodes_keep_their_announce_interval_and_are_forgotten_when_silent() {
     st.heard_storage_node(&[1; 16], 1, Some(60), None, 800_000).unwrap();
     assert_eq!(st.storage_nodes().unwrap().len(), 2, "its next announce brings it back");
 }
+
+#[test]
+fn placement_carries_over_to_a_fresh_store_with_attached_chunks() {
+    let (_d, st) = store();
+    let (file_chunk, commit) = (chunk(1), chunk(2));
+    let file = retifs_core::FileRef { root: file_chunk.cid, seed: file_chunk.seed, size: 3000 };
+    st.need_file_with(&file, &[(commit.cid, commit.seed)]).unwrap();
+    st.need_file_with(&file, &[(commit.cid, commit.seed)]).unwrap();
+    st.need_file(&file).unwrap();
+    assert_eq!(st.attached(&file.root).unwrap(), vec![(commit.cid, commit.seed)], "kept once, and kept by a later need");
+    let (_, l) = lease(3, &[file_chunk.clone(), commit.clone()], 5000);
+    st.record_own_lease(&l, &[4; 16], &[file.root]).unwrap();
+
+    // A storage-less node's store after a restart: only what was carried.
+    let dir = tempfile::tempdir().unwrap();
+    let fresh = SlabStore::open_in_memory(dir.path(), 1 << 20).unwrap();
+    let rows = fresh.import_placement(&st.export_placement().unwrap()).unwrap();
+    assert_eq!(rows, 2);
+    assert_eq!(fresh.needed_files().unwrap(), vec![file]);
+    assert_eq!(fresh.attached(&file.root).unwrap(), vec![(commit.cid, commit.seed)]);
+    let own = fresh.own_leases().unwrap();
+    assert_eq!((own.len(), own[0].holder, own[0].lease.id), (1, [4; 16], l.id));
+    assert_eq!(fresh.import_placement(&[9, 9, 9]).unwrap(), 0, "unknown version: nothing");
+}

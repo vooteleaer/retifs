@@ -4,8 +4,11 @@
 //! ```text
 //! STORAGE_NODES  peer (16) → hops (1) ‖ last_heard_ms (8) ‖ avoid_until_ms (8) [‖ announce_s (4) [‖ site (8)]]
 //! HOLDER_STATS   peer (16) → ok (4) ‖ fail (4) ‖ last_ok_ms (8)
-//! NEEDED         root CID → seed (32) ‖ size (8)
+//! NEEDED         root CID → seed (32) ‖ size (8) ‖ attached: (CID (33) ‖ seed (32)) × n
 //! ```
+//! A file's attached chunks are kept elsewhere with it: a channel commit goes
+//! with the operations file it names, so a chain can be fetched back from
+//! the nodes holding the files (a storage-less node after a restart, ADR-0031).
 //! A file is needed by its writer and by every reader that sought it; each
 //! needer keeps copies near itself, and need ends when it stops renewing.
 
@@ -14,9 +17,9 @@ use retifs_core::{manifest::FileRef, Cid, Seed};
 
 use crate::{wants::PeerId, SlabStore, StoreError};
 
-const STORAGE_NODES: TableDefinition<&[u8], &[u8]> = TableDefinition::new("storage_nodes");
-const HOLDER_STATS: TableDefinition<&[u8], &[u8]> = TableDefinition::new("holder_stats");
-const NEEDED: TableDefinition<&[u8], &[u8]> = TableDefinition::new("needed");
+pub(crate) const STORAGE_NODES: TableDefinition<&[u8], &[u8]> = TableDefinition::new("storage_nodes");
+pub(crate) const HOLDER_STATS: TableDefinition<&[u8], &[u8]> = TableDefinition::new("holder_stats");
+pub(crate) const NEEDED: TableDefinition<&[u8], &[u8]> = TableDefinition::new("needed");
 /// peer (16) → rtt_ms (4) ‖ rate_bps (4) ‖ samples (4)
 const LINK_QUALITY: TableDefinition<&[u8], &[u8]> = TableDefinition::new("link_quality");
 
@@ -299,13 +302,43 @@ impl SlabStore {
 
     /// This node needs `file` kept (it wrote or sought it).
     pub fn need_file(&self, file: &FileRef) -> Result<(), StoreError> {
+        self.need_file_with(file, &[])
+    }
+
+    /// Like [`need_file`](Self::need_file), with chunks kept elsewhere along
+    /// with the file (added to those it has).
+    pub fn need_file_with(&self, file: &FileRef, attached: &[(Cid, Seed)]) -> Result<(), StoreError> {
         let w = self.write()?;
         {
-            let v = [&file.seed.0[..], &file.size.to_be_bytes()].concat();
-            w.open_table(NEEDED)?.insert(file.root.as_bytes().as_slice(), v.as_slice())?;
+            let mut t = w.open_table(NEEDED)?;
+            let mut v = [&file.seed.0[..], &file.size.to_be_bytes()].concat();
+            let old = t.get(file.root.as_bytes().as_slice())?.map(|g| g.value().to_vec());
+            if let Some(old) = old.filter(|o| o.len() > 40) {
+                v.extend_from_slice(&old[40..]);
+            }
+            for (cid, seed) in attached {
+                if !v[40..].chunks(65).any(|e| &e[..33] == cid.as_bytes().as_slice()) {
+                    v.extend_from_slice(cid.as_bytes());
+                    v.extend_from_slice(&seed.0);
+                }
+            }
+            t.insert(file.root.as_bytes().as_slice(), v.as_slice())?;
         }
         w.commit()?;
         Ok(())
+    }
+
+    /// The chunks kept elsewhere along with needed file `root`.
+    pub fn attached(&self, root: &Cid) -> Result<Vec<(Cid, Seed)>, StoreError> {
+        let r = self.db.begin_read()?;
+        let Some(v) = r.open_table(NEEDED)?.get(root.as_bytes().as_slice())?.map(|g| g.value().to_vec()) else { return Ok(Vec::new()) };
+        Ok(v.get(40..)
+            .unwrap_or_default()
+            .as_chunks::<65>()
+            .0
+            .iter()
+            .filter_map(|e| Some((Cid::from_bytes(e[..33].try_into().ok()?)?, Seed(e[33..].try_into().ok()?))))
+            .collect())
     }
 
     /// Stops keeping `root` at one holder: its leases there stop serving it
