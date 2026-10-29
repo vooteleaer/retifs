@@ -1,6 +1,6 @@
 # ADR-0010: Continuous seeking and replication
 
-- **Status:** proposed
+- **Status:** proposed (largely built, see Review; the lease and receipt formats wait for the external review)
 - **Date:** 2026-10-14
 - **Irreversible:** partly. The lease and receipt formats are decision 6 and need test vectors; the seeking behaviour itself is not.
 
@@ -149,3 +149,11 @@ proof    = HMAC-SHA256(nonce, "retifs/v1/prove" ‖ ciphertext)[0..16]
 - **Owner:** `retifs replicate CAP --to NODE…` leases every chunk of the file (nodes, data, padding; ≤ 1024 per lease) to each node. Upkeep collects receipts, renews at half-term (`--lease-term`, default 30 days), re-offers a lease the holder lost, and checks storage proofs on 4 random chunks every 10 minutes. `status` shows "leased to N node(s), M confirmed by receipt" (a failed proof un-confirms).
 - **Tests:** unit and store tests (signatures, tampering, quota, conflict, refcounts across leases, own data kept, expiry, confirmed holders). Live, three daemons on one machine: two nodes without room refused a 2 MB file (`NoRoom`); a holder accepted it, pulled 144 chunks, returned a receipt, passed the storage proof, and was renewed at half-term; with the owner offline, a reader with the read-cap got the file from the holder (hash matched).
 
+## Review (2026-10-29)
+Built: wants and tree expansion, partial availability, seeking on announces and new wants, `have` before `get`, per-chunk proofs of access, private single-item requests, the cache never served, publishing, holder hints, leases, receipts, push, renewals in bundles, storage proofs, stamps.
+
+Not built yet:
+- the store generation counter in announces (peers are asked again on a timer);
+- slicing `have` per peer and decoy prefixes;
+- the holder map as described (sources ranked, load spread, failover): hints and placement records stand in for it;
+- per-file serving destinations.

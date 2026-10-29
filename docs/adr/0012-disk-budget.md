@@ -1,6 +1,6 @@
 # ADR-0012: Disk budget and eviction
 
-- **Status:** proposed
+- **Status:** accepted (prototype), 2026-10-29; the spare tier and the signed release are not built yet (see Review)
 - **Date:** 2026-10-14
 - **Irreversible:** no
 
@@ -107,3 +107,9 @@ In `retifs-store` and `retifsd`:
   - Eviction scans the whole index, which is fine for a prototype; an access-ordered index comes later.
   - Segment compaction.
 
+## Review (2026-10-29)
+Built and in use on the testbed: the store limit and free-space reserve, hard and elastic tiers, eviction in the order above, refusing leases past the hold limit, refusing pinned writes with "disk budget reached", compaction (`retifsd --compact`), and short of room releasing own files with enough confirmed copies elsewhere to the cache ([ADR-0031](0031-storage-less-nodes.md)).
+
+Not built yet:
+- **Filling the spare tier:** the tier exists as a flag in the store, but nothing fills it by need score.
+- **The signed release** (`retifs release`) a holder sends its owner when an operator shrinks a lease.

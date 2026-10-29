@@ -2,7 +2,7 @@
 
 - **Status:** proposed. This is a draft, and it depends on [ADR-0008](0008-chunk-encryption-and-cid.md).
 - **Date:** 2026-10-13
-- **Irreversible:** yes. Manifest nodes are stored forever, and their bytes determine their CIDs. This is decision 11, and it applies decision 2 (canonical serialization) to manifests.
+- **Irreversible:** yes. Manifest nodes are stored forever, and their bytes determine their CIDs. This is decision 11, and it applies decision 2 (canonical serialization) to manifests. Vectors in `crates/retifs-core/test-vectors/manifest-v1.json` (inline roots, padding by PADMÉ, stable padding, two levels), verified with RNS primitives by `verify_manifest_rns.py`, which seals data, padding and nodes again independently.
 
 ## Context
 A file is a sequence of encrypted chunks. Readers need random access: reading one byte of a 10 GB file should cost a few manifest nodes plus one chunk ([architecture](../01-architecture.md)). Storage nodes must not learn which chunks belong together. Public content should converge: independent writers of the same file must produce the same manifest, and so the same CID.

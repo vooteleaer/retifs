@@ -1,6 +1,6 @@
 # ADR-0013: Slow links (LoRa)
 
-- **Status:** proposed
+- **Status:** proposed (partly built, see Review; LoRa measurements wait for a working second radio)
 - **Date:** 2026-10-14
 - **Irreversible:** partly. Inline tiny files (manifest format, [ADR-0009](0009-manifest-format.md)) and a compression flag in the chunk frame ([ADR-0008](0008-chunk-encryption-and-cid.md)) are format decisions; both are now in the draft format (2026-10-14). The rest is policy.
 
@@ -62,3 +62,13 @@ See the [threat model](../04-threat-model.md).
   - Per-interface scheduling and airtime accounting.
   - Two format additions to settle before ADR-0008/0009.
   - Real numbers are pending a LoRa test with a second RNode.
+
+## Review (2026-10-29)
+Built: compression before encryption and inline tiny files (in the draft format, [ADR-0008](0008-chunk-encryption-and-cid.md), [ADR-0009](0009-manifest-format.md)); slow paths recognised by measured RTT and rate; placement never over a slow path; seeking over a slow peer only within `--slow-link-budget`, manifests first.
+
+Not built yet:
+- airtime budgets and priorities per interface (a client of the shared instance can't see interfaces; this needs Prns);
+- store-and-forward;
+- link-adaptive content (previews first) beyond manifests first;
+- smaller chunks for LoRa-native content;
+- measurements over LoRa (one direction of the testbed's radio link doesn't work, parked 2026-10-20).

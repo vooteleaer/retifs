@@ -1,8 +1,8 @@
 # ADR-0020: Sharing, names and invitations
 
-- **Status:** proposed (draft)
+- **Status:** accepted (prototype), 2026-10-29
 - **Date:** 2026-10-20
-- **Irreversible:** no. Invitations are a protocol message; the grant they lead to is the existing operation ([ADR-0017](0017-multi-writer-namespaces.md)). The link format (`retifs:`) should stay stable once printed on QR codes.
+- **Irreversible:** partly. The `retifs:` link envelope, the invitation encoding and the fingerprint words are [irreversible decision 13](../02-irreversible-decisions.md) (printed on QR codes; words compared between implementations), with vectors verified with RNS, and wait for the external review with the other formats. How invitations are redeemed is protocol, and the grant they lead to is the existing operation ([ADR-0017](0017-multi-writer-namespaces.md)).
 
 ## Context
 Sharing works, but by hand: a namespace address is about 140 characters (`retifs-ch:1:<writer>:<read key>`), a node is a 32-digit hash, and giving someone write access is a round trip. They join and send back their writer key, then the creator grants it. People won't do that for a family calendar or a shared album. They need names they recognise, a way to pass an address without typing it, and a share that takes one step.
@@ -90,6 +90,6 @@ invitation = { "ns": namespace address, "node": creator's node, "secret": 32 ran
 - Harder: the creator's node must be reachable once to redeem a write invitation; contact records need the conventions (with images and audio).
 
 ## Open
-- The word list for fingerprints (an existing one, e.g. the PGP word list or BIP-39 English, or our own).
+- ~~The word list for fingerprints~~: BIP-39 English over SHA-256 of the key (decision 13, `verify_words.py`).
 - One-record sharing: `cap` links, share namespaces, or both.
 - Whether a profile is per node or per person (a person has several nodes; a profile record in their namespace could list them).

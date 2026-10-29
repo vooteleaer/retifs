@@ -1,8 +1,8 @@
 # ADR-0021: Shares: a selection of records as its own namespace
 
-- **Status:** proposed (draft)
+- **Status:** accepted (prototype), 2026-10-29
 - **Date:** 2026-10-21
-- **Irreversible:** no. A share is an ordinary namespace ([ADR-0017](0017-multi-writer-namespaces.md)); what's new is how a node keeps it filled.
+- **Irreversible:** partly. A share is an ordinary namespace ([ADR-0017](0017-multi-writer-namespaces.md)); what's new is how a node keeps it filled. The copies' derived record IDs are [irreversible decision 12](../02-irreversible-decisions.md) (owner nodes must derive the same ones), with vectors verified with RNS (`verify_share_rns.py`).
 
 ## Context
 A namespace has one read key: whoever has its address reads all of it. People rarely want that. They share an album, a folder, a few files, not their whole photo library. Grants can't be limited to some records ([ADR-0017](0017-multi-writer-namespaces.md), decided 2026-10-20: it would make merging depend on arrival order), and a query in a link is a view, not a limit ([ADR-0020](0020-sharing-names-invitations.md)).

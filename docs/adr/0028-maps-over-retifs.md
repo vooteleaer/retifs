@@ -1,6 +1,6 @@
 # ADR-0028: Maps over retifs: tiles and address search as public libraries
 
-- **Status:** proposed
+- **Status:** accepted (prototype), 2026-10-29
 - **Date:** 2026-10-28
 - **Irreversible:** no. Attribute conventions and a dataset layout.
 
@@ -61,3 +61,11 @@ OpenStreetMap's data is open (ODbL), but its tile servers' usage policy forbids 
 - Size: a country's vector tiles are tens to a few hundred MB, and its addresses a few tens of MB. That is fine for a PC or a server and too much for a phone's whole-country pin, so pinning is per area.
 - Lazy following with partial pinning must work well for libraries of hundreds of thousands of records (a test case for the store and placement).
 - **The whole world** is the same done per region: a map library and an address library per country or smaller (OpenStreetMap's regional extracts), built by the same tools and announced. A device joins the regions it needs, lazily; the map app draws and searches every joined one. Address formats differ by country (OSM's `addr:*` tagging, scripts), so the builder folds any script and takes what each region tags.
+
+## Review (2026-10-29)
+Built: map libraries of vector tiles drawn by the map app, several maps side by side, places from joined libraries as layers (by cell when held lazily, with detail by zoom), the gazetteer and place search through the blind index, no internet tiles or search. Published on the testbed: `eesti-kaart`, `eesti-kohad`, `eesti-aadressid`.
+
+Not built, or done differently:
+- **A map from the start:** instead of a built-in address, a map library is joined from the libraries heard on the network ([ADR-0029](0029-announced-public-libraries.md)). A default address may still come with the app once the project publishes one.
+- **Pinning an area for offline use** (keep rules by area).
+- **Regions beyond Estonia** (the whole world, per region).

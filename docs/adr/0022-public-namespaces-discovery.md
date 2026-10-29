@@ -1,6 +1,6 @@
 # ADR-0022: Public namespaces and discovery over standard announces
 
-- **Status:** proposed (draft)
+- **Status:** accepted in part (prototype), 2026-10-29: members' node addresses in the namespace. Discovery by announces is superseded by [ADR-0029](0029-announced-public-libraries.md) (`retifs.library`, not `retifs.public`)
 - **Date:** 2026-10-21
 - **Irreversible:** partly. The announce's aspect and app_data format are read by other nodes and tools; once public namespaces announce with them, changing them needs a version field (included below).
 
@@ -50,6 +50,7 @@ Prns 0.3.8 passes app_data with each heard announce (`Diagnostic::AnnounceHeard`
 - **Member node addresses** are visible to members only.
 
 ## Open
+Discovery went the way of [ADR-0029](0029-announced-public-libraries.md): one `retifs.library` destination per node announcing its public libraries in turn, without a stamp so far, and what a library holds by type instead of free tags. What stays open here:
 - A stamp on `retifs.public` announces, and how much.
 - Tags: free words, or a small convention (type, language, region).
 - Whether a node with many public namespaces announces each, or one summary destination with the list fetched over a link.

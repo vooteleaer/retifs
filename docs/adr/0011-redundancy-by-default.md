@@ -1,6 +1,6 @@
 # ADR-0011: Redundancy by default
 
-- **Status:** proposed
+- **Status:** proposed (partly built, see Review)
 - **Date:** 2026-10-14
 - **Irreversible:** partly. Erasure-coded shares would be a format of their own; decided (2026-10-20) to start with full replicas and add shares later as a layer below chunks, so this no longer blocks [ADR-0008](0008-chunk-encryption-and-cid.md) and [ADR-0009](0009-manifest-format.md).
 
@@ -108,3 +108,14 @@ See the [threat model](../04-threat-model.md).
 - Leases, renewals, receipts and storage proofs exist as a first slice ([ADR-0010](0010-continuous-seeking.md), "Leases and receipts"): `retifs replicate CAP --to NODE…` keeps a file on chosen nodes, and `status` reports confirmed copies.
 - Per-lease derived signing keys are implemented; spread budget (generations) is in the format, set to 0 (don't pass on) for now.
 - Not yet: replication targets as policy, own-node pool discovery, automatic recruitment and repair to a target, failure domains, volunteer offers (`retifs.store`), diffuse mode, the spare tier, and the full-replicas-vs-erasure-coding decision.
+
+## Review (2026-10-29)
+Built: a replication target as policy (loss estimate, a floor of copies, a library's own number), recruitment of the nearest storage nodes by leases, repair by placement, storage proofs, sites as failure domains, opting out of holding (`--hold-for-others 0`, `hold: false`), and nodes with little or no storage ([ADR-0031](0031-storage-less-nodes.md)).
+
+Not built yet:
+- the own-node pool found on a LAN with zero configuration;
+- volunteer storage offers (`retifs.store`);
+- diffuse mode (push seeding, epidemic diffusion, cover holdings, timing defences);
+- the spread budget (the lease's `generations` field is there and always 0) and a network radius;
+- the spare tier ([ADR-0012](0012-disk-budget.md));
+- erasure coding (decided for later, its own ADR).

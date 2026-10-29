@@ -52,7 +52,7 @@ Prototypes are throwaway. They're for learning, not for locking in the format. T
 - [ ] Diffuse mode: anonymous push seeding, epidemic re-replication with jitter, cover holdings ([ADR-0011](adr/0011-redundancy-by-default.md)).
 - [x] Format additions: compression flag in the chunk frame (opt-in zstd) and inline tiny files in manifests (node kind 2); vectors regenerated and verified against RNS.
 - [x] Decide before accepting ADR-0008/0009: full replicas now, erasure coding later below chunks; a 512 B smallest class ([format decisions](08-open-format-decisions.md)).
-- [ ] External review of ADR-0008/0009 (construction, KDF labels), then accept them.
+- [ ] External review of the irreversible formats (ADR-0008/0009 first; also 0010's leases, 0015–0019, decisions 12 and 13), then accept them. The reviewer's starting point: [external review](09-external-review.md).
 - [ ] Slow links: per-interface priority and airtime budget; no bulk/spare/diffusion over LoRa ([ADR-0013](adr/0013-slow-links.md)); LoRa measurements once a second RNode is available.
 
 ## Phase 2: database
@@ -71,12 +71,15 @@ Prototypes are throwaway. They're for learning, not for locking in the format. T
 - [x] Blind index for search nodes without the read key: declared keys, exact match, index channel derived from the read key, `/retifs/query` with proof, `query --search NODE`; vectors verified against RNS ([ADR-0019](adr/0019-remote-query-and-blind-index.md)).
 - [x] Lazy members: `ns join --lazy` holds the checkpoint, the chains since and only the state paths it needs (changed records on sync, others on demand) ([ADR-0018](adr/0018-state-trees.md)).
 - [ ] Search, continued: one builder per index channel, remote live query.
+- [x] Maps, places and addresses as public libraries: vector tiles, places by cell, a gazetteer searched through the blind index, no internet service ([ADR-0027](adr/0027-places.md), [ADR-0028](adr/0028-maps-over-retifs.md)).
 - [x] Per-writer commit chains (one commit per modification), merge, history queries, per-record `versions` ([ADR-0017](adr/0017-multi-writer-namespaces.md)).
 
 ## Phase 3: identity and permissions
 - [x] Group namespaces, validate-on-read (every reader checks grants on merge), key rotation on removal, limited grants narrowed on delegation ([ADR-0017](adr/0017-multi-writer-namespaces.md)).
 - [ ] Capability chains between people beyond grants.
-- [ ] Public namespaces announced with standard RNS announces (`retifs.public`, app_data with name, about, tags, address), heard into a local list; members' node addresses in the namespace so every member syncs with every member ([ADR-0022](adr/0022-public-namespaces-discovery.md)); needs Prns to expose announce app_data.
+- [x] Public libraries announced (`retifs.library`, app data with name, about, address, what it holds by type, area, format), heard into a local list and joined from it; members' node addresses in the namespace so every member syncs with every member ([ADR-0022](adr/0022-public-namespaces-discovery.md), [ADR-0029](adr/0029-announced-public-libraries.md)).
+- [x] Compatibility rules for every app: versioned network and library formats, must-ignore and must-keep, unknown shown ([ADR-0030](adr/0030-data-outlives-apps.md)).
+- [x] Every node size-limited; storage-less nodes with only a keyring on disk, their own libraries fetched back from their holders after a restart ([ADR-0031](adr/0031-storage-less-nodes.md)).
 - [x] Shares: a selection (records, a folder, a query) as its own namespace kept up to date by the owner's nodes, content by reference, attributes optionally left out; started from Explorer's context menu ([ADR-0021](adr/0021-shares.md)).
 - [ ] Shares, continued: write-back from members, resharing, default attribute filters (location in photos); Nautilus and Dolphin menus.
 - [x] Sharing: `retifs:` links and QR codes, one-use invitations (`/retifs/invite`), contacts as petnames in `me`, fingerprint words ([ADR-0020](adr/0020-sharing-names-invitations.md)).

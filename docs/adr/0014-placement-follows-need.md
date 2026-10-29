@@ -1,6 +1,6 @@
 # ADR-0014: Placement follows need
 
-- **Status:** proposed
+- **Status:** accepted (prototype), 2026-10-29
 - **Date:** 2026-10-15
 - **Irreversible:** no. It reuses the lease format (decision 6) unchanged. It refines [ADR-0011](0011-redundancy-by-default.md) (who recruits holders, how many copies) and [ADR-0013](0013-slow-links.md) (what crosses LoRa).
 
@@ -58,9 +58,9 @@ Data someone needs beyond a slow link has to cross it, once, and then stays on t
 - **Never speculative:** placement for durability, spare filling and diffusion never cross slow links; an explicit fetch can be forced, within the budget.
 
 ## Open
-- **Failure domains:** the nearest nodes are usually in the same building, on the same power and uplink. Whether data only one site needs should also keep one copy further away is open.
+- ~~Failure domains~~: decided and built (2026-10-23): sites, and one copy of a node's own files at another site (Implementation status, "Sites").
 - **Erasure coding** with the owner's local full copy (cheap repair, half the upload of full replicas; Rodrigues & Liskov 2005) is the leading candidate for the erasure-coding layer that comes after full replicas (decided 2026-10-20, [ADR-0011](0011-redundancy-by-default.md)). It needs its own ADR.
-- **Stamps** (proof of work, as in LXMF) against lease spam; per-signer quotas don't work with per-lease keys.
+- ~~Stamps~~: built (2026-10-16): LXMF's proof of work on lease offers (Implementation status, "Stamps").
 
 ## Impact on the threat model
 See the [threat model](../04-threat-model.md).

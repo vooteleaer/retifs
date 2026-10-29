@@ -1,6 +1,6 @@
 # ADR-0030: Data outlives apps: compatibility rules for every app
 
-- **Status:** proposed
+- **Status:** accepted (prototype), 2026-10-29
 - **Date:** 2026-10-28
 - **Irreversible:** no. It's a rule for apps and conventions, but every app and node is to follow it, so it should settle before there are many.
 
@@ -46,3 +46,8 @@ Must-keep means a record can carry attributes the editing app never shows. The u
 - Each convention ADR (people, events, photos, places, maps) is read as additive. Breaking it needs a new name, which its ADR records.
 - Apps need a declaration of the types they handle. The format for that is to be decided (with the per-app capabilities of ADR-0004 or an app manifest).
 - Test: an older app editing a record with unknown attributes keeps them (a test per app core).
+
+## Review (2026-10-29)
+Built: `v` in every announce and `fmt` for a library's format, kept and shown as "needs a newer retifs" when unknown ([ADR-0029](0029-announced-public-libraries.md)); the file tree shows any record's attributes as `user.retifs.*` extended attributes.
+
+Not built yet: apps saying which types they read and write (so the system knows when nothing on a device can open a record), and the desktop utility as the generic view of everything.
