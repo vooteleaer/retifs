@@ -250,6 +250,19 @@ impl SlabStore {
         let root = root.as_ref().to_path_buf();
         fs::create_dir_all(root.join("slabs"))?;
         let db = redb::Builder::new().set_cache_size(cache_bytes).create(root.join("index.redb"))?;
+        Self::with_db(root, db)
+    }
+
+    /// A store whose index lives in memory only, its slabs under `root` (a
+    /// RAM folder): a storage-less node's (ADR-0031). Gone when it's closed.
+    pub fn open_in_memory(root: impl AsRef<Path>, cache_bytes: usize) -> Result<Self, StoreError> {
+        let root = root.as_ref().to_path_buf();
+        fs::create_dir_all(root.join("slabs"))?;
+        let db = redb::Builder::new().set_cache_size(cache_bytes).create_with_backend(redb::backends::InMemoryBackend::new())?;
+        Self::with_db(root, db)
+    }
+
+    fn with_db(root: PathBuf, db: Database) -> Result<Self, StoreError> {
         let w = db.begin_write()?;
         w.open_table(INDEX)?;
         w.open_table(FREE)?;

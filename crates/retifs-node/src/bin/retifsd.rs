@@ -645,7 +645,36 @@ fn main() {
         println!("no storage: nothing of its own kept here beyond a cache of {} MB (ADR-0031)", args.budget.cache_max.unwrap_or(0) >> 20);
     }
     std::fs::create_dir_all(&args.store).expect("create store dir");
-    let store = match SlabStore::open_with_cache(&args.store, args.db_cache) {
+    // A storage-less node (ADR-0031): its index and slabs in memory (a RAM
+    // folder for the slabs), only the keyring and settings on disk.
+    let ram = args.no_storage.then(|| ram_dir(&args.store));
+    // Turned storage-less with a store on disk: its keyring first, then the
+    // data goes (only the keyring and settings stay on disk).
+    if ram.is_some() && !args.store.join("keyring").exists() && args.store.join("index.redb").exists() {
+        match SlabStore::open_with_cache(&args.store, args.db_cache) {
+            Ok(old) => {
+                let leaving: std::collections::BTreeSet<String> = std::fs::read_to_string(args.store.join("leaving")).unwrap_or_default().lines().map(String::from).collect();
+                write_keyring(&old, &leaving, &args.store.join("keyring"));
+                drop(old);
+                let _ = std::fs::remove_file(args.store.join("index.redb"));
+                let _ = std::fs::remove_dir_all(args.store.join("slabs"));
+                let _ = std::fs::remove_file(args.store.join("leaving"));
+                println!("storage-less now: the keyring kept, the data on disk removed");
+            }
+            Err(e) => eprintln!("the store on disk can't be read for a keyring: {e}"),
+        }
+    }
+    let opened = match &ram {
+        Some(dir) => {
+            let _ = std::fs::remove_dir_all(dir);
+            std::fs::create_dir_all(dir).expect("RAM folder");
+            // The key leases are signed with must outlive a restart.
+            let _ = std::fs::copy(args.store.join("namespace_key"), dir.join("namespace_key"));
+            SlabStore::open_in_memory(dir, args.db_cache)
+        }
+        None => SlabStore::open_with_cache(&args.store, args.db_cache),
+    };
+    let store = match opened {
         Ok(mut s) => {
             s.set_budget(args.budget.clone());
             if args.compact {
@@ -669,6 +698,12 @@ fn main() {
         let file = store_file(&store, &data, args.public, false, Some(&record), manifest::WriteOpts::default()).expect("store file");
         store.need_file(&file).expect("record need");
         println!("put {}  {}", path.display(), file);
+    }
+    if ram.is_some() {
+        let restored = restore_keyring(&store, &args.store.join("keyring"));
+        println!("in memory: the index and data; {restored} librar(ies) restored from the keyring");
+        let _ = namespace_key(&store);
+        let _ = std::fs::copy(store.root().join("namespace_key"), args.store.join("namespace_key"));
     }
     let identity = load_or_create_identity(&args.store.join("node_identity")).expect("node identity");
     let endpoint = libretifs::endpoint(&args.store);
@@ -707,6 +742,9 @@ struct Daemon {
     /// Keeps no data of its own (ADR-0031): its own copies don't count, and
     /// stay only as cache once enough copies are elsewhere.
     no_storage: bool,
+    /// A storage-less node's keyring on disk (its store is in memory): the
+    /// libraries and their keys, written as they change.
+    keyring: Option<std::path::PathBuf>,
     /// This node's site, if its owner named one: then one copy is kept elsewhere.
     site: Option<retifs_core::announce::SiteTag>,
     slow_budget: u64,
@@ -750,6 +788,113 @@ struct Daemon {
     /// removed in the background by `leaver`.
     leaving: Mutex<std::collections::BTreeSet<String>>,
     leave_wake: Notify,
+}
+
+/// A storage-less node's RAM folder for its slabs: in /dev/shm where there is
+/// one (Linux), else the temp folder; one per store.
+fn ram_dir(store: &std::path::Path) -> std::path::PathBuf {
+    let tag = hex(&<sha2::Sha256 as sha2::Digest>::digest(store.to_string_lossy().as_bytes())[..6]);
+    let base = std::path::Path::new("/dev/shm");
+    let base = if base.is_dir() { base.to_path_buf() } else { std::env::temp_dir() };
+    base.join(format!("retifs-ram-{tag}"))
+}
+
+/// Writes a storage-less node's keyring (ADR-0031): per library its creator,
+/// read keys, writer identity, peers and keep mode; per own channel its keys
+/// and how far it has published. Everything else is fetched again.
+fn save_keyring(d: &Daemon) {
+    let Some(path) = &d.keyring else { return };
+    let leaving = d.leaving.lock().unwrap().clone();
+    write_keyring(&d.store, &leaving, path);
+}
+
+fn write_keyring(store: &SlabStore, leaving: &std::collections::BTreeSet<String>, path: &std::path::Path) {
+    let d = Keyring { store };
+    let mut libs = toml::Table::new();
+    for ns in d.store.ns_names().unwrap_or_default() {
+        if leaving.contains(&ns) {
+            continue;
+        }
+        let Ok(Some((creator, _))) = d.store.ns_info(&ns) else { continue };
+        let mut e = toml::Table::new();
+        e.insert("creator".into(), hex(&creator).into());
+        let keys: Vec<toml::Value> = d.store.ns_keys(&ns).unwrap_or_default().iter().map(|k| hex(k).into()).collect();
+        e.insert("keys".into(), keys.into());
+        if let Ok(Some(id)) = d.store.ns_identity(&ns) {
+            e.insert("identity".into(), hex(&id).into());
+        }
+        let peers: Vec<toml::Value> = d.store.ns_peers(&ns).unwrap_or_default().iter().map(|p| hex(p).into()).collect();
+        e.insert("peers".into(), peers.into());
+        e.insert("keep_by_rules".into(), d.store.ns_keep_by_rules(&ns).unwrap_or(true).into());
+        libs.insert(ns, e.into());
+    }
+    let mut channels = toml::Table::new();
+    for c in d.store.own_channels().unwrap_or_default() {
+        let mut e = toml::Table::new();
+        e.insert("signing_seed".into(), hex(&c.signing_seed).into());
+        e.insert("read_key".into(), hex(&c.read_key).into());
+        e.insert("seq".into(), (c.seq as i64).into());
+        if let Some((cid, seed)) = c.last {
+            e.insert("last".into(), hex(cid.as_bytes()).into());
+            e.insert("last_seed".into(), hex(&seed.0).into());
+        }
+        e.insert("head".into(), hex(&c.head).into());
+        channels.insert(c.name, e.into());
+    }
+    let mut all = toml::Table::new();
+    all.insert("library".into(), libs.into());
+    all.insert("channel".into(), channels.into());
+    let tmp = path.with_extension("new");
+    if std::fs::write(&tmp, all.to_string()).is_ok() {
+        let _ = std::fs::rename(&tmp, path);
+    }
+}
+
+/// What a keyring is written from.
+struct Keyring<'a> {
+    store: &'a SlabStore,
+}
+
+/// Puts a keyring's libraries and own channels into a fresh (in-memory)
+/// store, held lazily; returns how many libraries.
+fn restore_keyring(store: &SlabStore, path: &std::path::Path) -> usize {
+    let Some(all) = std::fs::read_to_string(path).ok().and_then(|t| t.parse::<toml::Table>().ok()) else { return 0 };
+    let unhex = |h: &str| -> Option<Vec<u8>> { (0..h.len()).step_by(2).map(|i| h.get(i..i + 2).and_then(|b| u8::from_str_radix(b, 16).ok())).collect() };
+    let bytes = |v: Option<&toml::Value>| v.and_then(|x| x.as_str()).and_then(unhex);
+    let mut n = 0;
+    for (ns, e) in all.get("library").and_then(|l| l.as_table()).cloned().unwrap_or_default() {
+        let creator: Option<[u8; 32]> = bytes(e.get("creator")).and_then(|b| b.try_into().ok());
+        let keys: Vec<[u8; 32]> = e.get("keys").and_then(|k| k.as_array()).map(|a| a.iter().filter_map(|k| bytes(Some(k)).and_then(|b| b.try_into().ok())).collect()).unwrap_or_default();
+        let (Some(creator), Some(first)) = (creator, keys.first()) else { continue };
+        let _ = store.set_ns_info(&ns, &creator, first);
+        for k in &keys[1..] {
+            let _ = store.add_ns_key(&ns, k);
+        }
+        if let Some(id) = bytes(e.get("identity")).and_then(|b| <[u8; 64]>::try_from(b).ok()) {
+            let _ = store.set_ns_identity(&ns, &id);
+        }
+        let peers: Vec<PeerId> = e.get("peers").and_then(|p| p.as_array()).map(|a| a.iter().filter_map(|p| bytes(Some(p)).and_then(|b| b.try_into().ok())).collect()).unwrap_or_default();
+        let _ = store.add_ns_peers(&ns, &peers);
+        let _ = store.set_ns_lazy(&ns, true);
+        let _ = store.set_ns_keep_by_rules(&ns, e.get("keep_by_rules").and_then(|b| b.as_bool()).unwrap_or(true));
+        n += 1;
+    }
+    for (name, e) in all.get("channel").and_then(|l| l.as_table()).cloned().unwrap_or_default() {
+        let (Some(seed), Some(key)) = (bytes(e.get("signing_seed")).and_then(|b| b.try_into().ok()), bytes(e.get("read_key")).and_then(|b| b.try_into().ok())) else { continue };
+        let last = match (bytes(e.get("last")), bytes(e.get("last_seed")).and_then(|b| <[u8; 32]>::try_from(b).ok())) {
+            (Some(c), Some(s)) => <[u8; 33]>::try_from(c).ok().and_then(Cid::from_bytes).map(|c| (c, retifs_core::chunk::Seed(s))),
+            _ => None,
+        };
+        let _ = store.update_own_channel(&retifs_store::OwnChannel {
+            name,
+            signing_seed: seed,
+            read_key: key,
+            seq: e.get("seq").and_then(|v| v.as_integer()).unwrap_or(0) as u64,
+            last,
+            head: bytes(e.get("head")).unwrap_or_default(),
+        });
+    }
+    n
 }
 
 /// Library `ns`'s cache entry (made if missing); lock it for as short as can be.
@@ -798,6 +943,7 @@ async fn leaver(d: Arc<Daemon>) {
             Err(e) => eprintln!("leaving {ns}: {e}"),
         }
         let _ = mark_leaving(&d, &ns, false);
+        save_keyring(&d);
     }
 }
 
@@ -1176,6 +1322,7 @@ async fn serve(store: Arc<SlabStore>, identity: node::IdentitySecret, endpoint: 
         loss_target: args.loss_target,
         min_copies: args.min_copies,
         no_storage: args.no_storage,
+        keyring: args.no_storage.then(|| args.store.join("keyring")),
         site: args.site.as_deref().map(retifs_core::announce::site_tag),
         slow_budget: args.slow_budget,
         treat_as_slow: args.treat_as_slow.clone(),
@@ -1185,7 +1332,7 @@ async fn serve(store: Arc<SlabStore>, identity: node::IdentitySecret, endpoint: 
         follow_wake: Notify::new(),
         ns_wake: Notify::new(),
         ns_cache: Mutex::new(HashMap::new()),
-        ns_seeking: Mutex::new(std::collections::HashSet::new()),
+        ns_seeking: Mutex::new(if args.no_storage { store.ns_names().unwrap_or_default().into_iter().collect() } else { std::collections::HashSet::new() }),
         announced: Mutex::new(std::collections::HashSet::new()),
         announced_wake: Notify::new(),
         device: args.device.clone(),
@@ -1300,6 +1447,16 @@ async fn serve(store: Arc<SlabStore>, identity: node::IdentitySecret, endpoint: 
     tokio::spawn(ns_sync(daemon.clone()));
     tokio::spawn(share_keeper(daemon.clone()));
     tokio::spawn(leaver(daemon.clone()));
+    if daemon.keyring.is_some() {
+        let keeper = daemon.clone();
+        tokio::spawn(async move {
+            let mut tick = tokio::time::interval(Duration::from_secs(30));
+            loop {
+                tick.tick().await;
+                save_keyring(&keeper);
+            }
+        });
+    }
     let redeemer = daemon.clone();
     tokio::spawn(async move {
         // Invitations whose creator's node wasn't reachable (ADR-0020).
@@ -2213,6 +2370,7 @@ async fn handle(d: &Daemon, req: Request) -> Result<Response, String> {
                     d.store.add_ns_peers(&ns, &parse_peers(&from)?).map_err(|e| e.to_string())?;
                     d.ns_wake.notify_one();
                     println!("{ns}: joined again while being left; the leave is called off");
+                    save_keyring(d);
                     return Ok(Response::Namespace(ns_view(d, &ns)?));
                 }
                 return Err(format!("{ns} already exists here"));
@@ -2236,6 +2394,7 @@ async fn handle(d: &Daemon, req: Request) -> Result<Response, String> {
             }
             write_ops(d, &ns, vec![Op::Identity(keywrap::public(&identity))]).await?;
             d.ns_seeking.lock().unwrap().insert(ns.clone());
+            save_keyring(d);
             d.ns_wake.notify_one();
             Ok(Response::Namespace(ns_view(d, &ns)?))
         }

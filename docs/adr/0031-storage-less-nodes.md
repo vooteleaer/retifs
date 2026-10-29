@@ -18,8 +18,9 @@ A thin client (a phone, a small device, a borrowed machine) should be a retifs n
 - **A storage-less node** is the end of the scale, as if always short of room.
 
 `retifsd --no-storage [--cache-max SIZE]`: a node that keeps no data of its own on the device.
-- **Kept on the device:** the identity, library keys, the list of libraries and settings, and the record index of what has been fetched (metadata, small). Keys never leave the device.
-- **Joined libraries are held lazily** (ADR-0018): records come from checkpoints and the network as they're needed. Libraries created here keep their record index (metadata), not their content.
+- **On disk, only a keyring:** the identity, settings, the key leases are signed with, and `keyring` (per library its creator, read keys, writer identity, peers and keep mode; per own channel its keys and how far it has published). A few KB. Keys never leave the device. It's written as libraries are joined or left, and every 30 s.
+- **Everything else in memory:** the index (redb in memory) and the slabs (a RAM folder, `/dev/shm` on Linux). Gone when the node stops; at start every library in the keyring is restored and held lazily (ADR-0018), its state fetched from the network again. Leaving a library is then dropping it from the keyring and from memory.
+- A store on disk turned storage-less is converted at its first start: its keyring is written, then its data on disk is removed.
 - **Content** is read from holders on the network and kept only in the cache tier, up to `--cache-max` (default 128 MB), evicted least recently used.
 - **Writes** go to other nodes. A file written here is pinned only until placement has enough copies elsewhere: for this node, its own copy doesn't count towards the number of copies or the loss estimate (ADR-0014). Once enough copies elsewhere hold it, its own copy moves to the cache tier. Until then (offline, say) it stays pinned and the write is not yet safe, which the node says.
 - **It holds nothing for others** (`hold: false` in its announce): no one offers it copies.
@@ -29,6 +30,9 @@ A thin client (a phone, a small device, a borrowed machine) should be a retifs n
 - The device holds keys and little else: losing it loses no data, and it reveals less (no content at rest beyond the cache).
 - Its data is on other nodes, as ciphertext; their holders learn sizes and access patterns as with any holder.
 - A device that writes while offline holds that write alone until it's placed: as with any node, but it can't keep the copy for long.
+
+## Open
+- **A storage-less node's own libraries** need their checkpoint (not only their files) held elsewhere: restored after a restart, a library made here has no peer to fetch its state from. Placement of its checkpoints and channel heads, like its files, is the next step.
 
 ## Consequences
 - A thin client is a full node; no separate client protocol.
