@@ -5243,14 +5243,15 @@ async fn lease_upkeep(d: Arc<Daemon>) {
 /// ran out counts as lost; one that is only unreachable just gets a worse
 /// record (lazy repair: it may come back with the data).
 /// Returns (local copy's estimate, holders, product of all).
-fn loss_now(d: &Daemon, file: &FileRef) -> (f64, Vec<retifs_store::HolderView>, f64) {
+/// `leases`: the own leases keeping `file`.
+fn loss_now(d: &Daemon, file: &FileRef, leases: &[OwnLease]) -> (f64, Vec<retifs_store::HolderView>, f64) {
     let pinned = d.store.tier(&file.root).ok().flatten().is_some_and(|f| f & tier::PINNED != 0);
     let local = if pinned { 0.1 } else { 0.5 };
     let now = now_s();
     let hops: HashMap<PeerId, u8> =
         d.store.storage_nodes().unwrap_or_default().into_iter().map(|n| (n.peer, n.hops)).collect();
     let mut by_holder: std::collections::BTreeMap<PeerId, retifs_store::HolderView> = Default::default();
-    for o in d.store.own_leases_for(&file.root).unwrap_or_default() {
+    for o in leases {
         let lapsed = o.receipt_until > 0 && o.receipt_until < now;
         let p = if lapsed || o.proof == ProofState::Failed {
             1.0
@@ -5297,9 +5298,17 @@ async fn place_all(d: &Daemon) -> Result<(), String> {
     let mut short = 0;
     let wanted = copies_wanted(d);
     let sites = node_sites(d);
-    for file in d.store.needed_files().map_err(|e| e.to_string())? {
+    // Read once: per file, this was every lease for every file (minutes with
+    // the map libraries, the runtime starved meanwhile).
+    let by_root = d.store.own_leases_by_root().map_err(|e| e.to_string())?;
+    for (i, file) in d.store.needed_files().map_err(|e| e.to_string())?.into_iter().enumerate() {
+        // A pass over many files is long: let the runtime's other work in.
+        if i % 64 == 63 {
+            tokio::task::yield_now().await;
+        }
         let want = wanted.get(&file.root).map_or(Copies::Default, |&n| Copies::Exactly(n));
-        let Some(Need { mut risk, holders, own, mut elsewhere }) = review(d, &file, want, &sites)? else { continue };
+        let leases = by_root.get(&file.root).map_or(&[][..], |l| &l[..]);
+        let Some(Need { mut risk, holders, own, mut elsewhere }) = review(d, &file, want, &sites, leases)? else { continue };
         // Not all here (a storage-less node's file, only cached and evicted):
         // nothing to place from; its holders keep it meanwhile.
         if file_chunks(&d.store, &file).is_err() {
@@ -5481,25 +5490,34 @@ struct Need {
     elsewhere: bool,
 }
 
-fn review(d: &Daemon, file: &FileRef, want: Copies, sites: &HashMap<PeerId, Option<retifs_core::announce::SiteTag>>) -> Result<Option<Need>, String> {
+/// `leases`: the own leases keeping `file`, as read at the start of the pass.
+fn review(
+    d: &Daemon,
+    file: &FileRef,
+    want: Copies,
+    sites: &HashMap<PeerId, Option<retifs_core::announce::SiteTag>>,
+    leases: &[OwnLease],
+) -> Result<Option<Need>, String> {
     // A lease that ran out unrenewed means the holder dropped the copy: forget
     // that holder for this file instead of re-offering to it later (a minute of
     // grace for clocks). One that's only away but still within its lease counts
     // on, with a worse record (lazy repair).
     let now = now_s();
-    let lapsed: std::collections::BTreeSet<PeerId> = d
-        .store
-        .own_leases_for(&file.root)
-        .map_err(|e| e.to_string())?
-        .into_iter()
-        .filter(|o| o.expires + 60 < now)
-        .map(|o| o.holder)
-        .collect();
-    for h in lapsed {
-        d.store.drop_holder(&file.root, &h).map_err(|e| e.to_string())?;
-        println!("placement: {}: lease at <{}> ran out unrenewed, its copy is gone", file.root, hex(&h));
+    let lapsed: std::collections::BTreeSet<PeerId> =
+        leases.iter().filter(|o| o.expires + 60 < now).map(|o| o.holder).collect();
+    for h in &lapsed {
+        d.store.drop_holder(&file.root, h).map_err(|e| e.to_string())?;
+        println!("placement: {}: lease at <{}> ran out unrenewed, its copy is gone", file.root, hex(h));
     }
-    let (local, views, risk) = loss_now(d, file);
+    // Dropping changed this file's leases: read them again.
+    let reread;
+    let leases = if lapsed.is_empty() {
+        leases
+    } else {
+        reread = d.store.own_leases_for(&file.root).map_err(|e| e.to_string())?;
+        &reread[..]
+    };
+    let (local, views, risk) = loss_now(d, file, leases);
     // Short of room (a small store, or none at all: ADR-0031): this node's
     // own files are still its own once only cached here.
     let short = d.no_storage || short_of_space(d);

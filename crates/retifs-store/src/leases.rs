@@ -123,8 +123,16 @@ fn parse_own(v: &[u8]) -> OwnLease {
             2 => ProofState::Failed,
             _ => ProofState::Unchecked,
         },
-        lease: Lease::decode(&v[18..]).expect("own leases were signed here").0,
+        // Signed here and stored here: not verified again on every read (a
+        // node with many leases reads them all per placement pass).
+        lease: Lease::decode_unverified(&v[18..]).expect("own leases were encoded here").0,
     }
+}
+
+/// The roots in a stored own lease (holder, count, then each root's bytes).
+fn own_value_roots(v: &[u8]) -> impl Iterator<Item = &[u8]> {
+    let n = u16::from_be_bytes([v[16], v[17]]) as usize;
+    v[18..18 + n * 33].chunks(33)
 }
 
 fn parse_own_value(v: &[u8]) -> OwnLease {
@@ -376,7 +384,30 @@ impl SlabStore {
     /// Updates an own lease (new expiry after renewal, receipt, proof outcome).
     /// Leases this node gave out that keep chunks of `root`.
     pub fn own_leases_for(&self, root: &Cid) -> Result<Vec<OwnLease>, StoreError> {
-        Ok(self.own_leases()?.into_iter().filter(|o| o.roots.contains(root)).collect())
+        let r = self.db.begin_read()?;
+        let t = r.open_table(OWN_LEASES)?;
+        let mut found = Vec::new();
+        for e in t.iter()? {
+            let (_, v) = e?;
+            let v = v.value();
+            // The roots come first in the value: only a match is parsed.
+            if own_value_roots(v).any(|r| r == root.as_bytes()) {
+                found.push(parse_own_value(v));
+            }
+        }
+        Ok(found)
+    }
+
+    /// Own leases by the file roots they keep, read once (a placement pass
+    /// asks for every file's).
+    pub fn own_leases_by_root(&self) -> Result<std::collections::HashMap<Cid, Vec<OwnLease>>, StoreError> {
+        let mut by_root: std::collections::HashMap<Cid, Vec<OwnLease>> = Default::default();
+        for o in self.own_leases()? {
+            for r in &o.roots {
+                by_root.entry(*r).or_default().push(o.clone());
+            }
+        }
+        Ok(by_root)
     }
 
     /// Stops tracking an own lease (it's not renewed and runs out).

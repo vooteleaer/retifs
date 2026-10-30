@@ -139,6 +139,15 @@ impl Lease {
 
     /// Parses and verifies a lease. Returns it and the bytes after it.
     pub fn decode(bytes: &[u8]) -> Result<(Lease, &[u8]), LeaseError> {
+        let (lease, rest) = Self::decode_unverified(bytes)?;
+        verify(&lease.signer, &[LEASE_LABEL, &bytes[..lease.body_len()]].concat(), &lease.signature)?;
+        Ok((lease, rest))
+    }
+
+    /// Parses a lease without checking its signature: only for one this node
+    /// signed and stored itself (its own leases, read back from its store),
+    /// never for bytes from elsewhere.
+    pub fn decode_unverified(bytes: &[u8]) -> Result<(Lease, &[u8]), LeaseError> {
         if bytes.len() < HEADER_LEN + 64 || bytes[0] != VERSION {
             return Err(LeaseError::Malformed("lease header"));
         }
@@ -169,8 +178,11 @@ impl Lease {
             entries,
             signature: sig.try_into().unwrap(),
         };
-        verify(&lease.signer, &[LEASE_LABEL, body].concat(), &lease.signature)?;
         Ok((lease, rest))
+    }
+
+    fn body_len(&self) -> usize {
+        HEADER_LEN + self.entries.len() * ENTRY_LEN
     }
 }
 
