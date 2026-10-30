@@ -945,6 +945,72 @@ fn visible_namespaces(d: &Daemon) -> Result<Vec<String>, String> {
     Ok(d.store.namespaces().map_err(|e| e.to_string())?.into_iter().filter(|n| !leaving.contains(n)).collect())
 }
 
+/// A stalled daemon, found and named: a heartbeat from the async runtime,
+/// and every lock tried from a thread of its own. A lock held for over a
+/// minute is logged by name; a runtime that hasn't run for five minutes
+/// (every worker blocked, as seen on the testbed) aborts the process, which
+/// leaves a core where the system keeps them and lets the service manager
+/// start it again.
+fn watchdog(d: Arc<Daemon>) {
+    use std::sync::atomic::{AtomicU64, Ordering};
+    static BEAT: AtomicU64 = AtomicU64::new(0);
+    BEAT.store(now_ms(), Ordering::Relaxed);
+    tokio::spawn(async {
+        loop {
+            BEAT.store(now_ms(), Ordering::Relaxed);
+            tokio::time::sleep(Duration::from_secs(5)).await;
+        }
+    });
+    let _ = std::thread::Builder::new().name("watchdog".into()).spawn(move || {
+        let mut held: HashMap<String, u64> = HashMap::new();
+        loop {
+            std::thread::sleep(Duration::from_secs(30));
+            let now = now_ms();
+            let free = |name: &str, ok: bool, held: &mut HashMap<String, u64>| {
+                if ok {
+                    held.remove(name);
+                } else {
+                    let since = *held.entry(name.to_string()).or_insert(now);
+                    let secs = (now - since) / 1000;
+                    if secs >= 60 {
+                        eprintln!("watchdog: lock {name} held for {secs} s");
+                    }
+                }
+            };
+            free("links", d.links.try_lock().is_ok(), &mut held);
+            free("indexed", d.indexed.try_lock().is_ok(), &mut held);
+            free("identified", d.identified.try_lock().is_ok(), &mut held);
+            free("deferred", d.deferred.try_lock().is_ok(), &mut held);
+            free("stamp_costs", d.stamp_costs.try_lock().is_ok(), &mut held);
+            free("ns_cache", d.ns_cache.try_lock().is_ok(), &mut held);
+            free("ns_seeking", d.ns_seeking.try_lock().is_ok(), &mut held);
+            free("own_tried", d.own_tried.try_lock().is_ok(), &mut held);
+            free("announced", d.announced.try_lock().is_ok(), &mut held);
+            free("changes", d.changes.try_lock().is_ok(), &mut held);
+            free("sessions", d.sessions.try_lock().is_ok(), &mut held);
+            free("commits", d.commits.try_lock().is_ok(), &mut held);
+            free("heard_libs", d.heard_libs.try_lock().is_ok(), &mut held);
+            free("leaving", d.leaving.try_lock().is_ok(), &mut held);
+            // Each library's merge state (the global map's lock just taken and given back).
+            let entries: Vec<(String, Arc<Mutex<NsCache>>)> = match d.ns_cache.try_lock() {
+                Ok(m) => m.iter().map(|(k, v)| (k.clone(), v.clone())).collect(),
+                Err(_) => Vec::new(),
+            };
+            for (ns, e) in entries {
+                free(&format!("ns_cache[{ns}]"), e.try_lock().is_ok(), &mut held);
+            }
+            let quiet = (now - BEAT.load(Ordering::Relaxed)) / 1000;
+            if quiet >= 60 {
+                eprintln!("watchdog: the async runtime hasn't run for {quiet} s (every worker blocked); locks held: {:?}", held.keys().collect::<Vec<_>>());
+            }
+            if quiet >= 300 {
+                eprintln!("watchdog: stalled for {quiet} s: aborting, to be started again");
+                std::process::abort();
+            }
+        }
+    });
+}
+
 /// Removes the data of libraries being left, one at a time.
 async fn leaver(d: Arc<Daemon>) {
     loop {
@@ -1467,6 +1533,7 @@ async fn serve(store: Arc<SlabStore>, identity: node::IdentitySecret, endpoint: 
     tokio::spawn(ns_sync(daemon.clone()));
     tokio::spawn(share_keeper(daemon.clone()));
     tokio::spawn(leaver(daemon.clone()));
+    watchdog(daemon.clone());
     if daemon.keyring.is_some() {
         let keeper = daemon.clone();
         tokio::spawn(async move {

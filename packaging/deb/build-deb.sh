@@ -65,7 +65,8 @@ for ARCH in $ARCHS; do
         sed -e 's|%h/.cargo/bin/|/usr/bin/|g' -e '/^#   cp packaging/d' "$u" > "$STAGE/usr/lib/systemd/user/$(basename "$u")"
     done
     # retifsd waits for Reticulum, and brings the bundled one where none runs.
-    sed -i -e 's|^After=network-online.target|After=network-online.target retifs-prnsd.service\nWants=retifs-prnsd.service|' \
+    # PartOf: restarted with it, as retifsd does not attach to a new shared instance by itself.
+    sed -i -e 's|^After=network-online.target|After=network-online.target retifs-prnsd.service\nWants=retifs-prnsd.service\nPartOf=retifs-prnsd.service|' \
         -e 's|^ExecStart=/usr/bin/retifsd|ExecStartPre=/usr/lib/retifs/wait-shared-instance\nExecStart=/usr/bin/retifsd|' \
         "$STAGE/usr/lib/systemd/user/retifsd.service"
     install -m 0644 "$HERE/retifs-prnsd.service" "$STAGE/usr/lib/systemd/user/"
