@@ -398,16 +398,18 @@ impl SlabStore {
         Ok(found)
     }
 
-    /// Own leases by the file roots they keep, read once (a placement pass
-    /// asks for every file's).
-    pub fn own_leases_by_root(&self) -> Result<std::collections::HashMap<Cid, Vec<OwnLease>>, StoreError> {
-        let mut by_root: std::collections::HashMap<Cid, Vec<OwnLease>> = Default::default();
-        for o in self.own_leases()? {
+    /// All own leases, and for each file root the positions of the leases
+    /// keeping it (a placement pass asks for every file's; a mixed lease
+    /// keeps many files, so it's listed by position, not copied per root).
+    pub fn own_leases_by_root(&self) -> Result<(Vec<OwnLease>, std::collections::HashMap<Cid, Vec<usize>>), StoreError> {
+        let leases = self.own_leases()?;
+        let mut by_root: std::collections::HashMap<Cid, Vec<usize>> = Default::default();
+        for (i, o) in leases.iter().enumerate() {
             for r in &o.roots {
-                by_root.entry(*r).or_default().push(o.clone());
+                by_root.entry(*r).or_default().push(i);
             }
         }
-        Ok(by_root)
+        Ok((leases, by_root))
     }
 
     /// Stops tracking an own lease (it's not renewed and runs out).

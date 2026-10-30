@@ -5244,7 +5244,7 @@ async fn lease_upkeep(d: Arc<Daemon>) {
 /// record (lazy repair: it may come back with the data).
 /// Returns (local copy's estimate, holders, product of all).
 /// `leases`: the own leases keeping `file`.
-fn loss_now(d: &Daemon, file: &FileRef, leases: &[OwnLease]) -> (f64, Vec<retifs_store::HolderView>, f64) {
+fn loss_now(d: &Daemon, file: &FileRef, leases: &[&OwnLease]) -> (f64, Vec<retifs_store::HolderView>, f64) {
     let pinned = d.store.tier(&file.root).ok().flatten().is_some_and(|f| f & tier::PINNED != 0);
     let local = if pinned { 0.1 } else { 0.5 };
     let now = now_s();
@@ -5300,15 +5300,15 @@ async fn place_all(d: &Daemon) -> Result<(), String> {
     let sites = node_sites(d);
     // Read once: per file, this was every lease for every file (minutes with
     // the map libraries, the runtime starved meanwhile).
-    let by_root = d.store.own_leases_by_root().map_err(|e| e.to_string())?;
+    let (all_leases, by_root) = d.store.own_leases_by_root().map_err(|e| e.to_string())?;
     for (i, file) in d.store.needed_files().map_err(|e| e.to_string())?.into_iter().enumerate() {
         // A pass over many files is long: let the runtime's other work in.
         if i % 64 == 63 {
             tokio::task::yield_now().await;
         }
         let want = wanted.get(&file.root).map_or(Copies::Default, |&n| Copies::Exactly(n));
-        let leases = by_root.get(&file.root).map_or(&[][..], |l| &l[..]);
-        let Some(Need { mut risk, holders, own, mut elsewhere }) = review(d, &file, want, &sites, leases)? else { continue };
+        let leases: Vec<&OwnLease> = by_root.get(&file.root).map_or(Vec::new(), |l| l.iter().map(|&i| &all_leases[i]).collect());
+        let Some(Need { mut risk, holders, own, mut elsewhere }) = review(d, &file, want, &sites, &leases)? else { continue };
         // Not all here (a storage-less node's file, only cached and evicted):
         // nothing to place from; its holders keep it meanwhile.
         if file_chunks(&d.store, &file).is_err() {
@@ -5496,7 +5496,7 @@ fn review(
     file: &FileRef,
     want: Copies,
     sites: &HashMap<PeerId, Option<retifs_core::announce::SiteTag>>,
-    leases: &[OwnLease],
+    leases: &[&OwnLease],
 ) -> Result<Option<Need>, String> {
     // A lease that ran out unrenewed means the holder dropped the copy: forget
     // that holder for this file instead of re-offering to it later (a minute of
@@ -5511,11 +5511,13 @@ fn review(
     }
     // Dropping changed this file's leases: read them again.
     let reread;
+    let reread_refs: Vec<&OwnLease>;
     let leases = if lapsed.is_empty() {
         leases
     } else {
         reread = d.store.own_leases_for(&file.root).map_err(|e| e.to_string())?;
-        &reread[..]
+        reread_refs = reread.iter().collect();
+        &reread_refs[..]
     };
     let (local, views, risk) = loss_now(d, file, leases);
     // Short of room (a small store, or none at all: ADR-0031): this node's
