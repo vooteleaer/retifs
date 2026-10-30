@@ -116,7 +116,8 @@ Prototypes are throwaway. They're for learning, not for locking in the format. T
 - [ ] Bootstrap → system manifest from the namespace → root.
 
 ## Later: Haiku client
-- [ ] Build Prns on Haiku (Rust tier 3).
+- [x] retifsd and the `retifs` CLI on Haiku (2026-10-30): built natively on a Haiku nightly with HaikuPorts' Rust, with one small Prns patch (TCP keepalive options); the node ran against a shared instance on another machine, heard and joined public libraries and held copies for others.
+- [ ] prnsd on Haiku (blocked by two third-party crates: `mdns-sd`/`socket-pktinfo` and `if-addrs`).
 - [ ] userlandfs native frontend (attributes and live queries in Tracker).
 - [ ] hpkg driver reading from retifs.
 
