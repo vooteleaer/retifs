@@ -72,6 +72,8 @@ retifs runs on Linux and Windows (Haiku later). The daemon, `retifsd`, attaches 
 
 **Debian, Ubuntu, Raspberry Pi OS (amd64, arm64):** install a `retifs_*.deb` (built by `packaging/deb/build-deb.sh`) with `sudo apt install ./retifs_*.deb`. It brings prnsd along, started only where no Reticulum runs yet, and starts `retifsd` in every user's session; see `/usr/share/doc/retifs/README.Debian`. It needs glibc 2.36 or newer (Debian 12).
 
+**Windows 10 and 11:** run `retifs-setup-*.exe` (built by `packaging\windowsuild-setup.ps1`). It installs for the current user, no administrator needed: the programs in `%LOCALAPPDATA%\Programsetifs`, `retifs` on the PATH, prnsd bundled, and the retifs utility in the notification area, started at login, which starts Reticulum where none runs yet and then `retifsd`. Uninstall from Apps & features; your data stays.
+
 **From source:**
 
 retifs builds against Prns 0.3.8, which isn't on crates.io yet. Check it out next to retifs (Cargo can't fetch the Prns repository on Windows: its paths are too long):

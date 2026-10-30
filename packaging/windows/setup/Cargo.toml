@@ -1,0 +1,30 @@
+[package]
+name = "retifs-setup"
+description = "retifs for Windows: installs it for the current user, no administrator needed"
+version = "0.0.1"
+edition = "2021"
+license = "MIT"
+publish = false
+
+# Not part of the retifs workspace: it carries the built programs inside it.
+[workspace]
+
+[dependencies]
+zstd = "0.13"
+
+[build-dependencies]
+zstd = "0.13"
+
+[target.'cfg(windows)'.dependencies]
+windows = { version = "0.58", features = [
+    "Win32_Foundation",
+    "Win32_Security",
+    "Win32_System_Com",
+    "Win32_System_Registry",
+    "Win32_UI_Shell",
+    "Win32_UI_Shell_Common",
+    "Win32_UI_WindowsAndMessaging",
+] }
+
+[profile.release]
+opt-level = "s"
