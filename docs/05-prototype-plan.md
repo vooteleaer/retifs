@@ -117,7 +117,8 @@ Prototypes are throwaway. They're for learning, not for locking in the format. T
 
 ## Later: Haiku client
 - [x] retifsd and the `retifs` CLI on Haiku (2026-10-30): built natively on a Haiku nightly with HaikuPorts' Rust, with one small Prns patch (TCP keepalive options); the node ran against a shared instance on another machine, heard and joined public libraries and held copies for others.
-- [ ] prnsd on Haiku (blocked by two third-party crates: `mdns-sd`/`socket-pktinfo` and `if-addrs`).
+- [x] prnsd on Haiku (2026-10-30), from a Haiku branch of Prns kept for upstream: mDNS LAN discovery left out (Haiku has no `IP_PKTINFO`), `if-addrs` and `mio` patched (on Haiku an accepted socket does not inherit non-blocking mode), lifecycle locks through `flock`. A Haiku node runs on its own: prnsd connected to another node, retifsd on it, a public library heard, joined and searched.
+- [ ] RNode over USB serial on Haiku; retifsd with the same `mio` fix (until mio has it).
 - [ ] userlandfs native frontend (attributes and live queries in Tracker).
 - [ ] hpkg driver reading from retifs.
 
