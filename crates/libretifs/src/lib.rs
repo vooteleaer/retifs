@@ -731,7 +731,8 @@ impl Status {
 
 /// Where the daemon keeps its store (and endpoint) unless told otherwise:
 /// `$RETIFS_STORE`, else `$XDG_DATA_HOME/retifs` or `~/.local/share/retifs`
-/// (Unix), `%LOCALAPPDATA%\retifs` (Windows).
+/// (Unix), `%LOCALAPPDATA%\retifs` (Windows), `~/config/var/retifs` (Haiku,
+/// its place for data a program keeps).
 pub fn default_store_dir() -> PathBuf {
     if let Some(dir) = std::env::var_os("RETIFS_STORE") {
         return dir.into();
@@ -741,7 +742,12 @@ pub fn default_store_dir() -> PathBuf {
         let base = std::env::var_os("LOCALAPPDATA").map(PathBuf::from).unwrap_or_else(|| ".".into());
         base.join("retifs")
     }
-    #[cfg(not(windows))]
+    #[cfg(target_os = "haiku")]
+    {
+        let home = std::env::var_os("HOME").map(PathBuf::from).unwrap_or_else(|| "/boot/home".into());
+        home.join("config/var/retifs")
+    }
+    #[cfg(not(any(windows, target_os = "haiku")))]
     {
         if let Some(data) = std::env::var_os("XDG_DATA_HOME") {
             return PathBuf::from(data).join("retifs");
