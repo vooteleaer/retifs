@@ -17,6 +17,8 @@ pub type port_id = i32;
 pub const B_OK: status_t = 0;
 pub const B_MODULE_INIT: i32 = 1;
 pub const B_MODULE_UNINIT: i32 = 2;
+/// `open_query` flags (`<fs_query.h>`).
+pub const B_LIVE_QUERY: u32 = 1 << 0;
 
 pub const B_FS_IS_READONLY: u32 = 0x0000_0001;
 pub const B_FS_IS_PERSISTENT: u32 = 0x0000_0004;
@@ -92,20 +94,20 @@ pub struct fs_volume_ops {
     pub sync: Option<unsafe extern "C" fn(Vol) -> status_t>,
     pub get_vnode: Option<unsafe extern "C" fn(Vol, ino_t, Node, *mut c_int, *mut u32, bool) -> status_t>,
 
-    pub open_index_dir: Unused,
-    pub close_index_dir: Unused,
-    pub free_index_dir_cookie: Unused,
-    pub read_index_dir: Unused,
-    pub rewind_index_dir: Unused,
+    pub open_index_dir: Option<unsafe extern "C" fn(Vol, *mut Cookie) -> status_t>,
+    pub close_index_dir: Option<unsafe extern "C" fn(Vol, Cookie) -> status_t>,
+    pub free_index_dir_cookie: Option<unsafe extern "C" fn(Vol, Cookie) -> status_t>,
+    pub read_index_dir: Option<unsafe extern "C" fn(Vol, Cookie, Dirent, usize, *mut u32) -> status_t>,
+    pub rewind_index_dir: Option<unsafe extern "C" fn(Vol, Cookie) -> status_t>,
     pub create_index: Unused,
     pub remove_index: Unused,
-    pub read_index_stat: Unused,
+    pub read_index_stat: Option<unsafe extern "C" fn(Vol, *const c_char, Stat) -> status_t>,
 
-    pub open_query: Unused,
-    pub close_query: Unused,
-    pub free_query_cookie: Unused,
-    pub read_query: Unused,
-    pub rewind_query: Unused,
+    pub open_query: Option<unsafe extern "C" fn(Vol, *const c_char, u32, port_id, u32, *mut Cookie) -> status_t>,
+    pub close_query: Option<unsafe extern "C" fn(Vol, Cookie) -> status_t>,
+    pub free_query_cookie: Option<unsafe extern "C" fn(Vol, Cookie) -> status_t>,
+    pub read_query: Option<unsafe extern "C" fn(Vol, Cookie, Dirent, usize, *mut u32) -> status_t>,
+    pub rewind_query: Option<unsafe extern "C" fn(Vol, Cookie) -> status_t>,
 
     pub all_layers_mounted: Unused,
     pub create_sub_vnode: Unused,
@@ -220,4 +222,6 @@ unsafe extern "C" {
     pub fn publish_vnode(volume: Vol, id: ino_t, private_node: *mut c_void, ops: *mut fs_vnode_ops, mode: c_int, flags: u32) -> status_t;
     pub fn get_vnode(volume: Vol, id: ino_t, private_node: *mut *mut c_void) -> status_t;
     pub fn put_vnode(volume: Vol, id: ino_t) -> status_t;
+    pub fn notify_query_entry_created(port: port_id, token: i32, device: dev_t, directory: ino_t, name: *const c_char, node: ino_t) -> status_t;
+    pub fn notify_query_entry_removed(port: port_id, token: i32, device: dev_t, directory: ino_t, name: *const c_char, node: ino_t) -> status_t;
 }

@@ -211,6 +211,116 @@ impl Volume {
     }
 }
 
+/// A query's match: the node, its directory and its name.
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+pub struct Hit {
+    pub dir: i64,
+    pub ino: i64,
+    pub name: String,
+}
+
+/// A node as a query sees it: Haiku's own attributes and the record's.
+struct NodeView<'a> {
+    name: &'a str,
+    kind: &'a Node,
+    record: Option<&'a RecordView>,
+}
+
+impl crate::query::Subject for NodeView<'_> {
+    fn get(&self, attr: &str) -> Option<AttrValue> {
+        match attr {
+            "name" => Some(AttrValue::Str(self.name.to_string())),
+            "size" => match self.kind {
+                Node::File { size, .. } => Some(AttrValue::Int(*size as i64)),
+                Node::Dir { .. } => Some(AttrValue::Int(0)),
+            },
+            "last_modified" => match self.kind {
+                Node::File { mtime_ms: Some(ms), .. } => Some(AttrValue::Int(ms.div_euclid(1000))),
+                _ => None,
+            },
+            MIME_ATTR => self.record.and_then(mime).map(|m| AttrValue::Str(m.to_string())),
+            k => self.record?.attrs.iter().find(|(key, _)| key == k).map(|(_, v)| v.clone()),
+        }
+    }
+}
+
+impl Volume {
+    /// The nodes matching a Haiku query. Its exact string parts go to
+    /// retifsd as terms first, so a library held only in part answers from
+    /// its index; records found that way join the tree.
+    pub fn query(&mut self, expr: &crate::query::Expr) -> Result<Vec<Hit>, String> {
+        let terms = crate::query::pushdown(expr);
+        let candidates: Option<std::collections::HashSet<String>> = if terms.is_empty() {
+            self.refresh(false)?;
+            None
+        } else {
+            let found = match self.call(Request::Query { ns: self.mount.ns.clone(), terms, at: None })? {
+                Response::Records { records } => records,
+                _ => return Err("unexpected answer to a query".into()),
+            };
+            let ids = found.iter().map(|r| r.id.clone()).collect();
+            let mut new = false;
+            for r in found {
+                new |= !self.records.contains_key(&r.id);
+                self.records.insert(r.id.clone(), r);
+            }
+            if new {
+                let all: Vec<RecordView> = self.records.values().cloned().collect();
+                self.tree = Tree::build(&all);
+            }
+            Some(ids)
+        };
+        let mut hits = Vec::new();
+        let matched: Vec<String> = self
+            .tree
+            .nodes
+            .iter()
+            .filter(|(p, _)| !matches!(p.as_str(), "/" | tree::QUERY_DIR | tree::RECORDS_DIR))
+            .filter(|(_, n)| candidates.as_ref().is_none_or(|c| n.id().is_some_and(|id| c.contains(id))))
+            .filter(|(p, n)| {
+                let view = NodeView { name: tree::name(p), kind: n, record: n.id().and_then(|id| self.records.get(id)) };
+                expr.matches(&view)
+            })
+            .map(|(p, _)| p.clone())
+            .collect();
+        for p in matched {
+            let dir = self.ino(tree::parent(&p));
+            let ino = self.ino(&p);
+            hits.push(Hit { dir, ino, name: tree::name(&p).to_string() });
+        }
+        Ok(hits)
+    }
+
+    /// The namespace's size: its files' sizes together. Reported as the
+    /// volume's capacity (Tracker offers only volumes with one for Find).
+    pub fn total_bytes(&mut self) -> u64 {
+        let _ = self.refresh(false);
+        self.tree.nodes.values().map(|n| if let Node::File { size, .. } = n { *size } else { 0 }).sum()
+    }
+
+    /// The volume's indexes as `lsindex` lists them: Haiku's own and every
+    /// attribute key in the namespace, typed by its first value seen. retifs
+    /// answers any attribute; these say which ones exist.
+    pub fn indexes(&mut self) -> Vec<(String, u32)> {
+        use crate::types::*;
+        let _ = self.refresh(false);
+        let mut out = vec![
+            ("name".to_string(), B_STRING_TYPE),
+            ("size".to_string(), B_INT64_TYPE),
+            ("last_modified".to_string(), B_INT64_TYPE),
+            (MIME_ATTR.to_string(), B_STRING_TYPE),
+        ];
+        let mut seen: std::collections::BTreeMap<&str, u32> = Default::default();
+        for r in self.records.values() {
+            for (k, v) in &r.attrs {
+                seen.entry(k.as_str()).or_insert_with(|| haiku_attr(v).type_code);
+            }
+        }
+        out.extend(seen.into_iter().filter(|(k, _)| !out.iter().any(|(o, _)| o == k)).map(|(k, t)| (k.to_string(), t)).collect::<Vec<_>>());
+        out
+    }
+}
+
 /// The record's `type`, if it is a MIME type (`application/x-vnd.…`).
 fn mime(r: &RecordView) -> Option<&str> {
     match r.attrs.iter().find(|(k, _)| k == "type").map(|(_, v)| v) {
