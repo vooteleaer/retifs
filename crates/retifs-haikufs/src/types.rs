@@ -10,6 +10,12 @@ pub const B_INT64_TYPE: u32 = type_code(b"LLNG");
 pub const B_RAW_TYPE: u32 = type_code(b"RAWT");
 pub const B_STRING_TYPE: u32 = type_code(b"CSTR");
 pub const B_MIME_STRING_TYPE: u32 = type_code(b"MIMS");
+pub const B_FLOAT_TYPE: u32 = type_code(b"FLOT");
+pub const B_INT16_TYPE: u32 = type_code(b"SHRT");
+pub const B_INT32_TYPE: u32 = type_code(b"LONG");
+pub const B_UINT32_TYPE: u32 = type_code(b"ULNG");
+pub const B_UINT64_TYPE: u32 = type_code(b"ULLG");
+pub const B_TIME_TYPE: u32 = type_code(b"TIME");
 
 #[cfg(test)]
 mod tests {

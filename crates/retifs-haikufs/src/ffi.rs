@@ -17,10 +17,18 @@ pub type port_id = i32;
 pub const B_OK: status_t = 0;
 pub const B_MODULE_INIT: i32 = 1;
 pub const B_MODULE_UNINIT: i32 = 2;
+/// `write_stat` and `notify_stat_changed` fields (`<NodeMonitor.h>`).
+pub const B_STAT_SIZE: u32 = 0x0008;
+pub const B_STAT_MODIFICATION_TIME: u32 = 0x0020;
+/// `notify_attribute_changed` causes.
+pub const B_ATTR_CREATED: i32 = 1;
+pub const B_ATTR_REMOVED: i32 = 2;
+pub const B_ATTR_CHANGED: i32 = 5;
 /// `open_query` flags (`<fs_query.h>`).
 pub const B_LIVE_QUERY: u32 = 1 << 0;
 
 pub const B_FS_IS_READONLY: u32 = 0x0000_0001;
+pub const B_FS_IS_REMOVABLE: u32 = 0x0000_0002;
 pub const B_FS_IS_PERSISTENT: u32 = 0x0000_0004;
 pub const B_FS_IS_SHARED: u32 = 0x0000_0008;
 pub const B_FS_HAS_MIME: u32 = 0x0001_0000;
@@ -137,23 +145,23 @@ pub struct fs_vnode_ops {
     pub read_symlink: Unused,
     pub create_symlink: Unused,
     pub link: Unused,
-    pub unlink: Unused,
-    pub rename: Unused,
+    pub unlink: Option<unsafe extern "C" fn(Vol, Node, *const c_char) -> status_t>,
+    pub rename: Option<unsafe extern "C" fn(Vol, Node, *const c_char, Node, *const c_char) -> status_t>,
 
     pub access: Option<unsafe extern "C" fn(Vol, Node, c_int) -> status_t>,
     pub read_stat: Option<unsafe extern "C" fn(Vol, Node, Stat) -> status_t>,
-    pub write_stat: Unused,
+    pub write_stat: Option<unsafe extern "C" fn(Vol, Node, *const libc::stat, u32) -> status_t>,
     pub preallocate: Unused,
 
-    pub create: Unused,
+    pub create: Option<unsafe extern "C" fn(Vol, Node, *const c_char, c_int, c_int, *mut Cookie, *mut ino_t) -> status_t>,
     pub open: Option<unsafe extern "C" fn(Vol, Node, c_int, *mut Cookie) -> status_t>,
     pub close: Option<unsafe extern "C" fn(Vol, Node, Cookie) -> status_t>,
     pub free_cookie: Option<unsafe extern "C" fn(Vol, Node, Cookie) -> status_t>,
     pub read: Option<unsafe extern "C" fn(Vol, Node, Cookie, off_t, *mut c_void, *mut usize) -> status_t>,
-    pub write: Unused,
+    pub write: Option<unsafe extern "C" fn(Vol, Node, Cookie, off_t, *const c_void, *mut usize) -> status_t>,
 
-    pub create_dir: Unused,
-    pub remove_dir: Unused,
+    pub create_dir: Option<unsafe extern "C" fn(Vol, Node, *const c_char, c_int) -> status_t>,
+    pub remove_dir: Option<unsafe extern "C" fn(Vol, Node, *const c_char) -> status_t>,
     pub open_dir: Option<unsafe extern "C" fn(Vol, Node, *mut Cookie) -> status_t>,
     pub close_dir: Option<unsafe extern "C" fn(Vol, Node, Cookie) -> status_t>,
     pub free_dir_cookie: Option<unsafe extern "C" fn(Vol, Node, Cookie) -> status_t>,
@@ -166,16 +174,16 @@ pub struct fs_vnode_ops {
     pub read_attr_dir: Option<unsafe extern "C" fn(Vol, Node, Cookie, Dirent, usize, *mut u32) -> status_t>,
     pub rewind_attr_dir: Option<unsafe extern "C" fn(Vol, Node, Cookie) -> status_t>,
 
-    pub create_attr: Unused,
+    pub create_attr: Option<unsafe extern "C" fn(Vol, Node, *const c_char, u32, c_int, *mut Cookie) -> status_t>,
     pub open_attr: Option<unsafe extern "C" fn(Vol, Node, *const c_char, c_int, *mut Cookie) -> status_t>,
     pub close_attr: Option<unsafe extern "C" fn(Vol, Node, Cookie) -> status_t>,
     pub free_attr_cookie: Option<unsafe extern "C" fn(Vol, Node, Cookie) -> status_t>,
     pub read_attr: Option<unsafe extern "C" fn(Vol, Node, Cookie, off_t, *mut c_void, *mut usize) -> status_t>,
-    pub write_attr: Unused,
+    pub write_attr: Option<unsafe extern "C" fn(Vol, Node, Cookie, off_t, *const c_void, *mut usize) -> status_t>,
     pub read_attr_stat: Option<unsafe extern "C" fn(Vol, Node, Cookie, Stat) -> status_t>,
     pub write_attr_stat: Unused,
     pub rename_attr: Unused,
-    pub remove_attr: Unused,
+    pub remove_attr: Option<unsafe extern "C" fn(Vol, Node, *const c_char) -> status_t>,
 
     pub create_special_node: Unused,
     pub get_super_vnode: Unused,
@@ -222,6 +230,11 @@ unsafe extern "C" {
     pub fn publish_vnode(volume: Vol, id: ino_t, private_node: *mut c_void, ops: *mut fs_vnode_ops, mode: c_int, flags: u32) -> status_t;
     pub fn get_vnode(volume: Vol, id: ino_t, private_node: *mut *mut c_void) -> status_t;
     pub fn put_vnode(volume: Vol, id: ino_t) -> status_t;
+    pub fn notify_entry_created(device: dev_t, directory: ino_t, name: *const c_char, node: ino_t) -> status_t;
+    pub fn notify_entry_removed(device: dev_t, directory: ino_t, name: *const c_char, node: ino_t) -> status_t;
+    pub fn notify_entry_moved(device: dev_t, from_directory: ino_t, from_name: *const c_char, to_directory: ino_t, to_name: *const c_char, node: ino_t) -> status_t;
+    pub fn notify_stat_changed(device: dev_t, directory: ino_t, node: ino_t, fields: u32) -> status_t;
+    pub fn notify_attribute_changed(device: dev_t, directory: ino_t, node: ino_t, attribute: *const c_char, cause: i32) -> status_t;
     pub fn notify_query_entry_created(port: port_id, token: i32, device: dev_t, directory: ino_t, name: *const c_char, node: ino_t) -> status_t;
     pub fn notify_query_entry_removed(port: port_id, token: i32, device: dev_t, directory: ino_t, name: *const c_char, node: ino_t) -> status_t;
 }

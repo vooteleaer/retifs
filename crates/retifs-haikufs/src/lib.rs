@@ -4,9 +4,11 @@
 //! Like the FUSE mount it holds no keys and no store: it talks to the local
 //! `retifsd` through `libretifs`.
 //!
-//! Read-only for now: files, directories, contents and attributes, and
-//! queries in Haiku's query language, live ones included (Tracker's Find,
-//! `query`), answered by retifs (see `query`).
+//! Files, directories, contents and attributes, read and written (each
+//! change one commit, as in the FUSE mount), and queries in Haiku's query
+//! language, live ones included (Tracker's Find, `query`), answered by
+//! retifs (see `query`). Contacts carry Haiku People's `META:` attributes as
+//! views of their keys (see `person`), so People edits retifs contacts.
 //!
 //! Install the built library as `~/config/non-packaged/add-ons/userlandfs/retifs`
 //! and mount a namespace with
@@ -20,6 +22,15 @@
 mod ffi;
 #[cfg(target_os = "haiku")]
 mod ops;
+mod person;
 mod query;
 pub mod types;
 mod volume;
+
+/// The module's log (it has no terminal): `/boot/system/var/log/retifs-haikufs.log`.
+pub(crate) fn log(msg: &str) {
+    use std::io::Write as _;
+    if let Ok(mut f) = std::fs::OpenOptions::new().create(true).append(true).open("/boot/system/var/log/retifs-haikufs.log") {
+        let _ = writeln!(f, "{msg}");
+    }
+}

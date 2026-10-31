@@ -1,8 +1,12 @@
 //! The C side: Haiku's file system operations over a [`Volume`]. A vnode's
 //! private data is its inode number (never 0), so there is nothing to free
-//! per node; directory, attribute directory, attribute and query cookies are
-//! boxes. Every operation runs inside `guard`, so a panic is an I/O error,
-//! never an unwind into C.
+//! per node; file, directory, attribute directory, attribute and query
+//! cookies are boxes. Every operation runs inside `guard`, so a panic is an
+//! I/O error, never an unwind into C. The volume's lock is never held while
+//! calling into the kernel side (it may call back in).
+//!
+//! Changes are told to node monitors (`notify_*`), so Tracker windows and
+//! People follow them; changes from elsewhere reach live queries.
 //!
 //! Live queries: a thread follows the namespace's changes (the daemon's
 //! watch, as the FUSE mount does) and tells each live query what came and
@@ -10,7 +14,6 @@
 
 use std::collections::HashSet;
 use std::ffi::{CStr, CString, c_char, c_int, c_void};
-use std::io::Write as _;
 use std::panic::{AssertUnwindSafe, catch_unwind};
 use std::ptr;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
@@ -21,7 +24,8 @@ use libretifs::{Client, Request, Response};
 
 use crate::ffi::*;
 use crate::query::{self, Expr};
-use crate::volume::{Attr, Hit, Kind, Mount, ROOT, Volume};
+use crate::log;
+use crate::volume::{Attr, Fail, Handle, Hit, Kind, Mount, ROOT, Volume};
 
 /// The mounted volume, behind a lock: userlandfs calls in from several
 /// threads, and the live-query watcher holds it too.
@@ -56,10 +60,34 @@ struct QueryCookie {
     live: Option<u64>,
 }
 
-fn log(msg: &str) {
-    if let Ok(mut f) = std::fs::OpenOptions::new().create(true).append(true).open("/boot/system/var/log/retifs-haikufs.log") {
-        let _ = writeln!(f, "{msg}");
+/// An attribute open for reading or writing: a written one is committed on
+/// close (one change per attribute written, as `fs_write_attr` does it).
+struct AttrCookie {
+    name: String,
+    attr: Attr,
+    dirty: bool,
+    new: bool,
+}
+
+fn errno(f: Fail) -> status_t {
+    match f {
+        Fail::NotFound => libc::ENOENT,
+        Fail::Exists => libc::EEXIST,
+        Fail::NotDir => libc::ENOTDIR,
+        Fail::IsDir => libc::EISDIR,
+        Fail::NotEmpty => libc::ENOTEMPTY,
+        Fail::NotHere => libc::EPERM,
+        Fail::Invalid => libc::EINVAL,
+        Fail::Io => libc::EIO,
     }
+}
+
+unsafe fn c_name(name: *const c_char) -> String {
+    unsafe { CStr::from_ptr(name) }.to_string_lossy().into_owned()
+}
+
+fn cstring(s: &str) -> CString {
+    CString::new(s).unwrap_or_default()
 }
 
 fn guard(name: &str, f: impl FnOnce() -> status_t) -> status_t {
@@ -95,8 +123,8 @@ unsafe fn ino(node: *mut fs_vnode) -> i64 {
 
 fn mode(kind: Kind) -> libc::mode_t {
     match kind {
-        Kind::Dir => libc::S_IFDIR | 0o555,
-        Kind::File { .. } => libc::S_IFREG | 0o444,
+        Kind::Dir => libc::S_IFDIR | 0o755,
+        Kind::File { .. } => libc::S_IFREG | 0o644,
     }
 }
 
@@ -212,18 +240,29 @@ unsafe extern "C" fn read_fs_info(volume: *mut fs_volume, info: *mut fs_info) ->
         *info = unsafe { std::mem::zeroed() };
         info.dev = v.id;
         info.root = ROOT;
-        info.flags = B_FS_IS_READONLY | B_FS_IS_PERSISTENT | B_FS_IS_SHARED | B_FS_HAS_ATTR | B_FS_HAS_MIME | B_FS_HAS_QUERY;
+        info.flags = B_FS_IS_PERSISTENT | B_FS_IS_SHARED | B_FS_HAS_ATTR | B_FS_HAS_MIME | B_FS_HAS_QUERY;
         info.block_size = 4096;
         info.io_size = 65536;
-        // At least one block: a volume without capacity isn't offered by
-        // Tracker's Find. Read-only, so nothing is free.
-        info.total_blocks = (bytes.div_ceil(4096) as off_t).max(1);
-        info.free_blocks = 0;
+        // What's free is what the store's disk has (Tracker checks before a
+        // copy); the capacity is that and the namespace, at least one block
+        // (a volume without capacity isn't offered by Tracker's Find).
+        let free = free_bytes(&v.store) / 4096;
+        info.total_blocks = ((bytes.div_ceil(4096) + free) as off_t).max(1);
+        info.free_blocks = free as off_t;
         fill(&mut info.volume_name, &ns);
         fill(&mut info.device_name, "retifs");
         fill(&mut info.fsh_name, "retifs");
         B_OK
     })
+}
+
+fn free_bytes(store: &std::path::Path) -> u64 {
+    let Ok(p) = CString::new(store.as_os_str().as_encoded_bytes()) else { return 0 };
+    let mut st: libc::statvfs = unsafe { std::mem::zeroed() };
+    if unsafe { libc::statvfs(p.as_ptr(), &mut st) } != 0 {
+        return 0;
+    }
+    st.f_bavail as u64 * st.f_frsize as u64
 }
 
 fn fill(dst: &mut [c_char], s: &str) {
@@ -294,8 +333,8 @@ unsafe extern "C" fn fsync(_volume: *mut fs_volume, _node: *mut fs_vnode, _data_
     B_OK
 }
 
-unsafe extern "C" fn access(_volume: *mut fs_volume, _node: *mut fs_vnode, mode: c_int) -> status_t {
-    if mode & libc::W_OK != 0 { libc::EROFS } else { B_OK }
+unsafe extern "C" fn access(_volume: *mut fs_volume, _node: *mut fs_vnode, _mode: c_int) -> status_t {
+    B_OK
 }
 
 unsafe extern "C" fn read_stat(volume: *mut fs_volume, node: *mut fs_vnode, st: *mut libc::stat) -> status_t {
@@ -334,26 +373,74 @@ unsafe extern "C" fn read_stat(volume: *mut fs_volume, node: *mut fs_vnode, st: 
 
 unsafe extern "C" fn open(volume: *mut fs_volume, node: *mut fs_vnode, open_mode: c_int, cookie: *mut *mut c_void) -> status_t {
     guard("open", || {
-        if open_mode & libc::O_ACCMODE != libc::O_RDONLY {
-            return libc::EROFS;
+        let id = unsafe { ino(node) };
+        let mut v = lock(unsafe { vol(volume) });
+        match v.kind(id) {
+            None => return libc::ENOENT,
+            Some(Kind::Dir) if open_mode & libc::O_ACCMODE != libc::O_RDONLY => return libc::EISDIR,
+            _ => {}
         }
-        if lock(unsafe { vol(volume) }).kind(unsafe { ino(node) }).is_none() {
-            return libc::ENOENT;
+        // Emptying what has no content (People opens a contact so) changes nothing.
+        let truncate = open_mode & libc::O_TRUNC != 0 && open_mode & libc::O_ACCMODE != libc::O_RDONLY && v.has_content(id);
+        let append = open_mode & libc::O_APPEND != 0;
+        let mut h = Handle { truncate, append, dirty: truncate, ..Default::default() };
+        if truncate && let Err(f) = v.session(id, &mut h) {
+            return errno(f);
         }
-        unsafe { *cookie = ptr::null_mut() };
+        unsafe { *cookie = Box::into_raw(Box::new(h)) as *mut c_void };
         B_OK
     })
 }
 
-unsafe extern "C" fn close(_volume: *mut fs_volume, _node: *mut fs_vnode, _cookie: *mut c_void) -> status_t {
-    B_OK
+/// Commits what the handle wrote, and tells the file's watchers.
+unsafe extern "C" fn close(volume: *mut fs_volume, node: *mut fs_vnode, cookie: *mut c_void) -> status_t {
+    guard("close", || {
+        let h = unsafe { &mut *(cookie as *mut Handle) };
+        if !h.dirty {
+            return B_OK;
+        }
+        let v = unsafe { vol(volume) };
+        let id = unsafe { ino(node) };
+        let dir = {
+            let mut vol = lock(v);
+            if let Err(f) = vol.commit(id, h) {
+                return errno(f);
+            }
+            vol.parent_ino(id)
+        };
+        unsafe { notify_stat_changed(v.id, dir, id, B_STAT_SIZE | B_STAT_MODIFICATION_TIME) };
+        B_OK
+    })
 }
 
-unsafe extern "C" fn free_cookie(_volume: *mut fs_volume, _node: *mut fs_vnode, _cookie: *mut c_void) -> status_t {
-    B_OK
+unsafe extern "C" fn free_cookie(volume: *mut fs_volume, _node: *mut fs_vnode, cookie: *mut c_void) -> status_t {
+    guard("free_cookie", || {
+        let mut h = unsafe { Box::from_raw(cookie as *mut Handle) };
+        if h.session.is_some() {
+            lock(unsafe { vol(volume) }).abort(&mut h);
+        }
+        B_OK
+    })
 }
 
-unsafe extern "C" fn read(volume: *mut fs_volume, node: *mut fs_vnode, _cookie: *mut c_void, pos: off_t, buffer: *mut c_void, length: *mut usize) -> status_t {
+unsafe extern "C" fn write(volume: *mut fs_volume, node: *mut fs_vnode, cookie: *mut c_void, pos: off_t, buffer: *const c_void, length: *mut usize) -> status_t {
+    guard("write", || {
+        if pos < 0 {
+            return libc::EINVAL;
+        }
+        let h = unsafe { &mut *(cookie as *mut Handle) };
+        let data = unsafe { std::slice::from_raw_parts(buffer as *const u8, *length) };
+        match lock(unsafe { vol(volume) }).write(unsafe { ino(node) }, h, pos as u64, data) {
+            Ok(()) => B_OK,
+            Err(f) => {
+                unsafe { *length = 0 };
+                errno(f)
+            }
+        }
+    })
+}
+
+unsafe extern "C" fn read(volume: *mut fs_volume, node: *mut fs_vnode, cookie: *mut c_void, pos: off_t, buffer: *mut c_void, length: *mut usize) -> status_t {
     guard("read", || {
         if pos < 0 {
             return libc::EINVAL;
@@ -365,7 +452,8 @@ unsafe extern "C" fn read(volume: *mut fs_volume, node: *mut fs_vnode, _cookie: 
             None => return libc::ENOENT,
             Some(Kind::File { .. }) => {}
         }
-        match v.read(id, pos as u64, unsafe { *length } as u64) {
+        let h = (!cookie.is_null()).then(|| unsafe { &*(cookie as *const Handle) });
+        match v.read(id, h, pos as u64, unsafe { *length } as u64) {
             Ok(data) => copy_out(&data, 0, buffer, length),
             Err(e) => {
                 log(&format!("read: {e}"));
@@ -414,38 +502,254 @@ unsafe extern "C" fn open_attr_dir(volume: *mut fs_volume, node: *mut fs_vnode, 
 
 unsafe extern "C" fn open_attr(volume: *mut fs_volume, node: *mut fs_vnode, name: *const c_char, open_mode: c_int, cookie: *mut *mut c_void) -> status_t {
     guard("open_attr", || {
-        if open_mode & libc::O_ACCMODE != libc::O_RDONLY {
-            return libc::EROFS;
+        let name = unsafe { c_name(name) };
+        let Some(mut attr) = lock(unsafe { vol(volume) }).attr(unsafe { ino(node) }, &name) else { return libc::ENOENT };
+        let truncate = open_mode & libc::O_TRUNC != 0 && open_mode & libc::O_ACCMODE != libc::O_RDONLY;
+        if truncate {
+            attr.data.clear();
         }
-        let name = unsafe { CStr::from_ptr(name) }.to_string_lossy().into_owned();
-        let Some(attr) = lock(unsafe { vol(volume) }).attr(unsafe { ino(node) }, &name) else { return libc::ENOENT };
-        unsafe { *cookie = Box::into_raw(Box::new(attr)) as *mut c_void };
+        unsafe { *cookie = Box::into_raw(Box::new(AttrCookie { name, attr, dirty: truncate, new: false })) as *mut c_void };
+        B_OK
+    })
+}
+
+/// `fs_write_attr` comes here: the attribute, new or (unless `O_EXCL`) the
+/// one there, now of `type_code`.
+unsafe extern "C" fn create_attr(volume: *mut fs_volume, node: *mut fs_vnode, name: *const c_char, type_code: u32, open_mode: c_int, cookie: *mut *mut c_void) -> status_t {
+    guard("create_attr", || {
+        let name = unsafe { c_name(name) };
+        let there = lock(unsafe { vol(volume) }).attr(unsafe { ino(node) }, &name);
+        if there.is_some() && open_mode & libc::O_EXCL != 0 {
+            return libc::EEXIST;
+        }
+        let new = there.is_none();
+        let data = match there {
+            Some(a) if open_mode & libc::O_TRUNC == 0 => a.data,
+            _ => Vec::new(),
+        };
+        let attr = Attr { type_code, data };
+        unsafe { *cookie = Box::into_raw(Box::new(AttrCookie { name, attr, dirty: true, new })) as *mut c_void };
         B_OK
     })
 }
 
 unsafe extern "C" fn read_attr(_volume: *mut fs_volume, _node: *mut fs_vnode, cookie: *mut c_void, pos: off_t, buffer: *mut c_void, length: *mut usize) -> status_t {
     guard("read_attr", || {
-        let attr = unsafe { &*(cookie as *const Attr) };
-        copy_out(&attr.data, pos, buffer, length)
+        let c = unsafe { &*(cookie as *const AttrCookie) };
+        copy_out(&c.attr.data, pos, buffer, length)
+    })
+}
+
+unsafe extern "C" fn write_attr(_volume: *mut fs_volume, _node: *mut fs_vnode, cookie: *mut c_void, pos: off_t, buffer: *const c_void, length: *mut usize) -> status_t {
+    guard("write_attr", || {
+        let Ok(pos) = usize::try_from(pos) else { return libc::EINVAL };
+        let c = unsafe { &mut *(cookie as *mut AttrCookie) };
+        let n = unsafe { *length };
+        let data = unsafe { std::slice::from_raw_parts(buffer as *const u8, n) };
+        if c.attr.data.len() < pos + n {
+            c.attr.data.resize(pos + n, 0);
+        }
+        c.attr.data[pos..pos + n].copy_from_slice(data);
+        c.dirty = true;
+        B_OK
+    })
+}
+
+/// Commits a written attribute, and tells the node's watchers.
+unsafe extern "C" fn close_attr(volume: *mut fs_volume, node: *mut fs_vnode, cookie: *mut c_void) -> status_t {
+    guard("close_attr", || {
+        let c = unsafe { &mut *(cookie as *mut AttrCookie) };
+        if !c.dirty {
+            return B_OK;
+        }
+        c.dirty = false;
+        let v = unsafe { vol(volume) };
+        let id = unsafe { ino(node) };
+        let (new, dir) = {
+            let mut vol = lock(v);
+            match vol.set_attr(id, &c.name, c.attr.clone()) {
+                Ok(new) => (new || c.new, vol.parent_ino(id)),
+                Err(f) => {
+                    log(&format!("write attribute {:?}: {f:?}", c.name));
+                    return errno(f);
+                }
+            }
+        };
+        let name = cstring(&c.name);
+        unsafe { notify_attribute_changed(v.id, dir, id, name.as_ptr(), if new { B_ATTR_CREATED } else { B_ATTR_CHANGED }) };
+        B_OK
     })
 }
 
 unsafe extern "C" fn read_attr_stat(_volume: *mut fs_volume, _node: *mut fs_vnode, cookie: *mut c_void, st: *mut libc::stat) -> status_t {
     guard("read_attr_stat", || {
-        let attr = unsafe { &*(cookie as *const Attr) };
+        let c = unsafe { &*(cookie as *const AttrCookie) };
         let st = unsafe { &mut *st };
         *st = unsafe { std::mem::zeroed() };
-        st.st_size = attr.data.len() as libc::off_t;
-        st.st_type = attr.type_code;
-        st.st_mode = libc::S_IFREG | 0o444;
+        st.st_size = c.attr.data.len() as libc::off_t;
+        st.st_type = c.attr.type_code;
+        st.st_mode = libc::S_IFREG | 0o644;
         B_OK
     })
 }
 
 unsafe extern "C" fn free_attr_cookie(_volume: *mut fs_volume, _node: *mut fs_vnode, cookie: *mut c_void) -> status_t {
-    unsafe { drop(Box::from_raw(cookie as *mut Attr)) };
+    unsafe { drop(Box::from_raw(cookie as *mut AttrCookie)) };
     B_OK
+}
+
+unsafe extern "C" fn remove_attr(volume: *mut fs_volume, node: *mut fs_vnode, name: *const c_char) -> status_t {
+    guard("remove_attr", || {
+        let name = unsafe { c_name(name) };
+        let v = unsafe { vol(volume) };
+        let id = unsafe { ino(node) };
+        let dir = {
+            let mut vol = lock(v);
+            if let Err(f) = vol.remove_attr(id, &name) {
+                return errno(f);
+            }
+            vol.parent_ino(id)
+        };
+        let name = cstring(&name);
+        unsafe { notify_attribute_changed(v.id, dir, id, name.as_ptr(), B_ATTR_REMOVED) };
+        B_OK
+    })
+}
+
+// ------------------------------------------------------------- changes
+
+/// A new file: made, opened (the cookie), and in the kernel's hands (as a
+/// lookup leaves it).
+unsafe extern "C" fn create(volume: *mut fs_volume, dir: *mut fs_vnode, name: *const c_char, open_mode: c_int, _perms: c_int, cookie: *mut *mut c_void, new_id: *mut ino_t) -> status_t {
+    guard("create", || {
+        let name = unsafe { c_name(name) };
+        let v = unsafe { vol(volume) };
+        let d = unsafe { ino(dir) };
+        let made = lock(v).create(d, &name);
+        let id = match made {
+            Ok(id) => id,
+            Err(f) => return errno(f),
+        };
+        let mut private = ptr::null_mut();
+        let s = unsafe { ffi_get_vnode(volume, id, &mut private) };
+        if s != B_OK {
+            return s;
+        }
+        let (truncate, append) = (open_mode & libc::O_TRUNC != 0, open_mode & libc::O_APPEND != 0);
+        unsafe {
+            *cookie = Box::into_raw(Box::new(Handle { truncate, append, ..Default::default() })) as *mut c_void;
+            *new_id = id;
+        }
+        let n = cstring(&name);
+        unsafe { notify_entry_created(v.id, d, n.as_ptr(), id) };
+        B_OK
+    })
+}
+
+unsafe extern "C" fn create_dir(volume: *mut fs_volume, parent: *mut fs_vnode, name: *const c_char, _perms: c_int) -> status_t {
+    guard("create_dir", || {
+        let name = unsafe { c_name(name) };
+        let v = unsafe { vol(volume) };
+        let d = unsafe { ino(parent) };
+        let made = lock(v).mkdir(d, &name);
+        match made {
+            Ok(id) => {
+                let n = cstring(&name);
+                unsafe { notify_entry_created(v.id, d, n.as_ptr(), id) };
+                B_OK
+            }
+            Err(f) => errno(f),
+        }
+    })
+}
+
+unsafe extern "C" fn remove_dir(volume: *mut fs_volume, parent: *mut fs_vnode, name: *const c_char) -> status_t {
+    guard("remove_dir", || {
+        let name = unsafe { c_name(name) };
+        let v = unsafe { vol(volume) };
+        let d = unsafe { ino(parent) };
+        let gone = lock(v).rmdir(d, &name);
+        match gone {
+            Ok(id) => {
+                let n = cstring(&name);
+                unsafe { notify_entry_removed(v.id, d, n.as_ptr(), id) };
+                B_OK
+            }
+            Err(f) => errno(f),
+        }
+    })
+}
+
+unsafe extern "C" fn unlink(volume: *mut fs_volume, dir: *mut fs_vnode, name: *const c_char) -> status_t {
+    guard("unlink", || {
+        let name = unsafe { c_name(name) };
+        let v = unsafe { vol(volume) };
+        let d = unsafe { ino(dir) };
+        let gone = lock(v).unlink(d, &name);
+        match gone {
+            Ok(id) => {
+                let n = cstring(&name);
+                unsafe { notify_entry_removed(v.id, d, n.as_ptr(), id) };
+                B_OK
+            }
+            Err(f) => errno(f),
+        }
+    })
+}
+
+unsafe extern "C" fn rename(volume: *mut fs_volume, from_dir: *mut fs_vnode, from_name: *const c_char, to_dir: *mut fs_vnode, to_name: *const c_char) -> status_t {
+    guard("rename", || {
+        let (from, to) = unsafe { (c_name(from_name), c_name(to_name)) };
+        let v = unsafe { vol(volume) };
+        let (fd, td) = unsafe { (ino(from_dir), ino(to_dir)) };
+        let moved = lock(v).rename(fd, &from, td, &to);
+        match moved {
+            Ok((id, replaced)) => {
+                let (f, t) = (cstring(&from), cstring(&to));
+                unsafe {
+                    if let Some(old) = replaced {
+                        notify_entry_removed(v.id, td, t.as_ptr(), old);
+                    }
+                    notify_entry_moved(v.id, fd, f.as_ptr(), td, t.as_ptr(), id);
+                }
+                B_OK
+            }
+            Err(f) => errno(f),
+        }
+    })
+}
+
+/// Size (a truncation, one new version) and modification time; the rest a
+/// record doesn't have.
+unsafe extern "C" fn write_stat(volume: *mut fs_volume, node: *mut fs_vnode, st: *const libc::stat, mask: u32) -> status_t {
+    guard("write_stat", || {
+        let v = unsafe { vol(volume) };
+        let id = unsafe { ino(node) };
+        let st = unsafe { &*st };
+        let dir = {
+            let mut vol = lock(v);
+            if mask & B_STAT_SIZE != 0 {
+                let mut h = Handle::default();
+                let r = vol.truncate(id, &mut h, st.st_size.max(0) as u64).and_then(|()| vol.commit(id, &mut h));
+                if let Err(f) = r {
+                    vol.abort(&mut h);
+                    return errno(f);
+                }
+            }
+            if mask & B_STAT_MODIFICATION_TIME != 0 {
+                let ms = st.st_mtime as i64 * 1000 + st.st_mtime_nsec as i64 / 1_000_000;
+                // A directory has no time of its own to keep.
+                if let Err(f) = vol.set_mtime(id, ms)
+                    && f != Fail::NotFound
+                {
+                    return errno(f);
+                }
+            }
+            vol.parent_ino(id)
+        };
+        unsafe { notify_stat_changed(v.id, dir, id, mask) };
+        B_OK
+    })
 }
 
 // ------------------------------------------------------------- indexes
@@ -656,11 +960,18 @@ static mut VNODE_OPS: fs_vnode_ops = fs_vnode_ops {
     put_vnode: Some(put_vnode),
     fsync: Some(fsync),
     access: Some(access),
+    unlink: Some(unlink),
+    rename: Some(rename),
     read_stat: Some(read_stat),
+    write_stat: Some(write_stat),
+    create: Some(create),
     open: Some(open),
     close: Some(close),
     free_cookie: Some(free_cookie),
     read: Some(read),
+    write: Some(write),
+    create_dir: Some(create_dir),
+    remove_dir: Some(remove_dir),
     open_dir: Some(open_dir),
     close_dir: Some(close_dir),
     free_dir_cookie: Some(free_dir_cookie),
@@ -671,11 +982,14 @@ static mut VNODE_OPS: fs_vnode_ops = fs_vnode_ops {
     free_attr_dir_cookie: Some(free_dir_cookie),
     read_attr_dir: Some(read_dir),
     rewind_attr_dir: Some(rewind_dir),
+    create_attr: Some(create_attr),
     open_attr: Some(open_attr),
-    close_attr: Some(close),
+    close_attr: Some(close_attr),
     free_attr_cookie: Some(free_attr_cookie),
     read_attr: Some(read_attr),
+    write_attr: Some(write_attr),
     read_attr_stat: Some(read_attr_stat),
+    remove_attr: Some(remove_attr),
     ..unsafe { std::mem::zeroed() }
 };
 
