@@ -7,7 +7,8 @@
 //! - A record with `type = inode/directory` (once `directory`) and a path is a directory (so empty
 //!   directories exist); other directories are implied by paths below them.
 //! - Records without a path (put there by an app, a phone, the CLI) are
-//!   under `/Unfiled/<name>` (their ID if they have no name), except retifs' own
+//!   under `/Unfiled/<name>` (else their `title`, as an event has, else their
+//!   ID), except retifs' own
 //!   (`type` `retifs.*` or `keep-rule`: shares, index settings, keep rules),
 //!   which aren't files.
 //! - Two records claiming one path: the later ID gets `~<first 8 of its ID>`.
@@ -85,10 +86,11 @@ fn attr<'a>(r: &'a RecordView, key: &str) -> Option<&'a AttrValue> {
     r.attrs.iter().find(|(k, _)| k == key).map(|(_, v)| v)
 }
 
-/// A record's file name in `/Unfiled`: its `name`, made safe for a file
-/// name, or its ID.
+/// A record's file name in `/Unfiled`: its `name` (else its `title`), made
+/// safe for a file name, or its ID.
 fn unfiled_name(r: &RecordView) -> String {
-    let name = match attr(r, "name") {
+    let named = |k| attr(r, k).filter(|v| !matches!(v, AttrValue::Str(n) if n.trim().is_empty()));
+    let name = match named("name").or_else(|| named("title")) {
         Some(AttrValue::Str(n)) => n.chars().map(|c| if c == '/' || c == '\\' || c.is_control() { '_' } else { c }).collect::<String>(),
         _ => String::new(),
     };
@@ -342,7 +344,7 @@ mod tests {
         assert_eq!(t.get("/docs/a.txt"), Some(&Node::File { id: "aa01".into(), cap: Some("cap-a".into()), size: 5, mtime_ms: None }));
         assert_eq!(t.get("/photos"), Some(&Node::Dir { id: Some("aa03".into()) }), "the old name of the type");
         assert_eq!(t.get("/albums"), Some(&Node::Dir { id: Some("aa13".into()) }));
-        assert_eq!(names("/Unfiled"), ["IMG_1.jpg", "IMG_1.jpg~aa11", "a_b", "aa02", "aa04", "aa07"], "no path (or a bad one): by name, else ID");
+        assert_eq!(names("/Unfiled"), ["IMG_1.jpg", "IMG_1.jpg~aa11", "a_b", "aa02", "aa07", "no path"], "no path (or a bad one): by name, else title, else ID");
         assert_eq!(names("/photos"), Vec::<String>::new());
         assert_eq!(t.records_under("/docs").len(), 2);
     }
