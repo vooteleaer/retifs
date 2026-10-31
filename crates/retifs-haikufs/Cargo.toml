@@ -1,0 +1,19 @@
+[package]
+name = "retifs-haikufs"
+version = "0.0.1"
+description = "A namespace as a Haiku volume: a userlandfs module with Haiku's file system interface (ADR-0002), prototype"
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+publish = false
+
+[lib]
+crate-type = ["cdylib", "rlib"]
+
+[dependencies]
+libretifs = { path = "../libretifs" }
+retifs-tree = { path = "../retifs-tree" }
+tokio = { version = "1", features = ["rt"] }
+
+[target.'cfg(target_os = "haiku")'.dependencies]
+libc = "0.2"

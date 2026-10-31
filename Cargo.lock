@@ -1657,6 +1657,16 @@ dependencies = [
 ]
 
 [[package]]
+name = "retifs-haikufs"
+version = "0.0.1"
+dependencies = [
+ "libc",
+ "libretifs",
+ "retifs-tree",
+ "tokio",
+]
+
+[[package]]
 name = "retifs-net"
 version = "0.0.1"
 dependencies = [
