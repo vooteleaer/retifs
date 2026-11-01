@@ -63,7 +63,11 @@ fn mount(store: &Path, ns: &str) -> Result<(), String> {
 }
 
 fn unmount(store: &Path, ns: &str, dir: &Path) {
-    if is_mounted(dir) && !Command::new(UNMOUNT).arg(dir).status().is_ok_and(|s| s.success()) {
+    // A library left: its volume goes even with a Tracker window open on it.
+    if is_mounted(dir)
+        && !Command::new(UNMOUNT).arg(dir).status().is_ok_and(|s| s.success())
+        && !Command::new(UNMOUNT).arg("-f").arg(dir).status().is_ok_and(|s| s.success())
+    {
         eprintln!("haiku: couldn't unmount {}", dir.display());
         return;
     }
@@ -114,6 +118,17 @@ pub async fn keeper(d: Arc<Daemon>, store: PathBuf) {
             for (ns, dir) in recorded(&store2) {
                 if !names.contains(&ns) {
                     unmount(&store2, &ns, &dir);
+                }
+            }
+            // And any empty folder in ~/retifs that names no library and holds
+            // no volume (a mount point an older version or a restart left).
+            if let Ok(entries) = std::fs::read_dir(home().join("retifs")) {
+                for e in entries.flatten() {
+                    let name = e.file_name().to_string_lossy().into_owned();
+                    let dir = e.path();
+                    if !names.contains(&name) && dir.is_dir() && !is_mounted(&dir) {
+                        let _ = std::fs::remove_dir(&dir); // only if empty
+                    }
                 }
             }
             newly_failed

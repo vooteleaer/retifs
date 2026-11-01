@@ -689,6 +689,12 @@ impl Volume {
         Ok(hits)
     }
 
+    /// The tree as it is now: every path and its node (to compare with the
+    /// next, and tell Tracker what came, went and changed).
+    pub fn snapshot(&self) -> std::collections::BTreeMap<String, Node> {
+        self.tree.nodes.clone()
+    }
+
     /// The namespace's size: its files' sizes together. Reported as the
     /// volume's capacity (Tracker offers only volumes with one for Find).
     pub fn total_bytes(&mut self) -> u64 {

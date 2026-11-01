@@ -201,6 +201,7 @@ unsafe extern "C" fn mount(volume: *mut fs_volume, _device: *const c_char, _flag
             watching: AtomicBool::new(false),
             unmounted: AtomicBool::new(false),
         });
+        watch(vol.clone());
         unsafe {
             (*volume).private_volume = Arc::into_raw(vol) as *mut c_void;
             (*volume).ops = &raw mut VOLUME_OPS;
@@ -860,9 +861,9 @@ unsafe extern "C" fn free_query_cookie(_volume: *mut fs_volume, cookie: *mut c_v
     B_OK
 }
 
-/// Starts the volume's watcher once: a long poll on the namespace's changes
-/// on a thread of its own; after each change every live query is run again
-/// and told what came and went. Ends when the volume is unmounted.
+/// Starts the volume's watcher once (at mount): a long poll on the
+/// namespace's changes on a thread of its own, and after each change
+/// `on_change`. Ends when the volume is unmounted.
 fn watch(v: Arc<Vol>) {
     if v.watching.swap(true, Ordering::AcqRel) {
         return;
@@ -881,7 +882,7 @@ fn watch(v: Arc<Vol>) {
                     Ok(Response::Changed { count }) => {
                         if count != since {
                             since = count;
-                            update_live(&v);
+                            on_change(&v);
                         }
                     }
                     _ => break,
@@ -891,17 +892,46 @@ fn watch(v: Arc<Vol>) {
     });
 }
 
-fn update_live(v: &Vol) {
+/// Changes at once beyond which only what's near the top is told (a large
+/// library's first sync: a Tracker window shows the top folders).
+const MANY_CHANGES: usize = 2000;
+
+/// After a change to the namespace (here, or another member's arriving):
+/// the tree is read again, node monitors are told what came, went and
+/// changed (so a Tracker window fills as a library syncs), and live queries
+/// what they match now.
+fn on_change(v: &Vol) {
+    let mut entries: Vec<(u8, i64, i64, String)> = Vec::new();
     let mut notes = Vec::new();
     {
         let mut lives = v.live.lock().unwrap_or_else(|e| e.into_inner());
-        if lives.is_empty() {
+        let mut vol = lock(v);
+        let before = vol.snapshot();
+        if let Err(e) = vol.refresh(true) {
+            log(&format!("after a change: {e}"));
             return;
         }
-        let mut vol = lock(v);
-        if let Err(e) = vol.refresh(true) {
-            log(&format!("live queries: {e}"));
-            return;
+        let after = vol.snapshot();
+        // 0 came, 1 went, 2 changed.
+        let mut changes: Vec<(u8, String)> = Vec::new();
+        for (p, n) in &after {
+            match before.get(p) {
+                None => changes.push((0, p.clone())),
+                Some(o) if o != n => changes.push((2, p.clone())),
+                _ => {}
+            }
+        }
+        changes.extend(before.keys().filter(|p| !after.contains_key(*p)).map(|p| (1, p.clone())));
+        if changes.len() > MANY_CHANGES {
+            changes.retain(|(_, p)| p.matches('/').count() <= 2);
+        }
+        for (k, p) in changes {
+            if p == "/" {
+                continue;
+            }
+            let dir = vol.ino(retifs_tree::parent(&p));
+            let ino = vol.ino(&p);
+            entries.push((k, dir, ino, retifs_tree::name(&p).to_string()));
         }
         for l in lives.iter_mut() {
             let Ok(now) = vol.query(&l.expr) else { continue };
@@ -909,6 +939,16 @@ fn update_live(v: &Vol) {
             notes.extend(now.difference(&l.hits).map(|h| (true, l.port, l.token, h.clone())));
             notes.extend(l.hits.difference(&now).map(|h| (false, l.port, l.token, h.clone())));
             l.hits = now;
+        }
+    }
+    for (k, dir, ino, name) in entries {
+        let Ok(name) = CString::new(name) else { continue };
+        unsafe {
+            match k {
+                0 => notify_entry_created(v.id, dir, name.as_ptr(), ino),
+                1 => notify_entry_removed(v.id, dir, name.as_ptr(), ino),
+                _ => notify_stat_changed(v.id, dir, ino, B_STAT_SIZE | B_STAT_MODIFICATION_TIME),
+            };
         }
     }
     for (came, port, token, h) in notes {
