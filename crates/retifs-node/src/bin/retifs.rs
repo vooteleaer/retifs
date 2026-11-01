@@ -31,7 +31,7 @@
 //!     retifs [--store DIR] share create NAME --from NS [TERM]... [--id ID]... [--omit KEY]... [--qr] | share list NS | share rm NS ID
 //!     retifs [--store DIR] ns link NS [--name LABEL] [--q TERMS] [--qr] | open LINK [--as NAME]
 //!     retifs [--store DIR] query NS[,NS]|'*' TERM... --save NAME | saved [list] | saved run NAME [--watch] | saved rm NAME
-//!     retifs [--store DIR] mount [NS [DIR] [--foreground] [--via NODE]] | unmount NS [--forget]
+//!     retifs [--store DIR] mount [NS [DIR] [--foreground] [--via NODE] | --all] | unmount NS [--forget]
 //!     retifs [--store DIR] me | me link [--name LABEL] [--qr] | contact add NAME NODE|LINK | contact list | contact rm NAME
 //!     retifs [--store DIR] invite create NS [--grant] [--keys K1,K2] [--until DATE] [--expires 1d] [--q TERMS] [--name LABEL] [--qr] | invite list NS | invite cancel NS ID
 //!
@@ -80,7 +80,7 @@ fn usage() -> ! {
          retifs [--store DIR] share create NAME --from NS [TERM]... [--id ID]... [--omit KEY]... [--qr] | share list NS | share rm NS ID\n\
          retifs [--store DIR] ns link NS [--name LABEL] [--q TERMS] [--qr] | open LINK [--as NAME] | ns join NAME LINK\n\
          retifs [--store DIR] query NS[,NS]|'*' TERM... --save NAME | saved [list] | saved run NAME [--watch] | saved rm NAME\n\
-         retifs [--store DIR] mount [NS [DIR] [--foreground] [--via NODE]] | unmount NS [--forget]\n\
+         retifs [--store DIR] mount [NS [DIR] [--foreground] [--via NODE] | --all] | unmount NS [--forget]\n\
          retifs [--store DIR] me | me link [--name LABEL] [--qr] | contact add NAME NODE|LINK | contact list | contact rm NAME\n\
          retifs [--store DIR] invite create NS [--grant] [--keys K1,K2] [--until DATE] [--expires 1d] [--q TERMS] [--name LABEL] [--qr] | invite list NS | invite cancel NS ID"
     );

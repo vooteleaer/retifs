@@ -116,6 +116,12 @@ fn log_tail(path: &Path, lines: usize) -> String {
 /// `retifs mount`: with no namespace, lists the mounts. `via`: the
 /// namespace is on another of the user's nodes (ADR-0019).
 pub fn mount(store: &Path, args: &[String], via: Option<&str>) {
+    #[cfg(target_os = "haiku")]
+    {
+        let _ = via;
+        return haiku::mount(store, args);
+    }
+    #[allow(unreachable_code)]
     let foreground = args.iter().any(|a| a == "--foreground");
     let rest: Vec<&String> = args.iter().filter(|a| *a != "--foreground").collect();
     let Some(ns) = rest.first() else {
@@ -193,6 +199,9 @@ pub fn mount(store: &Path, args: &[String], via: Option<&str>) {
 
 /// `retifs unmount NS [--forget]`.
 pub fn unmount(store: &Path, args: &[String]) {
+    #[cfg(target_os = "haiku")]
+    return haiku::unmount(store, args);
+    #[allow(unreachable_code)]
     let forget = args.iter().any(|a| a == "--forget");
     let Some(ns) = args.iter().find(|a| *a != "--forget") else { super::usage() };
     let Some(m) = read(store, ns) else { super::fail(format!("{ns} isn't mounted (retifs mount lists the mounts)")) };
@@ -230,5 +239,119 @@ fn stop(m: &Mounted) {
     }
     if alive(m.pid) {
         unsafe { libc::kill(m.pid as i32, libc::SIGTERM) };
+    }
+}
+
+/// On Haiku a namespace is a volume of the `retifs` userlandfs module
+/// (`retifs-haikufs`): mounted by the kernel, no frontend process to keep.
+/// `retifs mount --all` mounts every namespace this node has (at login: it
+/// waits for retifsd first); the record under the store says where.
+#[cfg(target_os = "haiku")]
+mod haiku {
+    use std::os::unix::fs::MetadataExt;
+    use std::path::{Path, PathBuf};
+    use std::process::Command;
+    use std::time::Duration;
+
+    use libretifs::{Client, Request, Response};
+
+    use super::{default_dir, mounts_dir};
+
+    /// Whether a volume is mounted at `dir`: it is on another device than
+    /// the folder it's in.
+    fn is_mounted(dir: &Path) -> bool {
+        let (Ok(d), Some(Ok(p))) = (std::fs::metadata(dir), dir.parent().map(std::fs::metadata)) else { return false };
+        d.dev() != p.dev()
+    }
+
+    /// Every namespace this node has, waiting up to a minute for retifsd.
+    fn namespaces(store: &Path) -> Vec<String> {
+        let store = store.to_path_buf();
+        // A runtime of its own: the CLI's is busy running this command.
+        std::thread::spawn(move || {
+            let rt = tokio::runtime::Builder::new_current_thread().enable_all().build().ok()?;
+            rt.block_on(async {
+                for _ in 0..60 {
+                    if let Ok(mut c) = Client::connect(&store).await
+                        && let Ok(Response::Names { names }) = c.call(Request::Namespaces).await
+                    {
+                        return Some(names);
+                    }
+                    tokio::time::sleep(Duration::from_secs(1)).await;
+                }
+                None
+            })
+        })
+        .join()
+        .ok()
+        .flatten()
+        .unwrap_or_default()
+    }
+
+    fn recorded(store: &Path) -> Vec<(String, PathBuf)> {
+        let Ok(entries) = std::fs::read_dir(mounts_dir(store)) else { return Vec::new() };
+        let mut out: Vec<(String, PathBuf)> = entries
+            .flatten()
+            .filter(|e| e.path().extension().is_none())
+            .filter_map(|e| {
+                let text = std::fs::read_to_string(e.path()).ok()?;
+                let dir = text.lines().nth(1)?;
+                Some((e.file_name().to_string_lossy().into_owned(), PathBuf::from(dir)))
+            })
+            .collect();
+        out.sort();
+        out
+    }
+
+    pub fn mount(store: &Path, args: &[String]) {
+        let all = args.iter().any(|a| a == "--all");
+        let plain: Vec<&String> = args.iter().filter(|a| !a.starts_with("--")).collect();
+        let names: Vec<String> = if all { namespaces(store) } else { plain.first().map(|n| vec![n.to_string()]).unwrap_or_default() };
+        if names.is_empty() {
+            let mounts = recorded(store);
+            for (ns, dir) in &mounts {
+                let state = if is_mounted(dir) { "" } else { "  (not mounted: retifs unmount to clean up)" };
+                println!("{ns:<16} {}{state}", dir.display());
+            }
+            println!("{} mount(s)", mounts.len());
+            return;
+        }
+        let mut failed = false;
+        for ns in names {
+            let dir = if all { default_dir(&ns) } else { plain.get(1).map(PathBuf::from).unwrap_or_else(|| default_dir(&ns)) };
+            if is_mounted(&dir) {
+                println!("{ns} is mounted at {}", dir.display());
+                continue;
+            }
+            if let Err(e) = std::fs::create_dir_all(&dir) {
+                eprintln!("retifs: {}: {e}", dir.display());
+                failed = true;
+                continue;
+            }
+            // The module takes its parameters split at spaces.
+            let params = format!("retifs ns={ns} store={}", store.display());
+            let ok = Command::new("mount").args(["-t", "userlandfs", "-p", &params]).arg(&dir).status().is_ok_and(|s| s.success());
+            if !ok {
+                eprintln!("retifs: mounting {ns} at {} failed (/boot/system/var/log/retifs-haikufs.log says why)", dir.display());
+                failed = true;
+                continue;
+            }
+            let _ = std::fs::create_dir_all(mounts_dir(store));
+            let _ = std::fs::write(mounts_dir(store).join(&ns), format!("0\n{}\n\n", dir.display()));
+            println!("{ns} mounted at {}", dir.display());
+        }
+        if failed && !all {
+            std::process::exit(1);
+        }
+    }
+
+    pub fn unmount(store: &Path, args: &[String]) {
+        let Some(ns) = args.iter().find(|a| !a.starts_with("--")) else { super::super::usage() };
+        let dir = recorded(store).into_iter().find(|(n, _)| n == ns).map(|(_, d)| d).unwrap_or_else(|| default_dir(ns));
+        if is_mounted(&dir) && !Command::new("unmount").arg(&dir).status().is_ok_and(|s| s.success()) {
+            super::super::fail(format!("couldn't unmount {}", dir.display()));
+        }
+        let _ = std::fs::remove_file(mounts_dir(store).join(ns));
+        println!("{ns} unmounted from {}", dir.display());
     }
 }
