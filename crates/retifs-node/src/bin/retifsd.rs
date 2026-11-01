@@ -529,6 +529,9 @@ fn size(s: &str) -> u64 {
 
 #[path = "retifsd/settings.rs"]
 mod settings;
+#[cfg(target_os = "haiku")]
+#[path = "retifsd/haiku_mounts.rs"]
+mod haiku_mounts;
 
 fn args() -> Args {
     let mut a = Args {
@@ -1535,6 +1538,8 @@ async fn serve(store: Arc<SlabStore>, identity: node::IdentitySecret, endpoint: 
     tokio::spawn(ns_sync(daemon.clone()));
     tokio::spawn(share_keeper(daemon.clone()));
     tokio::spawn(leaver(daemon.clone()));
+    #[cfg(target_os = "haiku")]
+    tokio::spawn(haiku_mounts::keeper(daemon.clone(), args.store.clone()));
     watchdog(daemon.clone());
     if daemon.keyring.is_some() {
         let keeper = daemon.clone();
