@@ -128,7 +128,19 @@ impl Volume {
     }
 
     fn call(&mut self, req: Request) -> Result<Response, String> {
-        match self.rt.block_on(self.client.call(req)) {
+        let answer = match self.rt.block_on(self.client.call(req.clone())) {
+            Ok(r) => Ok(r),
+            // retifsd restarted (an update, saved settings): the connection
+            // is gone. Connect again and ask once more.
+            Err(_) => match self.rt.block_on(Client::connect(&self.mount.store)) {
+                Ok(c) => {
+                    self.client = c;
+                    self.rt.block_on(self.client.call(req))
+                }
+                Err(e) => Err(e),
+            },
+        };
+        match answer {
             Ok(Response::Error { message }) => Err(message),
             Ok(r) => Ok(r),
             Err(e) => Err(format!("retifsd: {e}")),
