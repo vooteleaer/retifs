@@ -495,8 +495,12 @@ fn hostname() -> String {
         .or_else(|_| std::env::var("HOSTNAME"))
         .ok()
         .or_else(|| std::fs::read_to_string("/etc/hostname").ok())
-        // Haiku has neither: its `hostname` says.
-        .or_else(|| std::process::Command::new("hostname").output().ok().map(|o| String::from_utf8_lossy(&o.stdout).into_owned()))
+        // Haiku has neither: its `hostname` says (by its full path: retifsd
+        // runs as a launch_daemon job, without a PATH).
+        .or_else(|| {
+            let cmd = ["/boot/system/bin/hostname", "hostname"].into_iter().find(|c| !c.starts_with('/') || std::path::Path::new(c).exists())?;
+            std::process::Command::new(cmd).output().ok().map(|o| String::from_utf8_lossy(&o.stdout).into_owned())
+        })
         .map(|h| h.trim().to_lowercase())
         .filter(|h| !h.is_empty())
         .unwrap_or_else(|| "this-device".into())
@@ -2470,6 +2474,13 @@ async fn handle(d: &Daemon, req: Request) -> Result<Response, String> {
                 return Err(format!("{ns} already exists here"));
             }
             let addr: ChannelAddr = address.parse().map_err(|e: retifs_core::channel::ChannelError| e.to_string())?;
+            // One library, one name here: joined again (heard twice, a link
+            // opened twice) it would be a second copy of the same namespace.
+            if let Some(other) =
+                visible_namespaces(d)?.into_iter().find(|n| current_addr(d, n).is_ok_and(|a| a.to_string() == addr.to_string()))
+            {
+                return Err(format!("this library is here already, as {other}"));
+            }
             // This node's writer identity in the namespace (X25519 ‖ Ed25519): others
             // wrap rotated read keys to it.
             let mut identity = [0u8; 64];

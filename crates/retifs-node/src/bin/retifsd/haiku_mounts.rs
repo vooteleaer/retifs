@@ -22,6 +22,10 @@ use super::{Daemon, visible_namespaces};
 const EVERY: Duration = Duration::from_secs(10);
 /// A mount that failed is tried again after this.
 const RETRY: Duration = Duration::from_secs(300);
+/// By their full paths: a launch_daemon job (retifsd at login) has no PATH.
+const PS: &str = "/boot/system/bin/ps";
+const MOUNT: &str = "/boot/system/bin/mount";
+const UNMOUNT: &str = "/boot/system/bin/unmount";
 
 fn home() -> PathBuf {
     std::env::var_os("HOME").map(PathBuf::from).unwrap_or_else(|| "/boot/home".into())
@@ -40,7 +44,7 @@ fn is_mounted(dir: &Path) -> bool {
 
 /// Whether the desktop is up: Tracker runs.
 fn desktop_up() -> bool {
-    Command::new("ps").output().is_ok_and(|o| String::from_utf8_lossy(&o.stdout).lines().any(|l| l.trim_start().starts_with("/boot/system/Tracker")))
+    Command::new(PS).output().is_ok_and(|o| String::from_utf8_lossy(&o.stdout).lines().any(|l| l.trim_start().starts_with("/boot/system/Tracker")))
 }
 
 fn mount(store: &Path, ns: &str) -> Result<(), String> {
@@ -48,7 +52,7 @@ fn mount(store: &Path, ns: &str) -> Result<(), String> {
     std::fs::create_dir_all(&dir).map_err(|e| format!("{}: {e}", dir.display()))?;
     // The module takes its parameters split at spaces.
     let params = format!("retifs ns={ns} store={}", store.display());
-    let o = Command::new("mount").args(["-t", "userlandfs", "-p", &params]).arg(&dir).output().map_err(|e| e.to_string())?;
+    let o = Command::new(MOUNT).args(["-t", "userlandfs", "-p", &params]).arg(&dir).output().map_err(|e| e.to_string())?;
     if !o.status.success() {
         return Err(String::from_utf8_lossy(&o.stderr).trim().to_string());
     }
@@ -59,7 +63,7 @@ fn mount(store: &Path, ns: &str) -> Result<(), String> {
 }
 
 fn unmount(store: &Path, ns: &str, dir: &Path) {
-    if is_mounted(dir) && !Command::new("unmount").arg(dir).status().is_ok_and(|s| s.success()) {
+    if is_mounted(dir) && !Command::new(UNMOUNT).arg(dir).status().is_ok_and(|s| s.success()) {
         eprintln!("haiku: couldn't unmount {}", dir.display());
         return;
     }
