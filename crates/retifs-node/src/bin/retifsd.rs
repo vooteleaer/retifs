@@ -495,6 +495,8 @@ fn hostname() -> String {
         .or_else(|_| std::env::var("HOSTNAME"))
         .ok()
         .or_else(|| std::fs::read_to_string("/etc/hostname").ok())
+        // Haiku has neither: its `hostname` says.
+        .or_else(|| std::process::Command::new("hostname").output().ok().map(|o| String::from_utf8_lossy(&o.stdout).into_owned()))
         .map(|h| h.trim().to_lowercase())
         .filter(|h| !h.is_empty())
         .unwrap_or_else(|| "this-device".into())
