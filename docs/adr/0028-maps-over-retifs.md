@@ -43,6 +43,7 @@ OpenStreetMap's data is open (ODbL), but its tile servers' usage policy forbids 
   - The map app searches as the user types, every joined library at once. No internet service is asked, not even as a fallback.
 - **Following lazily:**
   - A device joins a map library lazily, fetching what it reads rather than the whole world.
+  - Its index, though, is held whole (2026-11-02): the tiles' records are small (12 MB for Estonia's 95,000 tiles), so a device joins a map library with every record and keeps its content by rules (`ns keep rules`): a tile is found on the device at once, and one outside the map is known missing. Held lazily, every tile was a search on another node (fractions of a second over a good link, up to a minute over a slow one). The tiles themselves, the bulk, are still fetched as they're looked at. A gazetteer (hundreds of thousands of addresses) stays lazy.
   - It pins the areas the user marks (home country, a trip) for offline use.
   - Tiles it has read are cached like any other block, and served on to others.
 - **A map from the start.** The map app comes with the address of a default public map library (the retifs project's, built from OpenStreetMap) and follows it lazily on first start, so there is a map without any setup. It is an ordinary followed library: the user can remove it, or add others next to it.
