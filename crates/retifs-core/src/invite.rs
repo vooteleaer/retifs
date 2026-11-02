@@ -1,4 +1,6 @@
-//! Invitations (ADR-0020): write access to a namespace in one step.
+//! Invitations (ADR-0020): membership of a namespace in one step: to read
+//! (`rights` empty: a member the creator knows, who gets the read key when it
+//! rotates), to write, or to write and invite.
 //!
 //! An invitation is canonical msgpack, base32 in a `retifs:invite/…` link:
 //!
@@ -33,6 +35,8 @@ pub struct Invitation {
     /// The creator's node (its `retifs.node` address), to redeem with.
     pub node: [u8; 16],
     pub secret: [u8; 32],
+    /// `write`: the member's writes count. False: a reader (`rights` empty).
+    pub write: bool,
     /// `grant` too, besides `write`.
     pub grant: bool,
     /// Limits of the grant (ADR-0017): attribute keys, and an end.
@@ -119,7 +123,11 @@ impl Invitation {
             write_str(&mut out, q);
         }
         write_str(&mut out, "rights");
-        let rights: &[&str] = if self.grant { &["grant", "write"] } else { &["write"] };
+        let rights: &[&str] = match (self.write, self.grant) {
+            (true, true) => &["grant", "write"],
+            (true, false) => &["write"],
+            _ => &[],
+        };
         write_array_len(&mut out, rights.len());
         for r in rights {
             write_str(&mut out, r);
@@ -136,7 +144,7 @@ impl Invitation {
         let mut r = Reader(bytes);
         let n = r.map_len()?;
         let (mut expires, mut node, mut ns, mut secret, mut q) = (None, None, None, None, None);
-        let (mut keys, mut until, mut grant) = (Vec::new(), None, false);
+        let (mut keys, mut until, mut grant, mut write) = (Vec::new(), None, false, false);
         let uint = |v: Value| match v {
             Value::Int(i) if i >= 0 => Ok(i as u64),
             _ => Err(bad("expected a time")),
@@ -167,7 +175,7 @@ impl Invitation {
                     for _ in 0..r.array_len()? {
                         match r.str()?.as_str() {
                             "grant" => grant = true,
-                            "write" => {}
+                            "write" => write = true,
                             _ => return Err(bad("unknown right")),
                         }
                     }
@@ -183,6 +191,7 @@ impl Invitation {
             ns: ns.ok_or(bad("no ns"))?,
             node: node.ok_or(bad("no node"))?,
             secret: secret.ok_or(bad("no secret"))?,
+            write,
             grant,
             keys,
             until,
@@ -248,6 +257,7 @@ mod tests {
             ns: ChannelAddr { writer: [1; 32], read_key: [2; 32] },
             node: [3; 16],
             secret: [4; 32],
+            write: true,
             grant: false,
             keys: vec!["title".into(), "@content".into()],
             until: Some(1_800_000_000_000),
@@ -258,7 +268,11 @@ mod tests {
 
     #[test]
     fn round_trips_and_refuses_non_canonical() {
-        for i in [inv(), Invitation { keys: vec![], until: None, q: None, grant: true, ..inv() }] {
+        for i in [
+            inv(),
+            Invitation { keys: vec![], until: None, q: None, grant: true, ..inv() },
+            Invitation { keys: vec![], until: None, q: None, write: false, ..inv() },
+        ] {
             assert_eq!(Invitation::from_text(&i.to_text()).unwrap(), i);
             assert_eq!(Invitation::from_text(&i.to_text().to_uppercase()).unwrap(), i);
         }

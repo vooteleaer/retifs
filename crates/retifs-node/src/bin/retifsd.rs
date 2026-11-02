@@ -1968,7 +1968,13 @@ async fn redeem_here(d: &Daemon, link_id: &[u8], body: &[u8]) -> Result<String, 
     }
     // Spent before the grant, so two redemptions at once can't both win.
     d.store.put_invite(&MadeInvite { spent: true, ..made.clone() }).map_err(|e| e.to_string())?;
-    let rights = if inv.grant { vec![Right::Write, Right::Grant] } else { vec![Right::Write] };
+    // A reader is a member without rights: known, and given the read key
+    // when it rotates.
+    let rights = match (inv.write, inv.grant) {
+        (true, true) => vec![Right::Write, Right::Grant],
+        (true, false) => vec![Right::Write],
+        _ => vec![],
+    };
     let limits = retifs_core::ops::Limits { keys: (!inv.keys.is_empty()).then(|| inv.keys.iter().cloned().collect()), until: inv.until };
     let op = if limits.is_none() { Op::Grant(writer, rights) } else { Op::GrantLimited(writer, rights, limits) };
     if let Err(e) = write_ops(d, &made.ns, vec![op]).await {
@@ -2575,8 +2581,9 @@ async fn handle(d: &Daemon, req: Request) -> Result<Response, String> {
             getrandom::fill(&mut new_key).expect("OS entropy");
             let mut entries = Vec::new();
             let mut unreachable = 0;
-            for (w, rights) in &merged.writers {
-                if *w == revoked || !rights.contains(&Right::Write) {
+            // Every member that stays, readers too (granted no rights).
+            for w in merged.writers.keys() {
+                if *w == revoked {
                     continue;
                 }
                 match merged.identities.get(w) {
@@ -2684,7 +2691,7 @@ async fn handle(d: &Daemon, req: Request) -> Result<Response, String> {
             Ok(Response::Done)
         }
 
-        Request::InviteCreate { ns, grant, keys, until, expires_ms, q, label } => {
+        Request::InviteCreate { ns, read, grant, keys, until, expires_ms, q, label } => {
             writable(&ns)?;
             if d.store.ns_info(&ns).map_err(|e| e.to_string())?.is_none() {
                 return Err(format!("no namespace {ns}"));
@@ -2700,7 +2707,8 @@ async fn handle(d: &Daemon, req: Request) -> Result<Response, String> {
                 ns: current_addr(d, &ns)?,
                 node: parse_peers(std::slice::from_ref(&d.node_hex))?[0],
                 secret,
-                grant,
+                write: !read,
+                grant: grant && !read,
                 keys,
                 until,
                 expires: now_ms() + expires_ms.unwrap_or(24 * 3600 * 1000),
@@ -2721,6 +2729,7 @@ async fn handle(d: &Daemon, req: Request) -> Result<Response, String> {
                 .filter(|m| m.ns == ns)
                 .map(|m| libretifs::InviteInfo {
                     id: hex(&m.invitation.id()),
+                    write: m.invitation.write,
                     grant: m.invitation.grant,
                     keys: m.invitation.keys.clone(),
                     until: m.invitation.until,

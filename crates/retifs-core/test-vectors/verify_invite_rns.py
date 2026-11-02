@@ -23,7 +23,9 @@ def encode(f):
     inv = {"expires": f["expires"], "limits": limits, "node": bytes.fromhex(f["node"]), "ns": bytes.fromhex(f["ns"])}
     if f["q"] is not None:
         inv["q"] = f["q"]
-    inv["rights"] = ["grant", "write"] if f["grant"] else ["write"]
+    # A reader's rights are empty (cases written before readers say only "grant").
+    write = f.get("write", True)
+    inv["rights"] = (["grant", "write"] if f["grant"] else ["write"]) if write else []
     inv["secret"] = bytes.fromhex(f["secret"])
     return umsgpack.packb(inv)
 

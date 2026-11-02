@@ -33,7 +33,7 @@
 //!     retifs [--store DIR] query NS[,NS]|'*' TERM... --save NAME | saved [list] | saved run NAME [--watch] | saved rm NAME
 //!     retifs [--store DIR] mount [NS [DIR] [--foreground] [--via NODE] | --all] | unmount NS [--forget]
 //!     retifs [--store DIR] me | me link [--name LABEL] [--qr] | contact add NAME NODE|LINK | contact list | contact rm NAME
-//!     retifs [--store DIR] invite create NS [--grant] [--keys K1,K2] [--until DATE] [--expires 1d] [--q TERMS] [--name LABEL] [--qr] | invite list NS | invite cancel NS ID
+//!     retifs [--store DIR] invite create NS [--read | --grant] [--keys K1,K2] [--until DATE] [--expires 1d] [--q TERMS] [--name LABEL] [--qr] | invite list NS | invite cancel NS ID
 //!
 //! Several writers per namespace (ADR-0017): a member joins with the address
 //! and shows its writer key; the creator grants it; members sync each other.
@@ -82,7 +82,7 @@ fn usage() -> ! {
          retifs [--store DIR] query NS[,NS]|'*' TERM... --save NAME | saved [list] | saved run NAME [--watch] | saved rm NAME\n\
          retifs [--store DIR] mount [NS [DIR] [--foreground] [--via NODE] | --all] | unmount NS [--forget]\n\
          retifs [--store DIR] me | me link [--name LABEL] [--qr] | contact add NAME NODE|LINK | contact list | contact rm NAME\n\
-         retifs [--store DIR] invite create NS [--grant] [--keys K1,K2] [--until DATE] [--expires 1d] [--q TERMS] [--name LABEL] [--qr] | invite list NS | invite cancel NS ID"
+         retifs [--store DIR] invite create NS [--read | --grant] [--keys K1,K2] [--until DATE] [--expires 1d] [--q TERMS] [--name LABEL] [--qr] | invite list NS | invite cancel NS ID"
     );
     std::process::exit(2);
 }
@@ -748,6 +748,7 @@ async fn main() {
             let req = match sub.as_str() {
                 "create" => libretifs::Request::InviteCreate {
                     ns: ns.clone(),
+                    read: rest.iter().any(|a| a == "--read"),
                     grant: rest.iter().any(|a| a == "--grant"),
                     keys: opt("--keys").map(|k| k.split(',').map(|k| k.trim().to_string()).filter(|k| !k.is_empty()).collect()).unwrap_or_default(),
                     until: opt("--until").map(|u| parse_time(&u).unwrap_or_else(|e| fail(e))),
@@ -765,13 +766,13 @@ async fn main() {
                     if rest.iter().any(|a| a == "--qr") {
                         print_qr(&link);
                     }
-                    eprintln!("(the first to open it may write to {ns}; anyone who sees it can read {ns}: pass it in person or end to end)");
+                    eprintln!("(the first to open it becomes a member of {ns}; anyone who sees it can read {ns}: pass it in person or end to end)");
                 }
                 libretifs::Response::Invites { invites } => {
                     let now = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map(|d| d.as_millis() as u64).unwrap_or(0);
                     for i in &invites {
                         let state = if i.spent { "used".to_string() } else if i.expires < now { "expired".to_string() } else { format!("pending, {} min left", (i.expires - now) / 60_000) };
-                        let mut rights = if i.grant { "write+grant".to_string() } else { "write".to_string() };
+                        let mut rights = if !i.write { "read".to_string() } else if i.grant { "write+grant".to_string() } else { "write".to_string() };
                         if !i.keys.is_empty() {
                             rights.push_str(&format!(" keys {}", i.keys.join(",")));
                         }

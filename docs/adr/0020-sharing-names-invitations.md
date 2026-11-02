@@ -56,7 +56,7 @@ invitation = { "ns": namespace address, "node": creator's node, "secret": 32 ran
 
 - **One use:** the first redemption spends it. A copy of the QR code redeemed later gets nothing beyond what the address already gives (reading).
 - **Bound to the link:** the proof can't be replayed on another link, and it names the writer key, so a relay can't swap in its own.
-- **Read-only shares** need no invitation: `retifs:ns/…` is enough.
+- **Read-only shares** need no invitation: `retifs:ns/…` is enough. But a link's readers are unknown to the owner and can't be removed one by one, so **an invitation can also be to read** (decided 2026-11-03): `rights` empty. Redeemed, it grants the member no rights ([ADR-0017](0017-multi-writer-namespaces.md): a reader is a member), so the owner sees it among the members, can remove it, and a rotation reaches it. A plain link stays for public libraries.
 
 ## Implementation status (2026-10-21)
 - **Links:** `libretifs::link` parses and writes the envelope (percent-encoded; unknown kinds and parameters kept). For `ns`, `<what>` is the address without its `retifs-ch:` prefix (`1:<writer>:<read key>`), and **`from`** (repeatable) names nodes to fetch from, since a joining node needs a peer before it has any.
@@ -67,8 +67,8 @@ invitation = { "ns": namespace address, "node": creator's node, "secret": 32 ran
   - `id = SHA-256("retifs/v1/invite" ‖ secret)`. The redemption over a Link to `/retifs/invite` is `id ‖ writer key ‖ node ‖ HMAC-SHA256(secret, link id ‖ writer key ‖ node)`: the member's node is in it too (and in the proof), so the creator knows whom to sync with. The answer is a status byte and a message.
   - The creator spends the invitation before writing the grant (two redemptions at once can't both win) and puts it back if the write fails.
   - The recipient joins first (reading at once), then redeems; if the creator's node can't be reached, it keeps the invitation and tries every 30 s until it expires. After a redemption it syncs once, so the answer already says it may write.
-  - Vectors: `test-vectors/invite-v1.json`, verified with Python RNS's umsgpack and HMAC (`verify_invite_rns.py`).
-- CLI: `retifs invite create NS [--grant] [--keys K1,K2] [--until DATE] [--expires 1d] [--q TERMS] [--name LABEL]` prints the link; `invite list NS`, `invite cancel NS ID`; `retifs open LINK` accepts it.
+  - Vectors: `test-vectors/invite-v1.json`, verified with Python RNS's umsgpack and HMAC (`verify_invite_rns.py`). Since 2026-11-03 a third case is a reader's invitation (`rights` empty); 3/3 match.
+- CLI: `retifs invite create NS [--read | --grant] [--keys K1,K2] [--until DATE] [--expires 1d] [--q TERMS] [--name LABEL]` prints the link; `invite list NS`, `invite cancel NS ID`; `retifs open LINK` accepts it.
 - Live (four nodes, 2026-10-21, 14 checks): the first opener writes at once and its writes reach the creator; a second use, an expired and a withdrawn invitation are refused and grant nothing; a key-limited invitation grants limited write; with the creator stopped, the recipient joins, reads, and gets its grant once the creator is back.
 - **QR (2026-10-22):** `--qr` on `ns link`, `invite create` and `share create` draws the link as a QR code in the terminal (error correction L, light modules drawn, for dark terminals). An invitation is a version 13 code.
 - **Fingerprint words (decided 2026-10-22: BIP-39 English):** consecutive 11-bit groups of SHA-256(key), most significant bit first, as words from the BIP-39 English list (the file, SHA-256 `2f5eed53…dbda`, is in `retifs-core`); six words (66 bits) by default. Vectors: `test-vectors/words-v1.json` (`verify_words.py`).

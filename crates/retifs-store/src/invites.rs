@@ -114,6 +114,7 @@ mod tests {
             ns: ChannelAddr { writer: [1; 32], read_key: [2; 32] },
             node: [3; 16],
             secret: [4; 32],
+            write: true,
             grant: false,
             keys: vec![],
             until: None,

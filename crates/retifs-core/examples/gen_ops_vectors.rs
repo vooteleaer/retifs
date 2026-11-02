@@ -68,9 +68,9 @@ fn op(o: &Op) -> J {
 
 fn main() {
     // Real identities (X25519 ‖ Ed25519), so identity operations and wrapped keys check out.
-    let (alice_id, bob_id, eve_id) = ([0xa1u8; 64], [0xb0u8; 64], [0xe5u8; 64]);
+    let (alice_id, bob_id, eve_id, carol_id) = ([0xa1u8; 64], [0xb0u8; 64], [0xe5u8; 64], [0xc0u8; 64]);
     let w = |id: &[u8; 64]| -> [u8; 32] { keywrap::public(id)[32..].try_into().unwrap() };
-    let (alice, bob, eve) = (w(&alice_id), w(&bob_id), w(&eve_id));
+    let (alice, bob, eve, carol) = (w(&alice_id), w(&bob_id), w(&eve_id), w(&carol_id));
     let new_key = [0x5au8; 32];
     let wrapped_for_alice = keywrap::wrap(&keywrap::public(&alice_id), &new_key, [0x31; 32], [0x32; 16]);
     let (page, photo) = ([0x01u8; 16], [0x02u8; 16]);
@@ -89,6 +89,8 @@ fn main() {
                     Op::Grant(bob, vec![Right::Write]),
                     // Eve: only the rating, until 3500.
                     Op::GrantLimited(eve, vec![Right::Write], Limits { keys: Some(["rating".to_string()].into()), until: Some(3500) }),
+                    // Carol: a reader (a member granted no rights).
+                    Op::Grant(carol, vec![]),
                     Op::Set(page, "path".into(), s("/index.mu")),
                     Op::Blocks(page, vec![block]),
                     Op::Set(page, "title".into(), s("Home")),
@@ -132,6 +134,11 @@ fn main() {
             // After her grant expired.
             WriterCommit { seq: 2, time_ms: 3600, ops: vec![Op::Set(photo, "rating".into(), Value::Int(1))] },
         ],
+    );
+    chains.insert(
+        carol,
+        // A reader's write: she's a member, but it doesn't count.
+        vec![WriterCommit { seq: 1, time_ms: 2600, ops: vec![Op::Identity(keywrap::public(&carol_id)), Op::Set(photo, "caption".into(), s("by a reader"))] }],
     );
     let merged = merge(&alice, &chains, 10_000);
     let snapshot = Snapshot::new(merged.records.clone()).unwrap();

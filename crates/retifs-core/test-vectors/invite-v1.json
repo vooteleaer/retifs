@@ -1,5 +1,5 @@
 {
-  "about": "ADR-0020: an invitation is canonical msgpack {expires, limits {keys?, until?}, node, ns (writer || read key), q?, rights, secret}, base32 (RFC 4648, lowercase, no padding) in retifs:invite/ links; id = SHA-256(\"retifs/v1/invite\" || secret); a redemption is id || writer || node || HMAC-SHA256(secret, link id || writer || node)",
+  "about": "ADR-0020: an invitation is canonical msgpack {expires, limits {keys?, until?}, node, ns (writer || read key), q?, rights ([] read, [write], [grant, write]), secret}, base32 (RFC 4648, lowercase, no padding) in retifs:invite/ links; id = SHA-256(\"retifs/v1/invite\" || secret); a redemption is id || writer || node || HMAC-SHA256(secret, link id || writer || node)",
   "cases": [
     {
       "encoded": "86a765787069726573cf000001a15f494600a66c696d69747380a46e6f6465c4109ad7e8497cfef414d3c3ee471f727654a26e73c440c86b8e82d64ff7ec813d314d40d2660291ac95316cebb78b9acd4454221818c3ac1133688a70ade6727df77bdb512a06e5501d3d90114894818bc18845cf4235a672696768747391a57772697465a6736563726574c4204cb92a0e1786543d1ced7cf7a376bd787a6dfe42f1ed6218b3c1d1d38e25fa31",
@@ -11,7 +11,8 @@
         "ns": "c86b8e82d64ff7ec813d314d40d2660291ac95316cebb78b9acd4454221818c3ac1133688a70ade6727df77bdb512a06e5501d3d90114894818bc18845cf4235",
         "q": null,
         "secret": "4cb92a0e1786543d1ced7cf7a376bd787a6dfe42f1ed6218b3c1d1d38e25fa31",
-        "until": null
+        "until": null,
+        "write": true
       },
       "id": "2810655096d91b010e15ca95735d1c20d5321ab9690ad0ed96eb08bfb4cb8a0d",
       "redeem": {
@@ -35,7 +36,8 @@
         "ns": "371c9d645a546b483e66515d7a7776af376a84251f4602b38b2134c4dc55bfedc012af6024dab226e45bb5be783c1453f1e93d8ab3cd6492e141ca1ea3459e9d",
         "q": "type=event, calendar=family",
         "secret": "dfa8676eed207d46b3355a87807c367b73dc2529c1da9fa4079678884e6d009e",
-        "until": 1800000000000
+        "until": 1800000000000,
+        "write": true
       },
       "id": "d2077c813e757344c0bd2cf8ea0c62d586e4886186f86ec81cf7fc7007e1fe1c",
       "redeem": {
@@ -45,6 +47,28 @@
         "writer": "59889a15a11b26572456c2f36d81480b314b3f5e8b353de2d47ba5ee64f26e08"
       },
       "text": "q6twk6dqnfzgk46paaaadilen6rabjtmnfwws5dtqksgwzlzoojkk5djorwglkcamnxw45dfnz2kk5looruwztyaaaa2ggc4kaaki3tpmrs4iefck4ijf2wvzvwksu77usmbwunjujxhhrcag4oj2zc2krvuqptgkfoxu53wv43wvbbfd5dafm4lee2mjxcvx7w4aevpmasnvmrg4rn3lptyhqkfh4pjhwflhtleslqudsq6uncz5hnbog5xi6lqmu6wk5tfnz2cyiddmfwgk3temfzd2ztbnvuwy6ngojuwo2duoojkkz3smfxhjjlxojuxizngonswg4tfotccbx5im5xo2id5i2ztkwuhqb6dm63t3qsstqo2t6sapftyrbhg2ae6"
+    },
+    {
+      "encoded": "86a765787069726573cf000001a16995fe00a66c696d69747380a46e6f6465c4108b276809f01940423763d063681dcb8ca26e73c440b56aa808c3cc29aa4a33ff7e9c888d76b6f19365a2c7af127e9f8a21580cbe7b1b06943ec71dabeb530910afa8c7fb937cc99eef5ca569f8365dc7a773b23518a672696768747390a6736563726574c42056c33231f78a93d2dd8d140fc00e1e5b370190eafdff9cee56ec64c4a01a5db6",
+      "fields": {
+        "expires": 1792772800000,
+        "grant": false,
+        "keys": [],
+        "node": "8b276809f01940423763d063681dcb8c",
+        "ns": "b56aa808c3cc29aa4a33ff7e9c888d76b6f19365a2c7af127e9f8a21580cbe7b1b06943ec71dabeb530910afa8c7fb937cc99eef5ca569f8365dc7a773b23518",
+        "q": null,
+        "secret": "56c33231f78a93d2dd8d140fc00e1e5b370190eafdff9cee56ec64c4a01a5db6",
+        "until": null,
+        "write": false
+      },
+      "id": "104f6a53f1aa94e856428e0ea0c4104508d89d97604ddd4ce2bae48f8662d571",
+      "redeem": {
+        "link_id": "e686902b87076eb897c99fac02e85db9",
+        "node": "9f70f95850251f001a16d7c1da224ac2",
+        "request": "104f6a53f1aa94e856428e0ea0c4104508d89d97604ddd4ce2bae48f8662d571fd3eddd94ab8bf3c48de172b120bad6f307c28d98039e1f4d65af0c7947a46d09f70f95850251f001a16d7c1da224ac235131c602adb4d910db070ff8e91481b16f76c43711e776686509240f510e20a",
+        "writer": "fd3eddd94ab8bf3c48de172b120bad6f307c28d98039e1f4d65af0c7947a46d0"
+      },
+      "text": "q2twk6dqnfzgk46paaaadiljsx7abjtmnfwws5dtqcsg433emxcbbczhnae7agkaii3whuddnao4xdfcnzz4iqfvnkuarq6mfgveum77p2oirdlww3yzgzncy6xre7u7riqvqdf6pmnqnfb6y4o2x22tbeik7kgh7ojxzsm655okk2pygzo4pj3twi2rrjtsnftwq5dtscthgzldojsxjrbak3btempxrkj5fxmncqh4adq6lm3qdehk7x7zz3sw5rsmjia2lw3a"
     }
   ]
 }

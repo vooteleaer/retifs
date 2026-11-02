@@ -17,6 +17,7 @@ fn main() {
             ns: ChannelAddr { writer: input("writer", 0), read_key: input("read key", 0) },
             node: input("node", 0),
             secret: input("secret", 0),
+            write: true,
             grant: false,
             keys: vec![],
             until: None,
@@ -27,11 +28,24 @@ fn main() {
             ns: ChannelAddr { writer: input("writer", 1), read_key: input("read key", 1) },
             node: input("node", 1),
             secret: input("secret", 1),
+            write: true,
             grant: true,
             keys: vec!["title".into(), "@content".into()],
             until: Some(1_800_000_000_000),
             expires: 1_792_686_400_000,
             q: Some("type=event, calendar=family".into()),
+        },
+        // A reader: rights empty.
+        Invitation {
+            ns: ChannelAddr { writer: input("writer", 2), read_key: input("read key", 2) },
+            node: input("node", 2),
+            secret: input("secret", 2),
+            write: false,
+            grant: false,
+            keys: vec![],
+            until: None,
+            expires: 1_792_772_800_000,
+            q: None,
         },
     ];
     let out: Vec<_> = cases
@@ -49,6 +63,7 @@ fn main() {
                     "node": hex::encode(inv.node),
                     "ns": hex::encode([inv.ns.writer, inv.ns.read_key].concat()),
                     "q": inv.q,
+                    "write": inv.write,
                     "grant": inv.grant,
                     "secret": hex::encode(inv.secret),
                 },
@@ -65,7 +80,7 @@ fn main() {
         })
         .collect();
     let doc = json!({
-        "about": "ADR-0020: an invitation is canonical msgpack {expires, limits {keys?, until?}, node, ns (writer || read key), q?, rights, secret}, base32 (RFC 4648, lowercase, no padding) in retifs:invite/ links; id = SHA-256(\"retifs/v1/invite\" || secret); a redemption is id || writer || node || HMAC-SHA256(secret, link id || writer || node)",
+        "about": "ADR-0020: an invitation is canonical msgpack {expires, limits {keys?, until?}, node, ns (writer || read key), q?, rights ([] read, [write], [grant, write]), secret}, base32 (RFC 4648, lowercase, no padding) in retifs:invite/ links; id = SHA-256(\"retifs/v1/invite\" || secret); a redemption is id || writer || node || HMAC-SHA256(secret, link id || writer || node)",
         "cases": out,
     });
     println!("{}", serde_json::to_string_pretty(&doc).unwrap());

@@ -335,6 +335,9 @@ pub enum Request {
     /// `expires_ms` (default a day). Answers with the link.
     InviteCreate {
         ns: String,
+        /// A reader (a member who doesn't write); `grant` is then ignored.
+        #[serde(default)]
+        read: bool,
         #[serde(default)]
         grant: bool,
         #[serde(default)]
@@ -496,11 +499,18 @@ pub struct NsView {
     pub announced: bool,
 }
 
+fn yes() -> bool {
+    true
+}
+
 /// An invitation this node made (ADR-0020).
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub struct InviteInfo {
     /// Its ID (64 hex digits), for `InviteCancel`.
     pub id: String,
+    /// False: a reader's.
+    #[serde(default = "yes")]
+    pub write: bool,
     pub grant: bool,
     pub keys: Vec<String>,
     pub until: Option<u64>,

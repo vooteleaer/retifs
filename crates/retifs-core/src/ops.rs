@@ -1253,6 +1253,19 @@ mod tests {
     }
 
     #[test]
+    fn a_reader_is_a_member_whose_writes_dont_count() {
+        // Granted no rights (a reader's invitation): listed, so a rekey
+        // reaches it, but nothing it writes counts.
+        let alice = vec![c(100, vec![Op::Grant(BOB, vec![]), Op::Set(R, "a".into(), Value::Int(1))])];
+        let bob = vec![c(200, vec![Op::Set(R, "b".into(), Value::Int(2))])];
+        let m = merge(&ALICE, &chains(vec![(ALICE, alice), (BOB, bob)]), 1000);
+        assert_eq!(m.writers.get(&BOB), Some(&vec![]), "bob is a member without rights");
+        let keys: Vec<&str> = m.records[0].attrs.keys().map(String::as_str).collect();
+        assert_eq!(keys, vec!["a"]);
+        assert_eq!(m.ignored_ops, 1);
+    }
+
+    #[test]
     fn identities_and_rekeys_count_only_where_allowed() {
         let mut alice_id = [0u8; 64];
         alice_id[32..].copy_from_slice(&ALICE);
