@@ -3040,6 +3040,7 @@ fn ns_view(d: &Daemon, ns: &str) -> Result<NsView, String> {
         keep: if d.store.ns_keep_by_rules(ns).map_err(|e| e.to_string())? { "rules" } else { "all" }.into(),
         kept: d.store.ns_kept(ns).map_err(|e| e.to_string())?.len(),
         lazy: d.store.ns_lazy(ns).map_err(|e| e.to_string())?,
+        announced: announced_libraries(&d.store).into_iter().any(|(n, _, _)| n == ns),
     })
 }
 

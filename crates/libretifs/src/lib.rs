@@ -485,6 +485,9 @@ pub struct NsView {
     /// Only the records needed are held here, fetched on demand.
     #[serde(default)]
     pub lazy: bool,
+    /// Announced on the network as a public library (ADR-0029).
+    #[serde(default)]
+    pub announced: bool,
 }
 
 /// An invitation this node made (ADR-0020).
