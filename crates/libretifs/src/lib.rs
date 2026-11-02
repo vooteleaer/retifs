@@ -485,9 +485,10 @@ pub struct NsView {
     /// Files kept here (pulled because they're kept: `all`, or by rules).
     #[serde(default)]
     pub kept: usize,
-    /// Of those, the ones whole here already (the rest still being fetched).
+    /// Of those, the ones whole here already (the rest still being fetched);
+    /// None from a retifsd that doesn't say.
     #[serde(default)]
-    pub kept_here: usize,
+    pub kept_here: Option<usize>,
     /// Joined and still looking for its state (a first sync).
     #[serde(default)]
     pub syncing: bool,
@@ -505,6 +506,13 @@ pub struct NsView {
 
 fn yes() -> bool {
     true
+}
+
+impl NsView {
+    /// Coming in: its first sync, or files kept not all here yet.
+    pub fn coming(&self) -> bool {
+        self.syncing || self.kept_here.is_some_and(|h| h < self.kept)
+    }
 }
 
 /// An invitation this node made (ADR-0020).

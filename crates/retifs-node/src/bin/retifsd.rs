@@ -3078,7 +3078,7 @@ fn ns_view_made(d: &Daemon, ns: &str) -> Result<NsView, String> {
         keep: if d.store.ns_keep_by_rules(ns).map_err(|e| e.to_string())? { "rules" } else { "all" }.into(),
         kept: kept_files.len(),
         // Still being fetched: wanted (its chunks sought) and not here yet.
-        kept_here: kept_files.iter().filter(|f| !d.store.is_wanted(&f.root).unwrap_or(false)).count(),
+        kept_here: Some(kept_files.iter().filter(|f| !d.store.is_wanted(&f.root).unwrap_or(false)).count()),
         syncing: d.ns_seeking.lock().unwrap().contains(ns),
         lazy: d.store.ns_lazy(ns).map_err(|e| e.to_string())?,
         announced: announced_libraries(&d.store).into_iter().any(|(n, _, _)| n == ns),
