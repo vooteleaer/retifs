@@ -4,6 +4,9 @@
 //! namespaces it looks in, by their creators' keys (stable, and the same on
 //! every device whatever each calls them); empty: every namespace.
 //!
+//! Favorite libraries are kept the same way: `type = retifs.favorite`,
+//! `library` (its creator's key).
+//!
 //! One convention for the CLI, the desktop utility's Find and any app.
 
 use std::collections::HashMap;
@@ -136,6 +139,38 @@ pub async fn save(c: &mut Client, name: &str, scope: &[String], terms: &[String]
 pub async fn remove(c: &mut Client, name: &str) -> Result<(), String> {
     let q = list(c).await.into_iter().find(|q| q.name.eq_ignore_ascii_case(name)).ok_or_else(|| format!("no saved query {name}"))?;
     err(c.call(Request::RecordDelete { ns: ME.into(), id: q.id }).await).map(|_| ())
+}
+
+/// A favorite library's record type (in `me`, so every device of the
+/// user's has it): `library`, its creator key; apps list favorites first.
+pub const FAVORITE_TYPE: &str = "retifs.favorite";
+
+/// The favorite libraries: their creator keys, with their records' IDs.
+pub async fn favorites(c: &mut Client) -> Vec<(String, String)> {
+    let req = Request::Query { ns: ME.into(), terms: vec![format!("type={FAVORITE_TYPE}")], at: None };
+    let Ok(Response::Records { records }) = c.call(req).await else { return Vec::new() };
+    records
+        .into_iter()
+        .filter_map(|r| match r.attrs.iter().find(|(k, _)| k == "library").map(|(_, v)| v) {
+            Some(AttrValue::Str(w)) => Some((w.clone(), r.id.clone())),
+            _ => None,
+        })
+        .collect()
+}
+
+/// Makes library `ns` (its local name) a favorite, or not.
+pub async fn set_favorite(c: &mut Client, ns: &str, on: bool) -> Result<(), String> {
+    let w = creator(c, ns).await?;
+    let held: Vec<String> = favorites(c).await.into_iter().filter(|(k, _)| *k == w).map(|(_, id)| id).collect();
+    if on && held.is_empty() {
+        let attrs = vec![("type".to_string(), AttrValue::Str(FAVORITE_TYPE.into())), ("library".to_string(), AttrValue::Str(w))];
+        err(c.call(Request::RecordCreate { ns: ME.into(), attrs, data: None }).await)?;
+    } else if !on {
+        for id in held {
+            err(c.call(Request::RecordDelete { ns: ME.into(), id }).await)?;
+        }
+    }
+    Ok(())
 }
 
 #[cfg(test)]
