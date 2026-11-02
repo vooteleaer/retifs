@@ -1082,6 +1082,47 @@ struct HeardLib {
 /// The most library announces kept: the oldest heard go first.
 const HEARD_LIBS_MAX: usize = 500;
 
+/// Library announces older than this aren't read back after a restart.
+const HEARD_KEEP_MS: u64 = 7 * 24 * 3600 * 1000;
+
+/// The libraries heard, kept across restarts (announces come every ten
+/// minutes, from far nodes more rarely): a line each, `node hops heard_ms
+/// app_data` (hex), only those this retifs reads.
+fn save_heard(path: &std::path::Path, heard: &HashMap<Vec<u8>, HeardLib>) {
+    let mut out = String::new();
+    for h in heard.values() {
+        if let Some(l) = &h.lib {
+            out.push_str(&format!("{} {} {} {}
+", hex(&h.node), h.hops, h.heard_ms, hex(&retifs_core::announce::library_app_data(l))));
+        }
+    }
+    let tmp = path.with_extension("tmp");
+    if std::fs::write(&tmp, out).is_ok() {
+        let _ = std::fs::rename(&tmp, path);
+    }
+}
+
+fn load_heard(path: &std::path::Path) -> HashMap<Vec<u8>, HeardLib> {
+    let now = now_ms();
+    let mut heard = HashMap::new();
+    for line in std::fs::read_to_string(path).unwrap_or_default().lines() {
+        let f: Vec<&str> = line.split(' ').collect();
+        let [node, hops, at, data] = f[..] else { continue };
+        let (Some(node), Ok(hops), Ok(heard_ms), Some(data)) =
+            (unhex(node).and_then(|b| PeerId::try_from(b).ok()), hops.parse(), at.parse::<u64>(), unhex(data))
+        else {
+            continue;
+        };
+        if now.saturating_sub(heard_ms) > HEARD_KEEP_MS {
+            continue;
+        }
+        if let Some((v, Some(lib))) = retifs_core::announce::library_announce(&data) {
+            heard.insert([lib.writer, lib.read_key].concat(), HeardLib { lib: Some(lib), v, node, hops, heard_ms });
+        }
+    }
+    heard
+}
+
 /// The libraries this node announces (`announce.toml` in the store): local
 /// name → the name and description others see.
 fn announced_libraries(store: &SlabStore) -> Vec<(String, String, String)> {
@@ -1436,7 +1477,7 @@ async fn serve(store: Arc<SlabStore>, identity: node::IdentitySecret, endpoint: 
         sessions: Mutex::new(HashMap::new()),
         commits: Mutex::new(HashMap::new()),
         next_session: std::sync::atomic::AtomicU64::new(1),
-        heard_libs: Mutex::new(HashMap::new()),
+        heard_libs: Mutex::new(load_heard(&store.root().join("heard"))),
         lib_wake: Notify::new(),
         // Left before a restart and not finished: carried on.
         leaving: Mutex::new(
@@ -1489,6 +1530,7 @@ async fn serve(store: Arc<SlabStore>, identity: node::IdentitySecret, endpoint: 
                     heard.remove(&oldest);
                 }
             }
+            save_heard(&listener.store.root().join("heard"), &heard);
         }
     });
     // This node's announced libraries, one announce each, every announce
@@ -6142,6 +6184,13 @@ fn expand_local(store: &SlabStore, root: &retifs_core::Cid) -> Result<(), String
 
 fn hex(b: &[u8]) -> String {
     b.iter().map(|x| format!("{x:02x}")).collect()
+}
+
+fn unhex(s: &str) -> Option<Vec<u8>> {
+    if s.len() % 2 != 0 {
+        return None;
+    }
+    (0..s.len()).step_by(2).map(|i| u8::from_str_radix(s.get(i..i + 2)?, 16).ok()).collect()
 }
 
 /// Walks the manifest using only the local store.
