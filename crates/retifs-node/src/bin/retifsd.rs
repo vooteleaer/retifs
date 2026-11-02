@@ -771,6 +771,10 @@ struct Daemon {
     /// work on one (walking 77,000 operations, writing 38,000 records) doesn't
     /// stop the others, nor every tokio worker waiting on one global lock.
     ns_cache: Mutex<HashMap<String, Arc<Mutex<NsCache>>>>,
+    /// Each namespace's last view (NsInfo) and when it was made: answered
+    /// from here while the namespace is busy (a sync merging it), so an app
+    /// asking what's here isn't held up for seconds.
+    ns_views: Mutex<HashMap<String, (NsView, std::time::Instant)>>,
     /// Joined namespaces still looking for a checkpoint to start from.
     ns_seeking: Mutex<std::collections::HashSet<String>>,
     /// When a storage-less node last tried to fetch its own chain back, per
@@ -1467,6 +1471,7 @@ async fn serve(store: Arc<SlabStore>, identity: node::IdentitySecret, endpoint: 
         follow_wake: Notify::new(),
         ns_wake: Notify::new(),
         ns_cache: Mutex::new(HashMap::new()),
+        ns_views: Mutex::new(HashMap::new()),
         own_tried: Mutex::new(HashMap::new()),
         ns_seeking: Mutex::new(if args.no_storage { store.ns_names().unwrap_or_default().into_iter().collect() } else { std::collections::HashSet::new() }),
         announced: Mutex::new(std::collections::HashSet::new()),
@@ -2447,6 +2452,7 @@ async fn handle(d: &Daemon, req: Request) -> Result<Response, String> {
             } else {
                 set_announced(&d.store, &ns, None)?;
             }
+            d.ns_views.lock().unwrap().remove(&ns);
             d.lib_wake.notify_one();
             Ok(Response::Done)
         }
@@ -2597,7 +2603,7 @@ async fn handle(d: &Daemon, req: Request) -> Result<Response, String> {
             if d.store.ns_info(&ns).map_err(|e| e.to_string())?.is_none() {
                 return Err(format!("no namespace {ns}"));
             }
-            Ok(Response::Namespace(ns_view(d, &ns)?))
+            Ok(Response::Namespace(ns_view_now(d, &ns)?))
         }
 
         Request::NsVerify { ns } => {
@@ -3010,7 +3016,29 @@ fn parse_writer(s: &str) -> Result<[u8; 32], String> {
     bytes.and_then(|b| b.try_into().ok()).ok_or_else(|| format!("bad writer key {s} (64 hex digits)"))
 }
 
+/// A namespace's view without waiting: the last one if it's fresh (a few
+/// seconds) or the namespace is busy now (being merged), else made anew.
+fn ns_view_now(d: &Daemon, ns: &str) -> Result<NsView, String> {
+    let last = d.ns_views.lock().unwrap().get(ns).cloned();
+    if let Some((view, made)) = last {
+        let busy = ns_entry_get(d, ns).is_some_and(|e| e.try_lock().is_err());
+        if busy || made.elapsed() < NS_VIEW_FRESH {
+            return Ok(view);
+        }
+    }
+    ns_view(d, ns)
+}
+
+/// How long a namespace's view is answered as it was.
+const NS_VIEW_FRESH: Duration = Duration::from_secs(5);
+
 fn ns_view(d: &Daemon, ns: &str) -> Result<NsView, String> {
+    let view = ns_view_made(d, ns)?;
+    d.ns_views.lock().unwrap().insert(ns.to_string(), (view.clone(), std::time::Instant::now()));
+    Ok(view)
+}
+
+fn ns_view_made(d: &Daemon, ns: &str) -> Result<NsView, String> {
     let merged = materialize(d, ns)?;
     let (_, own, _) = chains(d, ns, false)?;
     Ok(NsView {
