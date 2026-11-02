@@ -3623,14 +3623,21 @@ async fn search_query(d: &Daemon, ns: &str, node: &str, terms: &[String]) -> Res
 /// here. None when no peer could answer (no index, unreachable, other terms).
 async fn lazy_search(d: &Daemon, ns: &str, terms: &[String]) -> Option<Vec<RecordView>> {
     for peer in d.store.ns_peers(ns).ok()? {
-        match search_query(d, ns, &hex(&peer), terms).await {
-            Ok(Response::Searched { records, .. }) => return Some(records),
-            Ok(_) => {}
-            Err(e) => eprintln!("ns {ns}: searching at <{}>: {e}", hex(&peer)),
+        // A slow or far peer doesn't hold the answer up for long: past this,
+        // the next peer, and in the end what's here.
+        match tokio::time::timeout(LAZY_SEARCH_WAIT, search_query(d, ns, &hex(&peer), terms)).await {
+            Ok(Ok(Response::Searched { records, .. })) => return Some(records),
+            Ok(Ok(_)) => {}
+            Ok(Err(e)) => eprintln!("ns {ns}: searching at <{}>: {e}", hex(&peer)),
+            Err(_) => eprintln!("ns {ns}: searching at <{}>: no answer in {} s", hex(&peer), LAZY_SEARCH_WAIT.as_secs()),
         }
     }
     None
 }
+
+/// How long a lazy library's search waits for a peer (then answers from
+/// what's here): a lookup on a slow link took over a minute.
+const LAZY_SEARCH_WAIT: Duration = Duration::from_secs(8);
 
 /// Fetches the state tree paths to `ids` from the checkpoint held here, from
 /// the namespace's peers (and `extra`): a lazy member's records on demand.
