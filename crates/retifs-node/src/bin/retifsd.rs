@@ -3082,6 +3082,7 @@ fn ns_view_made(d: &Daemon, ns: &str) -> Result<NsView, String> {
         syncing: d.ns_seeking.lock().unwrap().contains(ns),
         lazy: d.store.ns_lazy(ns).map_err(|e| e.to_string())?,
         announced: announced_libraries(&d.store).into_iter().any(|(n, _, _)| n == ns),
+        nodes: merged.nodes.iter().map(|(w, n)| (hex(w), hex(n))).collect(),
     })
 }
 

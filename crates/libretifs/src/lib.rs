@@ -497,6 +497,10 @@ pub struct NsView {
     /// Announced on the network as a public library (ADR-0029).
     #[serde(default)]
     pub announced: bool,
+    /// Each writer's node, as it said (`[writer, node]`, hex): whose device
+    /// a member is (a contact's node).
+    #[serde(default)]
+    pub nodes: Vec<(String, String)>,
 }
 
 fn yes() -> bool {
