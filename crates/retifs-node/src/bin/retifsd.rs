@@ -4313,6 +4313,9 @@ async fn write_ops(d: &Daemon, ns: &str, mut ops: Vec<Op>) -> Result<u64, String
         // be stamped before it): refuse them clearly instead of losing them.
         let (_, own, _) = chains(d, ns, false)?;
         let writes_data = ops.iter().any(|op| matches!(op, Op::Set(..) | Op::Unset(..) | Op::Blocks(..) | Op::Delete(_)));
+        if writes_data && merged.writers.get(&own).is_some_and(|r| !r.contains(&Right::Write)) {
+            return Err(format!("this node reads {ns} (a member invited to read): it may not write to it"));
+        }
         if writes_data && !merged.writers.get(&own).is_some_and(|r| r.contains(&Right::Write)) {
             return Err(format!(
                 "this node may not write to {ns} yet: its grant hasn't reached it (writer {}…; try again after the next sync)",

@@ -582,7 +582,8 @@ async fn main() {
                     println!("  address    {}", v.address);
                     println!("  my writer  {}", v.own_writer);
                     for (w, rights) in &v.writers {
-                        println!("  writer     {w}  {}", rights.join(","));
+                        // No rights: a reader (a member invited to read).
+                        println!("  writer     {w}  {}", if rights.is_empty() { "read".to_string() } else { rights.join(",") });
                     }
                     if let Some(c) = &v.checkpoint {
                         println!("  checkpoint {c}");
