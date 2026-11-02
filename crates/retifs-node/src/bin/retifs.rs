@@ -812,7 +812,17 @@ async fn main() {
                 match client.call(libretifs::Request::InviteAccept { ns: name.clone(), link: text.clone() }).await.unwrap_or_else(|e| fail(e)) {
                     libretifs::Response::Namespace(v) => {
                         let can_write = v.writers.iter().any(|(w, r)| *w == v.own_writer && r.iter().any(|r| r == "write"));
-                        println!("joined {name}: {}", if can_write { "you may write to it" } else { "reading now; writing once the invitation's node grants it (on its own, when reachable)" });
+                        let to_read = retifs_core::invite::Invitation::from_text(&link.what).is_ok_and(|i| !i.write);
+                        println!(
+                            "joined {name}: {}",
+                            if can_write {
+                                "you may write to it"
+                            } else if to_read {
+                                "reading now (invited to read: a member its owner sees)"
+                            } else {
+                                "reading now; writing once the invitation's node grants it (on its own, when reachable)"
+                            }
+                        );
                     }
                     libretifs::Response::Error { message } => fail(message),
                     _ => fail("unexpected response"),
