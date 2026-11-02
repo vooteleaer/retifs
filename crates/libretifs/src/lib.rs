@@ -479,9 +479,15 @@ pub struct NsView {
     /// "all" or "rules".
     #[serde(default)]
     pub keep: String,
-    /// Files pulled here because they're kept.
+    /// Files kept here (pulled because they're kept: `all`, or by rules).
     #[serde(default)]
     pub kept: usize,
+    /// Of those, the ones whole here already (the rest still being fetched).
+    #[serde(default)]
+    pub kept_here: usize,
+    /// Joined and still looking for its state (a first sync).
+    #[serde(default)]
+    pub syncing: bool,
     /// Only the records needed are held here, fetched on demand.
     #[serde(default)]
     pub lazy: bool,

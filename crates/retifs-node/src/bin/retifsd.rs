@@ -3039,6 +3039,7 @@ fn ns_view(d: &Daemon, ns: &str) -> Result<NsView, String> {
 }
 
 fn ns_view_made(d: &Daemon, ns: &str) -> Result<NsView, String> {
+    let kept_files = d.store.ns_kept(ns).map_err(|e| e.to_string())?;
     let merged = materialize(d, ns)?;
     let (_, own, _) = chains(d, ns, false)?;
     Ok(NsView {
@@ -3066,7 +3067,10 @@ fn ns_view_made(d: &Daemon, ns: &str) -> Result<NsView, String> {
         checkpoint: d.store.ns_checkpoint(ns).map_err(|e| e.to_string())?.map(|f| f.to_string()),
         device: d.device.clone(),
         keep: if d.store.ns_keep_by_rules(ns).map_err(|e| e.to_string())? { "rules" } else { "all" }.into(),
-        kept: d.store.ns_kept(ns).map_err(|e| e.to_string())?.len(),
+        kept: kept_files.len(),
+        // Still being fetched: wanted (its chunks sought) and not here yet.
+        kept_here: kept_files.iter().filter(|f| !d.store.is_wanted(&f.root).unwrap_or(false)).count(),
+        syncing: d.ns_seeking.lock().unwrap().contains(ns),
         lazy: d.store.ns_lazy(ns).map_err(|e| e.to_string())?,
         announced: announced_libraries(&d.store).into_iter().any(|(n, _, _)| n == ns),
     })

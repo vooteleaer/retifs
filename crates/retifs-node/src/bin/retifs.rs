@@ -587,7 +587,10 @@ async fn main() {
                     if let Some(c) = &v.checkpoint {
                         println!("  checkpoint {c}");
                     }
-                    println!("  keeps      {} on device {} ({} file(s) pulled for it)", v.keep, v.device, v.kept);
+                    println!("  keeps      {} on device {} ({} of {} file(s) kept here so far)", v.keep, v.device, v.kept_here, v.kept);
+                    if v.syncing {
+                        println!("  syncing    looking for its state (a first sync)");
+                    }
                     if v.lazy {
                         println!("  lazy       only records needed are held (fetched on demand)");
                     }
