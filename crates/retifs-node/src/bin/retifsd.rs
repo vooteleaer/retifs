@@ -2574,6 +2574,10 @@ async fn handle(d: &Daemon, req: Request) -> Result<Response, String> {
                 "rules" => true,
                 _ => return Err("keep mode is all or rules".into()),
             };
+            // All of a lazily held library: its whole state first.
+            if !by_rules && d.store.ns_lazy(&ns).map_err(|e| e.to_string())? {
+                hold_whole(d, &ns).await?;
+            }
             d.store.set_ns_keep_by_rules(&ns, by_rules).map_err(|e| e.to_string())?;
             materialize(d, &ns)?;
             apply_keep(d, &ns, &d.store.records(&ns).map_err(|e| e.to_string())?)?;
@@ -3746,6 +3750,40 @@ async fn fill_lazy(d: &Daemon, ns: &str) -> Result<usize, String> {
         }
     }
     fetch_paths(d, ns, &ids.into_iter().collect::<Vec<_>>(), &[], true).await
+}
+
+/// Makes a lazily held namespace whole: its checkpoint's state tree is
+/// fetched from a peer and the namespace is no longer lazy (records all here,
+/// queries answered here). Lazy again if no peer has it all.
+async fn hold_whole(d: &Daemon, ns: &str) -> Result<(), String> {
+    if d.no_storage {
+        return Err("this node keeps no storage: libraries stay held lazily".into());
+    }
+    let Some(file) = d.store.ns_checkpoint(ns).map_err(|e| e.to_string())? else {
+        return Err(format!("{ns} has no checkpoint here yet: try again after it's synced"));
+    };
+    d.store.set_ns_lazy(ns, false).map_err(|e| e.to_string())?;
+    let mut last = "no peers known".to_string();
+    for peer in d.store.ns_peers(ns).map_err(|e| e.to_string())? {
+        let link = match d.link_to(&peer).await {
+            Ok(l) => l,
+            Err(e) => {
+                last = format!("<{}> unreachable: {e}", hex(&peer));
+                continue;
+            }
+        };
+        match install_checkpoint(d, ns, link, &file).await {
+            Ok(()) => {
+                println!("ns {ns}: held whole now (state from <{}>)", hex(&peer));
+                d.ns_wake.notify_one();
+                return Ok(());
+            }
+            Err(e) => last = format!("<{}>: {e}", hex(&peer)),
+        }
+    }
+    d.store.set_ns_lazy(ns, true).map_err(|e| e.to_string())?;
+    d.ns_cache.lock().unwrap().remove(ns);
+    Err(format!("couldn't fetch all of {ns} ({last})"))
 }
 
 /// Whether this node's own chain in `ns` is not all here: a storage-less
