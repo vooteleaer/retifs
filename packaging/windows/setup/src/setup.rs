@@ -14,15 +14,22 @@ const VERSION: &str = env!("CARGO_PKG_VERSION");
 const RUN_KEY: PCWSTR = w!("Software\\Microsoft\\Windows\\CurrentVersion\\Run");
 const UNINSTALL_KEY: PCWSTR = w!("Software\\Microsoft\\Windows\\CurrentVersion\\Uninstall\\retifs");
 /// Our own programs: stopped before files are replaced or removed.
-const PROGRAMS: [&str; 3] = ["retifs-desktop.exe", "retifsd.exe", "retifs-cloudfiles.exe"];
+const PROGRAMS: [&str; 5] = ["retifs-desktop.exe", "retifsd.exe", "retifs-cloudfiles.exe", "retifs-photos.exe", "retifs-map.exe"];
+/// The Start menu's entries: (program, shortcut name, what it says), each
+/// made when the installer brings its program.
+const SHORTCUTS: [(&str, &str, &str); 3] = [
+    ("retifs-desktop.exe", "retifs", "retifs: this device, its libraries and how they're kept"),
+    ("retifs-photos.exe", "retifs Photos", "Photos in your retifs libraries"),
+    ("retifs-map.exe", "retifs Map", "Everything in your retifs libraries that says where it is"),
+];
 const CREATE_NO_WINDOW: u32 = 0x0800_0000;
 
 fn install_dir() -> PathBuf {
     PathBuf::from(std::env::var_os("LOCALAPPDATA").unwrap_or_default()).join("Programs").join("retifs")
 }
 
-fn shortcut_path() -> PathBuf {
-    PathBuf::from(std::env::var_os("APPDATA").unwrap_or_default()).join("Microsoft\\Windows\\Start Menu\\Programs\\retifs.lnk")
+fn shortcut_path(name: &str) -> PathBuf {
+    PathBuf::from(std::env::var_os("APPDATA").unwrap_or_default()).join(format!("Microsoft\\Windows\\Start Menu\\Programs\\{name}.lnk"))
 }
 
 fn ask(text: &str, flags: MESSAGEBOX_STYLE) -> MESSAGEBOX_RESULT {
@@ -199,17 +206,22 @@ fn register(dir: &Path) -> Result<(), String> {
         let _ = RegSetValueExW(un, w!("NoRepair"), 0, REG_DWORD, Some(&one));
         let _ = RegCloseKey(un);
 
-        shortcut(&dir.join("retifs-desktop.exe"), &shortcut_path())?;
+        for (program, name, about) in SHORTCUTS {
+            let target = dir.join(program);
+            if target.exists() {
+                shortcut(&target, &shortcut_path(name), about)?;
+            }
+        }
     }
     Ok(())
 }
 
 /// A Start menu shortcut (a .lnk, through the shell's own IShellLink).
-unsafe fn shortcut(target: &Path, at: &Path) -> Result<(), String> {
+unsafe fn shortcut(target: &Path, at: &Path, about: &str) -> Result<(), String> {
     let _ = CoInitializeEx(None, COINIT_APARTMENTTHREADED);
     let link: IShellLinkW = CoCreateInstance(&ShellLink, None, CLSCTX_INPROC_SERVER).map_err(|e| e.to_string())?;
     link.SetPath(&HSTRING::from(target.as_os_str())).map_err(|e| e.to_string())?;
-    link.SetDescription(w!("retifs: this device, its libraries and how they're kept")).map_err(|e| e.to_string())?;
+    link.SetDescription(&HSTRING::from(about)).map_err(|e| e.to_string())?;
     if let Some(parent) = target.parent() {
         let _ = link.SetWorkingDirectory(&HSTRING::from(parent.as_os_str()));
     }
@@ -243,7 +255,9 @@ fn uninstall() {
         }
         let _ = RegDeleteTreeW(HKEY_CURRENT_USER, UNINSTALL_KEY);
     }
-    let _ = std::fs::remove_file(shortcut_path());
+    for (_, name, _) in SHORTCUTS {
+        let _ = std::fs::remove_file(shortcut_path(name));
+    }
     // Every file but the running uninstaller, which a hidden shell removes
     // with the folder once this has exited.
     if let Ok(entries) = std::fs::read_dir(&dir) {

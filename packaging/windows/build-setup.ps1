@@ -14,6 +14,9 @@ $ErrorActionPreference = "Stop"
 $Root = (Resolve-Path "$PSScriptRoot\..\..").Path
 $Prns = if ($env:PRNS) { $env:PRNS } else { Join-Path (Split-Path $Root) "Prns-0.3.8" }
 $Desktop = if ($env:RETIFS_DESKTOP) { $env:RETIFS_DESKTOP } else { Join-Path (Split-Path $Root) "retifs-desktop" }
+# The apps, where they are next to retifs with a Windows front end: Photos and Map.
+$Apps = @(@{ Repo = "retifs-photos"; Package = "retifs-photos-win"; Exe = "retifs-photos.exe" }, @{ Repo = "retifs-map"; Package = "retifs-map-win"; Exe = "retifs-map.exe" }) |
+    Where-Object { Test-Path (Join-Path (Split-Path $Root) "$($_.Repo)\windows\Cargo.toml") }
 if (-not $Out) { $Out = Join-Path $Root "target\setup" }
 $Stage = Join-Path $Root "target\setup-files"
 # A target folder of its own: programs running from target\release (a test
@@ -34,11 +37,17 @@ if ($HasDesktop) {
     Write-Warning "no retifs-desktop at ${Desktop}: the installer won't have the utility"
 }
 
+foreach ($a in $Apps) {
+    Step "$($a.Repo)"
+    Invoke-Cargo build --release --manifest-path (Join-Path (Split-Path $Root) "$($a.Repo)\Cargo.toml") -p $a.Package
+}
+
 Step "files"
 if (Test-Path $Stage) { Remove-Item $Stage -Recurse -Force }
 New-Item -ItemType Directory -Force $Stage | Out-Null
 foreach ($b in "retifsd.exe", "retifs.exe", "retifs-cloudfiles.exe") { Copy-Item "$Built\$b" $Stage }
 if ($HasDesktop) { Copy-Item "$Built\retifs-desktop.exe" $Stage }
+foreach ($a in $Apps) { Copy-Item "$Built\$($a.Exe)" $Stage }
 Copy-Item "$Root\LICENSE" "$Stage\LICENSE-retifs.txt"
 # The libraries a new install joins (retifsd reads it next to itself).
 Copy-Item "$Root\packaging\default-libraries" "$Stage\default-libraries"
