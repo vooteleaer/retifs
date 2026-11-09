@@ -313,6 +313,15 @@ impl SlabStore {
             .collect()
     }
 
+    /// How many records a namespace has, none of them decoded.
+    pub fn record_count(&self, ns: &str) -> Result<usize, StoreError> {
+        let r = self.db.begin_read()?;
+        let t = r.open_table(RECORDS)?;
+        let start = ns_prefix(ns);
+        let end = after(&start);
+        Ok(t.range(start.as_slice()..end.as_slice())?.count())
+    }
+
     /// Records matching every term, by ID.
     pub fn query(&self, ns: &str, terms: &[Term]) -> Result<Vec<Record>, StoreError> {
         let mut ids: Option<BTreeSet<RecordId>> = None;

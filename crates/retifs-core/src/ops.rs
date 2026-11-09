@@ -667,6 +667,13 @@ impl State {
         self.grant_at(writer, at).is_some_and(|g| g.holds(right, at.0))
     }
 
+    /// Whether record `id`'s `key` was last set by a writer holding `grant`
+    /// at the time: what counts only from one who may admit and revoke (a
+    /// library's deletion, ADR-0034).
+    pub fn set_by_granter(&self, id: &RecordId, key: &str) -> bool {
+        matches!(self.fields.get(&(*id, key.to_string())), Some((s, Some(_))) if self.has(&s.1, Right::Grant, s))
+    }
+
     /// Applies one data operation; any order gives the same state.
     pub fn apply(&mut self, s: Stamp, op: &Op) {
         if is_control(op) || matches!(op, Op::Checkpoint(_)) {
@@ -767,6 +774,11 @@ impl State {
     }
 
     /// Visible records, by ID.
+    /// How many records exist (what `records` would return), none built.
+    pub fn record_count(&self) -> usize {
+        self.live.iter().filter(|(id, live)| self.deleted.get(*id).is_none_or(|d| *live > d)).count()
+    }
+
     pub fn records(&self) -> Vec<Record> {
         let mut out: BTreeMap<RecordId, Record> = BTreeMap::new();
         for (id, live) in &self.live {
@@ -1155,6 +1167,22 @@ mod tests {
     /// (writer, seq, time) of each chain's last commit.
     fn reach(ch: &BTreeMap<WriterKey, Vec<WriterCommit>>) -> Vec<(WriterKey, u64, u64)> {
         ch.iter().filter_map(|(w, cs)| cs.last().map(|c| (*w, c.seq, c.time_ms))).collect()
+    }
+
+    #[test]
+    fn only_a_granter_says_what_a_granter_may() {
+        let alice = vec![c(100, vec![Op::Grant(BOB, vec![Right::Write]), Op::Grant(EVE, vec![Right::Write, Right::Grant])])];
+        let bob = vec![c(200, vec![Op::Set(R, "type".into(), s("retifs.deleted"))])];
+        let eve = vec![c(300, vec![Op::Set(R2, "type".into(), s("retifs.deleted"))])];
+        let st = State::build(&ALICE, &chains(vec![(ALICE, alice.clone()), (BOB, bob), (EVE, eve)]), 1_000);
+        assert!(st.record(&R).is_some(), "a writer's set counts as a write");
+        assert!(!st.set_by_granter(&R, "type"), "but not as a granter's");
+        assert!(st.set_by_granter(&R2, "type"));
+        assert!(!st.set_by_granter(&R2, "name"), "a field never set");
+        // Revoked before it wrote: nothing of it counts.
+        let revoked = vec![c(100, vec![Op::Grant(EVE, vec![Right::Write, Right::Grant])]), c(250, vec![Op::Revoke(EVE)])];
+        let st = State::build(&ALICE, &chains(vec![(ALICE, revoked), (EVE, vec![c(300, vec![Op::Set(R2, "type".into(), s("retifs.deleted"))])])]), 1_000);
+        assert!(!st.set_by_granter(&R2, "type"));
     }
 
     #[test]

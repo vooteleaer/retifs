@@ -12,6 +12,11 @@
 //!   (`type` `retifs.*` or `keep-rule`: shares, index settings, keep rules),
 //!   which aren't files.
 //! - Two records claiming one path: the later ID gets `~<first 8 of its ID>`.
+//! - Albums: a file whose record names albums (`album`: a name, or a list)
+//!   is also under `/Albums/<album>/` (one name in any case is one album).
+//!   The same record, not a copy: deleting it there takes it out of the
+//!   album ([`Tree::album_of`], [`without_album`]), and nothing else is
+//!   done there.
 
 use std::collections::BTreeMap;
 
@@ -19,6 +24,9 @@ use libretifs::{AttrValue, RecordView};
 
 pub const RECORDS_DIR: &str = "/Unfiled";
 pub const QUERY_DIR: &str = "/.query";
+pub const ALBUMS_DIR: &str = "/Albums";
+/// The attribute naming the albums a record is in.
+pub const ALBUM: &str = "album";
 
 #[derive(Debug, Clone, PartialEq)]
 pub enum Node {
@@ -39,6 +47,8 @@ impl Node {
 #[derive(Debug, Default)]
 pub struct Tree {
     pub nodes: BTreeMap<String, Node>,
+    /// The entries under [`ALBUMS_DIR`]: path → the album, as its folder is named.
+    pub albums: BTreeMap<String, String>,
 }
 
 /// `/a//b/` → `/a/b`. None for relative paths, `.` or `..` components, or
@@ -61,10 +71,34 @@ pub fn normalize(p: &str) -> Option<String> {
     (!is_virtual(&out) || out == RECORDS_DIR || out == QUERY_DIR).then_some(out)
 }
 
-/// Inside `/Unfiled` or `/.query`: not a place a record's path can point
-/// (a file put in `/Unfiled` is one without a path).
+/// Inside `/Unfiled`, `/.query` or `/Albums`: not a place a record's path
+/// can point (a file put in `/Unfiled` is one without a path).
 pub fn is_virtual(p: &str) -> bool {
-    [RECORDS_DIR, QUERY_DIR].iter().any(|v| p == *v || p.starts_with(&format!("{v}/")))
+    [RECORDS_DIR, QUERY_DIR, ALBUMS_DIR].iter().any(|v| p == *v || p.starts_with(&format!("{v}/")))
+}
+
+/// The album names in a record's `album` value: one, or a list.
+pub fn album_names(v: Option<&AttrValue>) -> Vec<String> {
+    match v {
+        Some(AttrValue::Str(s)) if !s.trim().is_empty() => vec![s.clone()],
+        Some(AttrValue::List(l)) => l.iter().filter_map(|v| if let AttrValue::Str(s) = v { Some(s.clone()) } else { None }).filter(|s| !s.trim().is_empty()).collect(),
+        _ => Vec::new(),
+    }
+}
+
+/// What takes a record (attributes `attrs`) out of album `name`: the
+/// attributes to set and to unset (both empty if it isn't in it).
+pub fn without_album(attrs: &[(String, AttrValue)], name: &str) -> (Vec<(String, AttrValue)>, Vec<String>) {
+    let names = album_names(attrs.iter().find(|(k, _)| k == ALBUM).map(|(_, v)| v));
+    let left: Vec<String> = names.iter().filter(|n| !n.eq_ignore_ascii_case(name)).cloned().collect();
+    if left.len() == names.len() {
+        return (Vec::new(), Vec::new());
+    }
+    match left.as_slice() {
+        [] => (Vec::new(), vec![ALBUM.to_string()]),
+        [one] => (vec![(ALBUM.to_string(), AttrValue::Str(one.clone()))], Vec::new()),
+        many => (vec![(ALBUM.to_string(), AttrValue::List(many.iter().cloned().map(AttrValue::Str).collect()))], Vec::new()),
+    }
 }
 
 pub fn parent(p: &str) -> &str {
@@ -82,6 +116,11 @@ pub fn join(dir: &str, name: &str) -> String {
     if dir == "/" { format!("/{name}") } else { format!("{dir}/{name}") }
 }
 
+/// The size a read-cap (`retifs:1:<root>:<key>:<size>`) gives its file.
+fn cap_size(cap: &str) -> Option<u64> {
+    cap.strip_prefix("retifs:")?.rsplit(':').next()?.parse().ok()
+}
+
 fn attr<'a>(r: &'a RecordView, key: &str) -> Option<&'a AttrValue> {
     r.attrs.iter().find(|(k, _)| k == key).map(|(_, v)| v)
 }
@@ -90,7 +129,13 @@ fn attr<'a>(r: &'a RecordView, key: &str) -> Option<&'a AttrValue> {
 /// safe for a file name, or its ID.
 fn unfiled_name(r: &RecordView) -> String {
     let named = |k| attr(r, k).filter(|v| !matches!(v, AttrValue::Str(n) if n.trim().is_empty()));
-    let name = match named("name").or_else(|| named("title")) {
+    // Else the file name of a path that isn't a place here (a phone's
+    // `DCIM/Camera/IMG_1.jpg`, where a photo was before): it has its type.
+    let from_path = || match named("path") {
+        Some(AttrValue::Str(p)) => p.rsplit(['/', '\\']).next().map(|n| AttrValue::Str(n.to_string())),
+        _ => None,
+    };
+    let name = match named("name").or_else(|| named("title")).cloned().or_else(from_path) {
         Some(AttrValue::Str(n)) => n.chars().map(|c| if c == '/' || c == '\\' || c.is_control() { '_' } else { c }).collect::<String>(),
         _ => String::new(),
     };
@@ -111,6 +156,8 @@ impl Tree {
         }
         let mut sorted: Vec<&RecordView> = records.iter().collect();
         sorted.sort_by(|a, b| a.id.cmp(&b.id));
+        // Files in albums, for /Albums once every file has its place.
+        let mut in_albums: Vec<(&RecordView, String, Node)> = Vec::new();
         for r in sorted {
             let path = match attr(r, "path") {
                 Some(AttrValue::Str(p)) => normalize(p).filter(|p| p != "/" && !is_virtual(p)),
@@ -129,16 +176,37 @@ impl Tree {
                 (path, _) => {
                     let p = path.unwrap_or_else(|| join(RECORDS_DIR, &unfiled_name(r)));
                     let p = unique(&nodes, p, &r.id);
-                    let size = match attr(r, "size") {
-                        Some(AttrValue::Int(n)) if *n >= 0 => *n as u64,
+                    // The content's own size (its read-cap says it) over the
+                    // attribute: records made before 2026-11-09 with thumbnails
+                    // said the size of all their blocks.
+                    let size = match (r.blocks.first().and_then(|c| cap_size(c)), attr(r, "size")) {
+                        (Some(n), _) => n,
+                        (None, Some(AttrValue::Int(n))) if *n >= 0 => *n as u64,
                         _ => 0,
                     };
                     let mtime_ms = match attr(r, "mtime") {
                         Some(AttrValue::Int(t)) => Some(*t),
                         _ => None,
                     };
-                    nodes.insert(p, Node::File { id: r.id.clone(), cap: r.blocks.first().cloned(), size, mtime_ms });
+                    let node = Node::File { id: r.id.clone(), cap: r.blocks.first().cloned(), size, mtime_ms };
+                    if !album_names(attr(r, ALBUM)).is_empty() {
+                        in_albums.push((r, name(&p).to_string(), node.clone()));
+                    }
+                    nodes.insert(p, node);
                 }
+            }
+        }
+        let mut albums = BTreeMap::new();
+        let mut folders: BTreeMap<String, String> = BTreeMap::new();
+        for (r, file, node) in in_albums {
+            for album in album_names(attr(r, ALBUM)) {
+                let folder = folders.entry(album.to_lowercase()).or_insert_with(|| album.chars().map(|c| if c == '/' || c == '\\' || c.is_control() { '_' } else { c }).collect::<String>().trim().to_string()).clone();
+                if folder.is_empty() || folder == "." || folder == ".." {
+                    continue;
+                }
+                let p = unique(&nodes, join(&join(ALBUMS_DIR, &folder), &file), &r.id);
+                albums.insert(p.clone(), folder.clone());
+                nodes.insert(p, node.clone());
             }
         }
         // Directories implied by paths below them. A file in the way of one
@@ -162,11 +230,21 @@ impl Tree {
                 d = parent(&d).to_string();
             }
         }
-        Tree { nodes }
+        Tree { nodes, albums }
     }
 
     pub fn get(&self, p: &str) -> Option<&Node> {
         self.nodes.get(p)
+    }
+
+    /// The album a path under [`ALBUMS_DIR`] is in: for an entry, its
+    /// album; for an album's folder, that album.
+    pub fn album_of(&self, p: &str) -> Option<&str> {
+        if let Some(a) = self.albums.get(p) {
+            return Some(a);
+        }
+        let folder = p.strip_prefix(ALBUMS_DIR)?.strip_prefix('/')?;
+        (!folder.contains('/')).then(|| self.albums.values().find(|a| a.as_str() == folder).map(String::as_str)).flatten()
     }
 
     /// Entries directly in `dir`: (name, full path).
@@ -329,6 +407,7 @@ mod tests {
             rec("aa03", &[("path", s("/photos")), ("type", s("directory"))], &[]),
             rec("aa13", &[("path", s("/albums")), ("type", s("inode/directory"))], &[]),
             rec("aa04", &[("title", s("no path"))], &[]),
+            rec("aa14", &[("path", s("DCIM/Camera/IMG_2.jpg"))], &[]),
             rec("aa10", &[("name", s("IMG_1.jpg"))], &[]),
             rec("aa11", &[("name", s("IMG_1.jpg"))], &[]),
             rec("aa12", &[("name", s("a/b"))], &[]),
@@ -344,9 +423,54 @@ mod tests {
         assert_eq!(t.get("/docs/a.txt"), Some(&Node::File { id: "aa01".into(), cap: Some("cap-a".into()), size: 5, mtime_ms: None }));
         assert_eq!(t.get("/photos"), Some(&Node::Dir { id: Some("aa03".into()) }), "the old name of the type");
         assert_eq!(t.get("/albums"), Some(&Node::Dir { id: Some("aa13".into()) }));
-        assert_eq!(names("/Unfiled"), ["IMG_1.jpg", "IMG_1.jpg~aa11", "a_b", "aa02", "aa07", "no path"], "no path (or a bad one): by name, else title, else ID");
+        assert_eq!(names("/Unfiled"), ["IMG_1.jpg", "IMG_1.jpg~aa11", "IMG_2.jpg", "a_b", "b.txt", "no path", "x"], "no path (or a bad one): by name, else title, else the path's file name, else ID");
         assert_eq!(names("/photos"), Vec::<String>::new());
         assert_eq!(t.records_under("/docs").len(), 2);
+    }
+
+    #[test]
+    fn albums_are_the_same_files() {
+        let list = |xs: &[&str]| AttrValue::List(xs.iter().map(|x| s(x)).collect());
+        let t = Tree::build(&[
+            rec("aa01", &[("path", s("/pics/a.jpg")), ("album", s("Prangli"))], &["cap-a"]),
+            rec("aa02", &[("name", s("b.jpg")), ("album", list(&["prangli", "Suvi/2026"]))], &["cap-b"]),
+            rec("aa03", &[("path", s("/Albums/x.jpg"))], &[]),
+            rec("aa04", &[("path", s("/pics/c")), ("type", s("inode/directory")), ("album", s("Prangli"))], &[]),
+        ]);
+        let names = |d: &str| t.children(d).into_iter().map(|(n, _)| n).collect::<Vec<_>>();
+        assert_eq!(names("/Albums"), ["Prangli", "Suvi_2026"], "one name in any case is one album; no slash in a folder's name");
+        assert_eq!(names("/Albums/Prangli"), ["a.jpg", "b.jpg"]);
+        assert_eq!(t.get("/Albums/Prangli/a.jpg"), t.get("/pics/a.jpg"), "the same record");
+        assert_eq!(t.album_of("/Albums/Prangli/b.jpg"), Some("Prangli"));
+        assert_eq!(t.album_of("/Albums/Suvi_2026"), Some("Suvi_2026"));
+        assert_eq!(t.album_of("/pics/a.jpg"), None);
+        assert_eq!(names("/Unfiled"), ["b.jpg", "x.jpg"], "a path into /Albums isn't one");
+        let t = Tree::build(&[rec("aa01", &[("path", s("/a.jpg"))], &[])]);
+        assert!(t.get(ALBUMS_DIR).is_none(), "only when something is in an album");
+    }
+
+    #[test]
+    fn a_file_is_as_big_as_its_content() {
+        let t = Tree::build(&[
+            rec("aa01", &[("path", s("/a.jpg")), ("size", AttrValue::Int(9))], &["retifs:1:01ab:cd:5", "retifs:1:01ef:12:4"]),
+            rec("aa02", &[("path", s("/b.txt")), ("size", AttrValue::Int(3))], &["cap-b"]),
+        ]);
+        let size = |p: &str| match t.get(p) {
+            Some(Node::File { size, .. }) => *size,
+            other => panic!("{other:?}"),
+        };
+        assert_eq!(size("/a.jpg"), 5, "the first block, not every block's");
+        assert_eq!(size("/b.txt"), 3, "else the attribute");
+    }
+
+    #[test]
+    fn taking_out_of_an_album() {
+        let attrs = |v: AttrValue| vec![("album".to_string(), v)];
+        let list = |xs: &[&str]| AttrValue::List(xs.iter().map(|x| s(x)).collect());
+        assert_eq!(without_album(&attrs(s("Prangli")), "prangli"), (vec![], vec!["album".to_string()]));
+        assert_eq!(without_album(&attrs(list(&["Prangli", "Suvi"])), "Prangli"), (vec![("album".to_string(), s("Suvi"))], vec![]));
+        assert_eq!(without_album(&attrs(list(&["a", "b", "c"])), "b"), (vec![("album".to_string(), list(&["a", "c"]))], vec![]));
+        assert_eq!(without_album(&attrs(s("Prangli")), "Suvi"), (vec![], vec![]));
     }
 
     #[test]

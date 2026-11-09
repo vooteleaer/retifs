@@ -596,7 +596,16 @@ impl Filesystem for RetifsFs {
         let path = tree::join(&dir, name);
         self.refresh(false);
         let Some((id, _)) = self.file_id(&path) else { return reply.error(libc::ENOENT) };
-        match self.call(Request::RecordDelete { ns: self.ns.clone(), id }) {
+        // In an album's folder: out of the album, the record stays.
+        let request = match self.tree.album_of(&path) {
+            Some(album) => {
+                let attrs = self.records.get(&id).map(|r| r.attrs.clone()).unwrap_or_default();
+                let (attrs, unset) = tree::without_album(&attrs, album);
+                Request::RecordSet { ns: self.ns.clone(), id, attrs, unset, data: None }
+            }
+            None => Request::RecordDelete { ns: self.ns.clone(), id },
+        };
+        match self.call(request) {
             Ok(_) => {
                 self.refresh(true);
                 reply.ok()
@@ -634,6 +643,10 @@ impl Filesystem for RetifsFs {
         let (from, to) = (tree::join(&d1, n1), tree::join(&d2, n2));
         if let Err(e) = self.writable_path(&to) {
             return reply.error(e);
+        }
+        // An album's entry is the file elsewhere: moved there, not here.
+        if from.starts_with(&format!("{}/", tree::ALBUMS_DIR)) || from == tree::ALBUMS_DIR {
+            return reply.error(libc::EPERM);
         }
         self.refresh(true);
         let moving = self.tree.records_under(&from);

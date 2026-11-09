@@ -18,6 +18,15 @@ pub const KEYS: &[&str] = &["mime", "width", "height", "taken", "camera", "geo",
 /// The marker of the content attributes were taken from.
 pub const MARKER: &str = "extracted";
 
+/// Which content attributes were taken from (the [`MARKER`]'s value): a
+/// short hash of its read-cap (the cap itself is a key, and stays out of
+/// attributes). Whoever describes content at once (a phone importing a
+/// photo) writes it too, so the extractor doesn't do it again.
+pub fn marker(cap: &str) -> String {
+    use sha2::Digest;
+    sha2::Sha256::digest(cap.as_bytes())[..8].iter().map(|b| format!("{b:02x}")).collect()
+}
+
 /// Whether `key` is one extractors write.
 pub fn is_extracted_key(key: &str) -> bool {
     key == MARKER || KEYS.iter().any(|k| if k.ends_with('.') || k.ends_with(':') { key.starts_with(k) } else { key == *k })

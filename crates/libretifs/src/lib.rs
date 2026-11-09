@@ -7,8 +7,8 @@
 //! - Windows: a named pipe `\\.\pipe\retifs-<hash of the store path>`
 //!
 //! Framing: `u32_be length ‖ msgpack(Envelope)`. Bulk data travels inside the
-//! message for now (≤ [`MAX_FRAME`]); fd passing and per-app capabilities
-//! (ADR-0004) come later.
+//! message (≤ [`MAX_FRAME`]), or as an open file (`PutFd`, Unix). Each app
+//! has its own token and scope (`Hello`, `AppAdd`; ADR-0004).
 //!
 //! This crate has no Reticulum dependency, so applications stay small.
 
@@ -275,6 +275,11 @@ pub enum Request {
         #[serde(default)]
         mine: bool,
     },
+    /// Deletes library `ns` everywhere (ADR-0034): every record is deleted
+    /// and a `retifs.deleted` record written, so each member's node, seeing
+    /// it from one who held `grant`, hides the library, lets its content go
+    /// and leaves it after a while. Only a member holding `grant`.
+    NsDelete { ns: String },
     /// Joins another's namespace under local name `ns`, with a new writer key
     /// (returned; the creator grants it). `from`: other members' nodes.
     /// `lazy`: hold only the records needed (those changed since the
@@ -879,12 +884,32 @@ impl std::fmt::Display for ClientError {
 
 impl std::error::Error for ClientError {}
 
+/// Opens the daemon's pipe. While it takes one connection and makes the
+/// next instance, a client finds every instance busy (ERROR_PIPE_BUSY):
+/// tried again a moment later, for up to two seconds, as Tokio's named pipe
+/// documentation does. Several programs connecting at once (the utility,
+/// Cloud Files, an app) failed with "All pipe instances are busy".
+#[cfg(windows)]
+async fn open_pipe(at: &str) -> io::Result<Stream> {
+    const ERROR_PIPE_BUSY: i32 = 231;
+    let mut tries = 0;
+    loop {
+        match tokio::net::windows::named_pipe::ClientOptions::new().open(at) {
+            Err(e) if e.raw_os_error() == Some(ERROR_PIPE_BUSY) && tries < 40 => {
+                tries += 1;
+                tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+            }
+            r => return r,
+        }
+    }
+}
+
 impl Client {
     /// Connects to the daemon owning `store` (see [`default_store_dir`]).
     pub async fn connect(store: &Path) -> Result<Self, ClientError> {
         let at = endpoint(store);
         #[cfg(windows)]
-        let stream = tokio::net::windows::named_pipe::ClientOptions::new().open(&at);
+        let stream = open_pipe(&at).await;
         #[cfg(not(windows))]
         let stream = tokio::net::UnixStream::connect(&at).await;
         let stream = stream.map_err(|e| ClientError::NotRunning(at, e))?;
@@ -896,7 +921,7 @@ impl Client {
     pub async fn connect_app(store: &Path, token: &str) -> Result<Self, ClientError> {
         let at = app_endpoint(store);
         #[cfg(windows)]
-        let stream = tokio::net::windows::named_pipe::ClientOptions::new().open(&at);
+        let stream = open_pipe(&at).await;
         #[cfg(not(windows))]
         let stream = tokio::net::UnixStream::connect(&at).await;
         let stream = stream.map_err(|e| ClientError::NotRunning(at, e))?;
@@ -914,6 +939,25 @@ impl Client {
     pub fn via(mut self, node: Option<String>) -> Self {
         self.via = node;
         self
+    }
+
+    /// A connection opened elsewhere and handed over: on Android an app gets
+    /// one from the retifs app's access service, already past `Hello` (it
+    /// can't reach the socket in another app's files). Call inside a runtime.
+    #[cfg(unix)]
+    pub fn from_std(stream: std::os::unix::net::UnixStream) -> Result<Self, ClientError> {
+        stream.set_nonblocking(true).map_err(ClientError::Io)?;
+        let stream = tokio::net::UnixStream::from_std(stream).map_err(ClientError::Io)?;
+        Ok(Client { stream, next_id: 1, via: None })
+    }
+
+    /// The connection itself, to hand to another process (the other end of
+    /// [`from_std`](Self::from_std)).
+    #[cfg(unix)]
+    pub fn into_std(self) -> Result<std::os::unix::net::UnixStream, ClientError> {
+        let s = self.stream.into_std().map_err(ClientError::Io)?;
+        s.set_nonblocking(false).map_err(ClientError::Io)?;
+        Ok(s)
     }
 
     /// Stores an open file by handing the daemon its descriptor (Unix): the

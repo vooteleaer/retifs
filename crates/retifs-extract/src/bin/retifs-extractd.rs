@@ -15,8 +15,7 @@ use std::path::PathBuf;
 use std::time::Duration;
 
 use libretifs::{AttrValue, Client, RecordView, Request, Response, TxStep};
-use retifs_extract::{extract, is_extracted_key, thumbnails, MARKER};
-use sha2::Digest;
+use retifs_extract::{extract, is_extracted_key, marker, thumbnails, MARKER};
 
 fn usage() -> ! {
     eprintln!("retifs-extractd [--store DIR] [--token-file FILE] [--via NODE] [--ns NS[,NS]] [--every SECS] [--once]");
@@ -117,12 +116,6 @@ impl Seek for Content<'_> {
 
 fn attr<'a>(r: &'a RecordView, key: &str) -> Option<&'a AttrValue> {
     r.attrs.iter().find(|(k, _)| k == key).map(|(_, v)| v)
-}
-
-/// Which content a record's attributes were taken from: a short hash of its
-/// read-cap (the cap itself is a key, and stays out of attributes).
-fn marker(cap: &str) -> String {
-    sha2::Sha256::digest(cap.as_bytes())[..8].iter().map(|b| format!("{b:02x}")).collect()
 }
 
 /// Brings one record's extracted attributes up to date. `Ok(false)`: they were.

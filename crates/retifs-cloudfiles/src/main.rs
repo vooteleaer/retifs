@@ -1,5 +1,7 @@
-//! `retifs-cloudfiles NS FOLDER`: a namespace as a Cloud Files sync root in
-//! Explorer (ADR-0002), through `retifsd`'s local API. Windows only.
+//! `retifs-cloudfiles --all [FOLDER]`: every library as a folder of one Cloud
+//! Files sync root in Explorer (ADR-0002), `%USERPROFILE%\retifs` unless
+//! told; `retifs-cloudfiles NS FOLDER`: one namespace as a sync root of its
+//! own. Through `retifsd`'s local API. Windows only.
 
 #[cfg_attr(not(windows), allow(dead_code))]
 mod names;
@@ -10,8 +12,9 @@ mod provider;
 mod share_menu;
 
 fn usage() -> ! {
+    eprintln!("retifs-cloudfiles [--store DIR] [--wait SECONDS] --all [FOLDER]   (every library, a folder each; default %USERPROFILE%\\retifs)");
     eprintln!("retifs-cloudfiles [--store DIR] [--wait SECONDS] [--via NODE] NS FOLDER");
-    eprintln!("retifs-cloudfiles --unregister NS");
+    eprintln!("retifs-cloudfiles --unregister NS | --unregister --all");
     eprintln!("retifs-cloudfiles [--store DIR] --share PATH");
     eprintln!("retifs-cloudfiles [--store DIR] --share-in NS ROOT PATH   (what Explorer's Share with retifs runs)");
     eprintln!("  --wait: how long opening a file waits for content that isn't here yet (default 30)");
@@ -23,6 +26,7 @@ fn main() {
     let mut store = libretifs::default_store_dir();
     let mut wait = std::time::Duration::from_secs(30);
     let mut unregister = false;
+    let mut all = false;
     let mut share = None;
     let mut within = None;
     let mut via = None;
@@ -33,6 +37,7 @@ fn main() {
             "--store" => store = args.next().unwrap_or_else(|| usage()).into(),
             "--wait" => wait = std::time::Duration::from_secs(args.next().and_then(|v| v.parse().ok()).unwrap_or_else(|| usage())),
             "--unregister" => unregister = true,
+            "--all" => all = true,
             "--via" => via = Some(args.next().unwrap_or_else(|| usage())),
             "--share" => share = Some(args.next().unwrap_or_else(|| usage())),
             "--share-in" => {
@@ -45,10 +50,14 @@ fn main() {
             _ => rest.push(a),
         }
     }
-    let result = match (unregister, rest.as_slice()) {
+    let home = || std::path::PathBuf::from(std::env::var_os("USERPROFILE").unwrap_or_default()).join("retifs");
+    let result = match (unregister, all, rest.as_slice()) {
         _ if share.is_some() => run_share(&store, std::path::Path::new(share.as_deref().unwrap()), within, via),
-        (true, [ns]) => run_unregister(ns),
-        (false, [ns, folder]) => run(&store, ns, std::path::Path::new(folder), wait, via),
+        (true, true, []) => run_unregister_all(),
+        (true, false, [ns]) => run_unregister(ns),
+        (false, true, []) if via.is_none() => run_all(&store, &home(), wait),
+        (false, true, [folder]) if via.is_none() => run_all(&store, std::path::Path::new(folder), wait),
+        (false, false, [ns, folder]) => run(&store, ns, std::path::Path::new(folder), wait, via),
         _ => usage(),
     };
     if let Err(e) = result {
@@ -63,8 +72,18 @@ fn run(store: &std::path::Path, ns: &str, folder: &std::path::Path, wait: std::t
 }
 
 #[cfg(windows)]
+fn run_all(store: &std::path::Path, folder: &std::path::Path, wait: std::time::Duration) -> Result<(), String> {
+    provider::run_all(store, folder, wait)
+}
+
+#[cfg(windows)]
 fn run_unregister(ns: &str) -> Result<(), String> {
     provider::unregister(ns)
+}
+
+#[cfg(windows)]
+fn run_unregister_all() -> Result<(), String> {
+    provider::unregister(provider::ALL)
 }
 
 #[cfg(windows)]
@@ -83,6 +102,16 @@ fn run(_: &std::path::Path, _: &str, _: &std::path::Path, _: std::time::Duration
 }
 
 #[cfg(not(windows))]
+fn run_all(_: &std::path::Path, _: &std::path::Path, _: std::time::Duration) -> Result<(), String> {
+    run(std::path::Path::new(""), "", std::path::Path::new(""), Default::default(), None)
+}
+
+#[cfg(not(windows))]
 fn run_unregister(_: &str) -> Result<(), String> {
-    run(std::path::Path::new(""), "", std::path::Path::new(""), Default::default())
+    run(std::path::Path::new(""), "", std::path::Path::new(""), Default::default(), None)
+}
+
+#[cfg(not(windows))]
+fn run_unregister_all() -> Result<(), String> {
+    run_unregister("")
 }

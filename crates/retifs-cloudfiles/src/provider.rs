@@ -43,6 +43,9 @@ const PIECE: u64 = 4 << 20;
 const PIECE_VIA: u64 = 512 << 10;
 /// Without a change notice, the namespace is re-read at least this often.
 const RESYNC: Duration = Duration::from_secs(60);
+/// How long a read waits for content that keeps arriving (one wait each
+/// time; it gives up sooner once nothing more comes).
+const MAX_FETCH: Duration = Duration::from_secs(600);
 /// After a delete or rename in the folder, its records are left alone this
 /// long, so the folder isn't put back the way it was before the daemon has
 /// the change.
@@ -158,6 +161,9 @@ struct Shared {
     read_only: AtomicBool,
     /// Local files already reported as not written (read-only).
     refused: Mutex<HashSet<PathBuf>>,
+    /// The folder as the last round planned it: what a folder opened for
+    /// the first time is filled from (`fetch_placeholders`).
+    plan: Mutex<Option<Arc<names::Plan>>>,
 }
 
 impl Shared {
@@ -176,6 +182,13 @@ impl Shared {
         for id in ids {
             s.insert(id, now);
         }
+    }
+
+    /// The album `abs` is (in) under `/Albums`, as the last round planned it.
+    fn album_at(&self, abs: &Path) -> Option<String> {
+        let rel = abs.strip_prefix(&self.root).ok()?.to_string_lossy().to_lowercase();
+        let plan = self.plan.lock().unwrap().clone()?;
+        plan.index.get(&rel).and_then(|&i| plan.wants[i].album.clone())
     }
 
     fn is_settling(&self, id: &str) -> bool {
@@ -232,6 +245,7 @@ fn collect_ids(abs: &Path, out: &mut Vec<String>) {
         out.push(id.to_string());
     }
     if abs.is_dir()
+        && !is_partial(abs)
         && let Ok(entries) = fs::read_dir(abs)
     {
         for e in entries.flatten() {
@@ -240,16 +254,59 @@ fn collect_ids(abs: &Path, out: &mut Vec<String>) {
     }
 }
 
+/// Whether `dir` is a placeholder folder Windows hasn't asked the contents
+/// of yet (it will, when the folder is first opened). Read from the folder's
+/// own directory entry, so asking doesn't open it.
+fn is_partial(dir: &Path) -> bool {
+    use windows::Win32::Storage::CloudFilters::{CfGetPlaceholderStateFromAttributeTag, CF_PLACEHOLDER_STATE_PARTIAL};
+    use windows::Win32::Storage::FileSystem::{FindClose, FindFirstFileW, WIN32_FIND_DATAW};
+    let mut data = WIN32_FIND_DATAW::default();
+    let Ok(found) = (unsafe { FindFirstFileW(&windows::core::HSTRING::from(dir.as_os_str()), &mut data) }) else { return false };
+    unsafe { _ = FindClose(found) };
+    // dwReserved0 is the reparse tag when the entry is a reparse point.
+    let state = unsafe { CfGetPlaceholderStateFromAttributeTag(data.dwFileAttributes, data.dwReserved0) };
+    state.0 & CF_PLACEHOLDER_STATE_PARTIAL.0 != 0
+}
+
+/// `w`'s placeholder: a file, or a folder whose contents come when it's opened.
+fn placeholder(w: &Want) -> PlaceholderFile {
+    let name = Path::new(&w.rel).file_name().unwrap_or_default().to_os_string();
+    PlaceholderFile::new(name).metadata(metadata(w)).blob(w.blob.clone()).mark_in_sync()
+}
+
 /// A new file's place: its path and name, or in Unfiled only its name (a
-/// record there has no path).
+/// record there has no path). One put in an album's folder is in that album.
 fn place(path: &str, name: &str) -> Vec<(String, AttrValue)> {
     let name = ("name".to_string(), AttrValue::Str(name.to_string()));
+    if let Some(album) = path.strip_prefix(&format!("{}/", tree::ALBUMS_DIR)).and_then(|rest| rest.split_once('/')).map(|(album, _)| album) {
+        return vec![name, (tree::ALBUM.to_string(), AttrValue::Str(album.to_string()))];
+    }
     if tree::is_virtual(path) { vec![name] } else { vec![("path".to_string(), AttrValue::Str(path.to_string())), name] }
+}
+
+/// The libraries a sync root holds: one (a namespace's own root), or every
+/// library of this node's, each a folder of the root (`--all`).
+struct Libraries {
+    root: PathBuf,
+    all: bool,
+    by_name: Mutex<HashMap<String, Arc<Shared>>>,
+}
+
+impl Libraries {
+    /// The library `abs` is in.
+    fn of(&self, abs: &Path) -> Option<Arc<Shared>> {
+        self.by_name.lock().unwrap().values().find(|s| abs.starts_with(&s.root)).cloned()
+    }
+
+    /// A library's own folder (`--all`), which only the libraries decide.
+    fn is_library_folder(&self, abs: &Path) -> bool {
+        self.all && abs.parent() == Some(self.root.as_path())
+    }
 }
 
 /// The callbacks Windows makes into the provider, on threads of its own.
 struct Filter {
-    shared: Arc<Shared>,
+    libraries: Arc<Libraries>,
     wait: Duration,
     daemon: Mutex<Daemon>,
 }
@@ -261,18 +318,40 @@ fn own_process(req: &CfRequest) -> bool {
 impl Filter {
     /// Whether to refuse a delete or rename: the folder is read-only and it's
     /// one of retifs' files (the user's own local files there may go).
-    fn refuse(&self, req: &CfRequest) -> bool {
-        self.shared.read_only.load(Ordering::Relaxed) && names::parse_identity(req.file_blob()).is_some_and(|(id, _)| !id.is_empty())
+    fn refuse(&self, shared: &Shared, req: &CfRequest) -> bool {
+        shared.read_only.load(Ordering::Relaxed) && names::parse_identity(req.file_blob()).is_some_and(|(id, _)| !id.is_empty())
+    }
+
+    /// Takes the record behind an album's entry out of `album` (an album's
+    /// folder itself goes once its entries have).
+    fn take_out_of_album(&self, shared: &Shared, abs: &Path, blob: &[u8], album: &str) {
+        let Some((id, _)) = names::parse_identity(blob).filter(|(id, _)| !id.is_empty()) else { return };
+        let mut d = self.daemon.lock().unwrap();
+        let attrs = match d.records_of(Request::RecordGet { ns: shared.ns.clone(), id: id.to_string() }) {
+            Ok(rs) => rs.into_iter().next().map(|r| r.attrs).unwrap_or_default(),
+            Err(e) => {
+                eprintln!("retifs-cloudfiles: {}: {e}", abs.display());
+                return;
+            }
+        };
+        let (set, unset) = tree::without_album(&attrs, album);
+        if set.is_empty() && unset.is_empty() {
+            return;
+        }
+        match d.call(Request::RecordSet { ns: shared.ns.clone(), id: id.to_string(), attrs: set, unset, data: None }) {
+            Ok(_) => eprintln!("retifs-cloudfiles: {}: taken out of album {album}", abs.display()),
+            Err(e) => eprintln!("retifs-cloudfiles: {}: taking it out of album {album}: {e}", abs.display()),
+        }
     }
 
     /// Deletes the records at and below `abs` (a delete in the folder, or a
     /// move out of it, e.g. to the Recycle Bin).
-    fn delete_records(&self, abs: &Path, blob: &[u8]) {
+    fn delete_records(&self, shared: &Shared, abs: &Path, blob: &[u8]) {
         if is_scratch(abs) {
             return; // the old version, put aside during a save (below)
         }
-        let Some(path) = self.shared.tree_path(abs) else { return };
-        let ns = &self.shared.ns;
+        let Some(path) = shared.tree_path(abs) else { return };
+        let ns = &shared.ns;
         let mut d = self.daemon.lock().unwrap();
         let mut ids: Vec<String> = match d.records_under(ns, &path) {
             Ok(rs) => rs.into_iter().map(|r| r.id).collect(),
@@ -304,7 +383,7 @@ impl Filter {
     /// Moves the records at and below `from` to `to`, in one commit. Out of
     /// Unfiled, a file gets a path (found by its identity: it has none);
     /// into it, its path goes.
-    fn move_records(&self, from: &Path, to: &Path, blob: &[u8]) {
+    fn move_records(&self, shared: &Shared, from: &Path, to: &Path, blob: &[u8]) {
         if is_scratch(to) {
             // How Office and many editors save: the file is renamed aside, the
             // new one written under its name, the old one deleted. The record
@@ -312,8 +391,8 @@ impl Filter {
             // with its ID, history and attributes.
             return;
         }
-        let (Some(old), Some(new)) = (self.shared.tree_path(from), self.shared.tree_path(to)) else { return };
-        let ns = &self.shared.ns;
+        let (Some(old), Some(new)) = (shared.tree_path(from), shared.tree_path(to)) else { return };
+        let ns = &shared.ns;
         let mut d = self.daemon.lock().unwrap();
         let records = match d.records_under(ns, &old) {
             Ok(rs) => rs,
@@ -362,34 +441,101 @@ impl SyncFilter for Filter {
     fn fetch_data(&self, req: CfRequest, ticket: ticket::FetchData, info: info::FetchData) -> CResult<()> {
         let (_, cap) = names::parse_identity(req.file_blob()).ok_or(CloudErrorKind::InvalidRequest)?;
         let cap = cap.ok_or(CloudErrorKind::Unsuccessful)?;
+        let ns = self.libraries.of(&req.path()).ok_or(CloudErrorKind::Unsuccessful)?.ns.clone();
         let size = req.file_size();
         let range = info.required_file_range();
         eprintln!("retifs-cloudfiles: {}: fetching {}..{} of {size} for process {}", req.path().display(), range.start, range.end, req.process().id());
         let end = (range.end.div_ceil(4096) * 4096).min(size);
+        // A failure goes back with the range asked for: without it Windows
+        // takes the answer as invalid, and the read waits out its timeout.
+        let fail = |kind: CloudErrorKind| {
+            if let Err(e) = ticket.fail_range(range.start..end, kind) {
+                eprintln!("retifs-cloudfiles: {}: failing the read: {e}", req.path().display());
+            }
+            Ok(())
+        };
+        // Chunks of the file here: while they keep coming (a new photo still
+        // on its way from the phone) the read waits on, past one wait.
+        let local = || match self.daemon.lock().unwrap().call(Request::Status { cap: cap.to_string() }) {
+            Ok(Response::Status(s)) => s.local_chunks,
+            _ => 0,
+        };
+        let started = Instant::now();
+        let mut have = local();
         let mut pos = range.start;
         let piece = self.daemon.lock().unwrap().piece();
         while pos < end {
             let len = piece.min(end - pos);
-            let read = Request::ReadRange { cap: cap.to_string(), ns: Some(self.shared.ns.clone()), offset: pos, len, wait_ms: self.wait.as_millis() as u64 };
-            let data = match self.daemon.lock().unwrap().call(read) {
+            let read = Request::ReadRange { cap: cap.to_string(), ns: Some(ns.clone()), offset: pos, len, wait_ms: self.wait.as_millis() as u64 };
+            let answer = self.daemon.lock().unwrap().call(read);
+            let data = match answer {
                 Ok(Response::Range { data }) if data.len() as u64 == len => data,
-                Ok(_) => {
-                    eprintln!("retifs-cloudfiles: {}: short read at {pos}", req.path().display());
-                    return Err(CloudErrorKind::Unsuccessful);
-                }
-                Err(e) => {
-                    eprintln!("retifs-cloudfiles: {}: {e}", req.path().display());
-                    return Err(CloudErrorKind::NetworkUnavailable);
+                other => {
+                    let now = local();
+                    if now > have && started.elapsed() < MAX_FETCH {
+                        // Telling Windows how far it is keeps it from giving up on the read.
+                        have = now;
+                        _ = ticket.report_progress(size, pos);
+                        continue;
+                    }
+                    let path = req.path();
+                    return match other {
+                        Err(e) => {
+                            eprintln!("retifs-cloudfiles: {}: {e}", path.display());
+                            fail(CloudErrorKind::NetworkUnavailable)
+                        }
+                        Ok(_) => {
+                            eprintln!("retifs-cloudfiles: {}: short read at {pos}", path.display());
+                            fail(CloudErrorKind::Unsuccessful)
+                        }
+                    };
                 }
             };
-            ticket.write_at(&data, pos).map_err(|e| {
+            if let Err(e) = ticket.write_at(&data, pos) {
                 eprintln!("retifs-cloudfiles: {}: {e}", req.path().display());
-                CloudErrorKind::Unsuccessful
-            })?;
+                return fail(CloudErrorKind::Unsuccessful);
+            }
             pos += len;
             _ = ticket.report_progress(size, pos);
         }
         Ok(())
+    }
+
+    /// A folder opened for the first time: its entries, from the library's
+    /// last plan (or a fresh one, before the first round has made it).
+    fn fetch_placeholders(&self, req: CfRequest, ticket: ticket::FetchPlaceholders, _info: info::FetchPlaceholders) -> CResult<()> {
+        let dir = req.path();
+        let Some(shared) = self.libraries.of(&dir) else {
+            // The root of every library: their folders are made as they come.
+            return ticket.pass_with_placeholder(&mut []).map_err(|_| CloudErrorKind::Unsuccessful);
+        };
+        let plan = shared.plan.lock().unwrap().clone();
+        let plan = match plan {
+            Some(p) => p,
+            None => {
+                let records = self.daemon.lock().unwrap().query(&shared.ns, Vec::new()).map_err(|e| {
+                    eprintln!("retifs-cloudfiles: {}: {e}", dir.display());
+                    CloudErrorKind::NetworkUnavailable
+                })?;
+                let p = Arc::new(names::plan(&Tree::build(&records), &records, &shared.device));
+                *shared.plan.lock().unwrap() = Some(p.clone());
+                p
+            }
+        };
+        // Nothing is asked of the folder itself here: anything opened in it
+        // would wait for this very filling. (Its entries can't be on disk yet:
+        // the sync loop makes none in a folder not filled.)
+        let rel = dir.strip_prefix(&shared.root).map(|r| r.to_string_lossy().to_lowercase()).unwrap_or_default();
+        let mut wants: Vec<&Want> = plan.wants.iter().filter(|w| w.rel.rsplit_once('\\').map_or("", |(parent, _)| parent).to_lowercase() == rel).collect();
+        // Folders first: a folder after a file in the same filling is made
+        // unreadable (ERROR_CLOUD_FILE_METADATA_CORRUPT, never filled itself).
+        wants.sort_by_key(|w| !w.dir);
+        let mut entries: Vec<PlaceholderFile> = wants.into_iter().map(placeholder).collect();
+        eprintln!("retifs-cloudfiles: {}: filling ({} entries) for process {}", dir.display(), entries.len(), req.process().id());
+        ticket.pass_with_placeholder(&mut entries).map_err(|e| {
+            eprintln!("retifs-cloudfiles: {}: filling: {e}", dir.display());
+            CloudErrorKind::Unsuccessful
+        })
     }
 
     fn dehydrate(&self, _req: CfRequest, ticket: ticket::Dehydrate, _info: info::Dehydrate) -> CResult<()> {
@@ -399,34 +545,60 @@ impl SyncFilter for Filter {
     }
 
     fn delete(&self, req: CfRequest, ticket: ticket::Delete, _info: info::Delete) -> CResult<()> {
-        if !own_process(&req) && self.refuse(&req) {
-            eprintln!("retifs-cloudfiles: {}: not deleted: {} is read-only here", req.path().display(), self.shared.ns);
-            return Err(CloudErrorKind::ReadOnlyVolume);
-        }
+        let path = req.path();
         if !own_process(&req) {
-            self.shared.settle(&req.path());
+            if self.libraries.is_library_folder(&path) {
+                // Leaving a library is the library's business, not a folder's.
+                eprintln!("retifs-cloudfiles: {}: not deleted: a library's folder goes when the library does", path.display());
+                return Err(CloudErrorKind::AccessDenied);
+            }
+            if let Some(shared) = self.libraries.of(&path) {
+                if self.refuse(&shared, &req) {
+                    eprintln!("retifs-cloudfiles: {}: not deleted: {} is read-only here", path.display(), shared.ns);
+                    return Err(CloudErrorKind::ReadOnlyVolume);
+                }
+                shared.settle(&path);
+            }
         }
         ticket.pass().map_err(|_| CloudErrorKind::Unsuccessful)
     }
 
     fn deleted(&self, req: CfRequest, _info: info::Deleted) {
-        if !own_process(&req) {
-            self.delete_records(&req.path(), req.file_blob());
+        let path = req.path();
+        if !own_process(&req)
+            && let Some(shared) = self.libraries.of(&path)
+        {
+            match shared.album_at(&path) {
+                // In an album's folder: out of the album, the record stays.
+                Some(album) => self.take_out_of_album(&shared, &path, req.file_blob(), &album),
+                None => self.delete_records(&shared, &path, req.file_blob()),
+            }
         }
     }
 
     fn rename(&self, req: CfRequest, ticket: ticket::Rename, info: info::Rename) -> CResult<()> {
-        if !own_process(&req) && self.refuse(&req) {
-            eprintln!("retifs-cloudfiles: {}: not moved: {} is read-only here", req.path().display(), self.shared.ns);
-            return Err(CloudErrorKind::ReadOnlyVolume);
-        }
+        let path = req.path();
         if !own_process(&req) {
-            let path = req.path();
-            self.shared.settle(&path);
-            if !info.target_in_scope() {
-                // Out of the folder (the Recycle Bin, another drive): gone from
-                // retifs. Done now; nothing is heard of it afterwards.
-                self.delete_records(&path, req.file_blob());
+            if self.libraries.is_library_folder(&path) {
+                eprintln!("retifs-cloudfiles: {}: not moved: a library's folder has the library's name", path.display());
+                return Err(CloudErrorKind::AccessDenied);
+            }
+            if let Some(shared) = self.libraries.of(&path) {
+                if self.refuse(&shared, &req) {
+                    eprintln!("retifs-cloudfiles: {}: not moved: {} is read-only here", path.display(), shared.ns);
+                    return Err(CloudErrorKind::ReadOnlyVolume);
+                }
+                if info.target_in_scope() && !info.target_path().starts_with(&shared.root) {
+                    // Records belong to one library: copied across, not moved.
+                    eprintln!("retifs-cloudfiles: {}: not moved: to another library, copy it instead", path.display());
+                    return Err(CloudErrorKind::AccessDenied);
+                }
+                shared.settle(&path);
+                if !info.target_in_scope() {
+                    // Out of the folder (the Recycle Bin, another drive): gone from
+                    // retifs. Done now; nothing is heard of it afterwards.
+                    self.delete_records(&shared, &path, req.file_blob());
+                }
             }
         }
         ticket.pass().map_err(|_| CloudErrorKind::Unsuccessful)
@@ -437,8 +609,10 @@ impl SyncFilter for Filter {
             return;
         }
         let (from, to) = (info.source_path(), req.path());
-        if from.starts_with(&self.shared.root) && to.starts_with(&self.shared.root) {
-            self.move_records(&from, &to, req.file_blob());
+        if let Some(shared) = self.libraries.of(&from)
+            && to.starts_with(&shared.root)
+        {
+            self.move_records(&shared, &from, &to, req.file_blob());
         }
     }
 
@@ -449,6 +623,7 @@ impl SyncFilter for Filter {
             if path.is_dir() {
                 continue;
             }
+            let Some(shared) = self.libraries.of(&path) else { continue };
             let Some(info) = Placeholder::open(&path).ok().and_then(|ph| info(&ph)) else { continue };
             let Some((id, _)) = names::parse_identity(&info.blob) else { continue };
             let id = id.to_string();
@@ -458,23 +633,23 @@ impl SyncFilter for Filter {
                 _ => continue,
             };
             let hydrated = info.on_disk > 0;
-            let has = self.shared.kept.lock().unwrap().get(&id).copied().unwrap_or(false);
+            let has = shared.kept.lock().unwrap().get(&id).copied().unwrap_or(false);
             if want != has {
                 // The user's choice (the sync loop's own pins match the tag).
                 // Until the daemon has the new tag, the loop would put the old
                 // pin state back.
-                self.shared.pinned_here(&id);
-                let key = format!("keep:{}", self.shared.device);
+                shared.pinned_here(&id);
+                let key = format!("keep:{}", shared.device);
                 let (attrs, unset) = if want { (vec![(key, AttrValue::Bool(true))], vec![]) } else { (vec![], vec![key]) };
-                match self.daemon.lock().unwrap().call(Request::RecordSet { ns: self.shared.ns.clone(), id: id.clone(), attrs, unset, data: None }) {
+                match self.daemon.lock().unwrap().call(Request::RecordSet { ns: shared.ns.clone(), id: id.clone(), attrs, unset, data: None }) {
                     Ok(_) => {
-                        self.shared.kept.lock().unwrap().insert(id, want);
+                        shared.kept.lock().unwrap().insert(id, want);
                     }
                     Err(e) => eprintln!("retifs-cloudfiles: {}: keep: {e}", path.display()),
                 }
             }
             if want {
-                _ = self.shared.hydrate.lock().unwrap().send(path);
+                _ = shared.hydrate.lock().unwrap().send(path);
             } else if hydrated
                 && let Err(e) = open_rw(&path).and_then(|mut ph| ph.update(UpdateOptions::default().dehydrate(), None).map(|_| ()))
             {
@@ -489,15 +664,18 @@ fn root_id(ns: &str) -> Result<SyncRootId, String> {
     Ok(SyncRootIdBuilder::new(PROVIDER).user_security_id(sid).account_name(ns.replace('!', "_")).build())
 }
 
-fn register(id: &SyncRootId, ns: &str, folder: &Path) -> Result<(), String> {
-    if id.is_registered().map_err(|e| e.to_string())? {
+fn register(id: &SyncRootId, display_name: &str, folder: &Path) -> Result<(), String> {
+    // A root registered before folders were filled on demand is registered
+    // again (in place: its placeholders stay).
+    if id.is_registered().map_err(|e| e.to_string())? && id.info().is_ok_and(|i| matches!(i.population_type(), PopulationType::Full)) {
         return Ok(());
     }
     let info = SyncRootInfo::default()
-        .with_display_name(format!("retifs {ns}"))
+        .with_display_name(display_name)
         .with_path(folder)
         .map_err(|e| format!("{}: {e}", folder.display()))?
-        .with_population_type(PopulationType::AlwaysFull)
+        // Folders are filled when first opened (`fetch_placeholders`).
+        .with_population_type(PopulationType::Full)
         .with_hydration_type(HydrationType::Full)
         .with_protection_mode(ProtectionMode::Personal)
         .with_allow_pinning(true)
@@ -530,84 +708,260 @@ fn metadata(w: &Want) -> Metadata {
     base.written(t).changed(t).created(t).accessed(t)
 }
 
-pub fn run(store: &Path, ns: &str, folder: &Path, wait: Duration, via: Option<String>) -> Result<(), String> {
+/// A sync root's folder, as Windows wants it named (no `\\?\`), made first.
+fn root_folder(folder: &Path) -> Result<PathBuf, String> {
     if !cloud_filter::root::is_supported().unwrap_or(false) {
         return Err("Cloud Files isn't supported on this Windows".into());
     }
     fs::create_dir_all(folder).map_err(|e| format!("{}: {e}", folder.display()))?;
     let folder = fs::canonicalize(folder).map_err(|e| e.to_string())?;
-    let folder = PathBuf::from(folder.to_string_lossy().trim_start_matches(r"\\?\"));
-    let mut daemon = Daemon::new(store, via.clone())?;
-    let device = daemon.device(ns)?;
-    let id = root_id(ns)?;
-    register(&id, ns, &folder)?;
-    if let Err(e) = crate::share_menu::register(ns, &folder, via.as_deref()) {
-        eprintln!("retifs-cloudfiles: {e}");
-    }
+    Ok(PathBuf::from(folder.to_string_lossy().trim_start_matches(r"\\?\")))
+}
 
-    let (hydrate_tx, hydrate_rx) = mpsc::channel::<PathBuf>();
-    let shared = Arc::new(Shared {
-        ns: ns.to_string(),
-        device: device.clone(),
-        root: folder.clone(),
-        kept: Mutex::new(HashMap::new()),
-        settling: Mutex::new(HashMap::new()),
-        pinning: Mutex::new(HashMap::new()),
-        hydrate: Mutex::new(hydrate_tx.clone()),
-        read_only: AtomicBool::new(false),
-        refused: Mutex::new(HashSet::new()),
-    });
-    let filter = Filter { shared: shared.clone(), wait, daemon: Mutex::new(Daemon::new(store, via.clone())?) };
+/// `NS FOLDER`: one namespace as a sync root of its own.
+pub fn run(store: &Path, ns: &str, folder: &Path, wait: Duration, via: Option<String>) -> Result<(), String> {
+    let folder = root_folder(folder)?;
+    let lib = Library::open(store, ns, &folder, via.clone())?;
+    register(&root_id(ns)?, &format!("retifs {ns}"), &folder)?;
+    let libraries = Arc::new(Libraries { root: folder.clone(), all: false, by_name: Mutex::new(HashMap::from([(ns.to_string(), lib.shared.clone())])) });
+    let filter = Filter { libraries, wait, daemon: Mutex::new(Daemon::new(store, via.clone())?) };
     let _connection = Session::new().connect(&folder, filter).map_err(|e| format!("connecting the sync root: {e}"))?;
-    // Pinned files are hydrated one at a time, off the callback threads.
-    std::thread::spawn(move || {
-        for path in hydrate_rx {
-            if let Ok(mut ph) = Placeholder::open(&path)
-                && let Err(e) = ph.hydrate(..)
-            {
-                eprintln!("retifs-cloudfiles: {}: keeping: {e}", path.display());
+    let on = via.as_deref().map(|v| format!(" on node {v}")).unwrap_or_default();
+    eprintln!("retifs-cloudfiles: namespace {ns}{on} in {} (device {}; Ctrl+C stops it, --unregister removes it)", folder.display(), lib.shared.device);
+    let (wake_tx, wake) = mpsc::channel();
+    serve(lib, store, via, Arc::new(AtomicBool::new(false)), wake_tx, wake);
+    Ok(())
+}
+
+/// The account name of the sync root that holds every library (`--all`),
+/// apart from a namespace's own (`@` keeps it from being a library's name).
+pub const ALL: &str = "@libraries";
+/// How often the libraries are asked for (the local API has no watch of them).
+const LIBRARIES_EVERY: Duration = Duration::from_secs(5);
+
+/// `--all FOLDER`: every library of this node's in one sync root, a folder
+/// each, made when the library comes (joined, made) and removed when it
+/// goes (left), once nothing in it is waiting to be written to retifs.
+pub fn run_all(store: &Path, folder: &Path, wait: Duration) -> Result<(), String> {
+    let root = root_folder(folder)?;
+    register(&root_id(ALL)?, "retifs", &root)?;
+    let libraries = Arc::new(Libraries { root: root.clone(), all: true, by_name: Mutex::new(HashMap::new()) });
+    let filter = Filter { libraries: libraries.clone(), wait, daemon: Mutex::new(Daemon::new(store, None)?) };
+    let _connection = Session::new().connect(&root, filter).map_err(|e| format!("connecting the sync root: {e}"))?;
+    eprintln!("retifs-cloudfiles: every library in {} (Ctrl+C stops it, --unregister --all removes it)", root.display());
+
+    struct Serving {
+        stop: Arc<AtomicBool>,
+        wake: mpsc::Sender<()>,
+        thread: std::thread::JoinHandle<()>,
+    }
+    let mut serving: HashMap<String, Serving> = HashMap::new();
+    let mut daemon = Daemon::new(store, None)?;
+    let mut said = HashSet::new();
+    let mut not_shown = HashSet::new();
+    loop {
+        // While retifsd can't be asked, the folders stay as they are.
+        let names = match daemon.call(Request::Namespaces) {
+            Ok(Response::Names { names }) => names,
+            Ok(_) => Vec::new(),
+            Err(e) => {
+                if said.insert(e.clone()) {
+                    eprintln!("retifs-cloudfiles: {e}");
+                }
+                std::thread::sleep(LIBRARIES_EVERY);
+                continue;
+            }
+        };
+        said.clear();
+        let here: HashSet<String> = names
+            .into_iter()
+            .filter(|n| n != libretifs::saved::ME)
+            .filter(|n| {
+                let ok = !n.contains('/') && names::windows_rel(&format!("/{n}")).is_some();
+                if !ok && not_shown.insert(n.clone()) {
+                    eprintln!("retifs-cloudfiles: library {n}: not a Windows folder name; not shown");
+                }
+                ok
+            })
+            .collect();
+        let new: Vec<String> = here.iter().filter(|n| !serving.contains_key(*n)).cloned().collect();
+        for ns in &new {
+            let opened = library_folder(&root, ns).and_then(|dir| Library::open(store, ns, &dir, None));
+            match opened {
+                Ok(lib) => {
+                    libraries.by_name.lock().unwrap().insert(ns.clone(), lib.shared.clone());
+                    let stop = Arc::new(AtomicBool::new(false));
+                    let (wake_tx, wake) = mpsc::channel();
+                    let (store, s, w) = (store.to_path_buf(), stop.clone(), wake_tx.clone());
+                    let thread = std::thread::spawn(move || serve(lib, &store, None, s, w, wake));
+                    serving.insert(ns.clone(), Serving { stop, wake: wake_tx, thread });
+                    eprintln!("retifs-cloudfiles: library {ns} in {}", root.join(ns).display());
+                }
+                Err(e) => eprintln!("retifs-cloudfiles: library {ns}: {e}"),
             }
         }
-    });
-    let on = via.as_deref().map(|v| format!(" on node {v}")).unwrap_or_default();
-    eprintln!("retifs-cloudfiles: namespace {ns}{on} in {} (device {device}; Ctrl+C stops it, --unregister removes it)", folder.display());
+        let gone: Vec<String> = serving.keys().filter(|n| !here.contains(*n)).cloned().collect();
+        for ns in gone {
+            let s = serving.remove(&ns).unwrap();
+            s.stop.store(true, Ordering::Relaxed);
+            _ = s.wake.send(());
+            _ = s.thread.join();
+            libraries.by_name.lock().unwrap().remove(&ns);
+            crate::share_menu::unregister(&ns);
+            eprintln!("retifs-cloudfiles: library {ns} is gone");
+        }
+        // Folders of libraries gone, now or while this didn't run (not of one
+        // that's here but couldn't be opened this round: it's tried again).
+        if let Ok(entries) = fs::read_dir(&root) {
+            for e in entries.flatten() {
+                let name = e.file_name().to_string_lossy().into_owned();
+                if !here.contains(&name) && !serving.contains_key(&name) && e.path().is_dir() && Placeholder::open(e.path()).ok().and_then(|ph| info(&ph)).is_some() {
+                    remove_library_folder(&e.path());
+                }
+            }
+        }
+        std::thread::sleep(LIBRARIES_EVERY);
+    }
+}
 
-    let (wake_tx, wake) = mpsc::channel();
-    watch(store, ns, via, wake_tx.clone());
-    watch_folder(&folder, wake_tx);
-    let sync = Sync { shared: shared.clone(), hydrate: hydrate_tx };
-    // Whether the folder is read-only (None: not set yet); checked each round,
-    // so a grant that arrives makes it writable.
-    let mut applied: Option<bool> = None;
-    loop {
-        match daemon.may_write(ns) {
-            Ok(may) if applied != Some(!may) => match set_read_only(&folder, !may) {
+/// Library `ns`'s folder in the root: made as a placeholder, or an existing
+/// folder of that name made one.
+fn library_folder(root: &Path, ns: &str) -> Result<PathBuf, String> {
+    let dir = root.join(ns);
+    match fs::symlink_metadata(&dir) {
+        Err(_) => {
+            // Its contents come when it's first opened.
+            let ph = PlaceholderFile::new(ns).metadata(Metadata::directory()).blob(names::identity("", None)).mark_in_sync();
+            ph.create::<&Path>(root).map_err(|e| format!("{}: {e}", dir.display()))?;
+        }
+        Ok(m) if !m.is_dir() => return Err(format!("{}: a file is where the library's folder goes", dir.display())),
+        Ok(_) if Placeholder::open(&dir).ok().and_then(|ph| info(&ph)).is_some() => {}
+        Ok(_) => {
+            // Read-only from before (the sync root registered again): the
+            // round makes it read-only again.
+            set_read_only(&dir, false)?;
+            let f = fs::OpenOptions::new().read(true).access_mode(GENERIC_READ_WRITE).custom_flags(FILE_FLAG_BACKUP_SEMANTICS).open(&dir).map_err(|e| format!("{}: {e}", dir.display()))?;
+            Placeholder::from(f).convert_to_placeholder(ConvertOptions::default().blob(names::identity("", None)).mark_in_sync(), None).map_err(|e| format!("{}: {e}", dir.display()))?;
+        }
+    }
+    Ok(dir)
+}
+
+/// Removes a gone library's folder, unless something in it isn't in retifs
+/// (a file written here and not yet stored, one of the user's own): then
+/// it stays, and says so (once a run).
+fn remove_library_folder(dir: &Path) {
+    fn all_in_sync(abs: &Path) -> bool {
+        let in_sync = Placeholder::open(abs).ok().and_then(|ph| info(&ph)).is_some_and(|i| i.in_sync);
+        // A folder never opened has nothing in it but what retifs would put there.
+        in_sync && (!abs.is_dir() || is_partial(abs) || fs::read_dir(abs).is_ok_and(|es| es.flatten().all(|e| all_in_sync(&e.path()))))
+    }
+    static KEPT: Mutex<Option<HashSet<PathBuf>>> = Mutex::new(None);
+    if !all_in_sync(dir) {
+        if KEPT.lock().unwrap().get_or_insert_with(HashSet::new).insert(dir.to_path_buf()) {
+            eprintln!("retifs-cloudfiles: {}: its library is gone, but it has files that aren't in retifs; left as it is", dir.display());
+        }
+        return;
+    }
+    match fs::remove_dir_all(dir) {
+        Ok(()) => eprintln!("retifs-cloudfiles: {}: removed (its library is gone)", dir.display()),
+        Err(e) => eprintln!("retifs-cloudfiles: {}: removing: {e}", dir.display()),
+    }
+}
+
+/// A namespace's folder made to match it, a round at a time (`serve`).
+struct Library {
+    shared: Arc<Shared>,
+    sync: Sync,
+    daemon: Daemon,
+    /// Whether the folder is read-only (None: not set yet); checked each
+    /// round, so a grant that arrives makes it writable.
+    applied: Option<bool>,
+    /// Entries already said to be left out (once a run, not every round).
+    said_skipped: Mutex<HashSet<String>>,
+}
+
+impl Library {
+    /// Library `ns` in `folder` (which is there): "Share with retifs" for
+    /// it, and its hydration thread (which ends with the library).
+    fn open(store: &Path, ns: &str, folder: &Path, via: Option<String>) -> Result<Library, String> {
+        let mut daemon = Daemon::new(store, via.clone())?;
+        let device = daemon.device(ns)?;
+        if let Err(e) = crate::share_menu::register(ns, folder, via.as_deref()) {
+            eprintln!("retifs-cloudfiles: {e}");
+        }
+        let (hydrate_tx, hydrate_rx) = mpsc::channel::<PathBuf>();
+        let shared = Arc::new(Shared {
+            ns: ns.to_string(),
+            device,
+            root: folder.to_path_buf(),
+            kept: Mutex::new(HashMap::new()),
+            settling: Mutex::new(HashMap::new()),
+            pinning: Mutex::new(HashMap::new()),
+            hydrate: Mutex::new(hydrate_tx.clone()),
+            read_only: AtomicBool::new(false),
+            refused: Mutex::new(HashSet::new()),
+            plan: Mutex::new(None),
+        });
+        // Pinned files are hydrated one at a time, off the callback threads.
+        std::thread::spawn(move || {
+            for path in hydrate_rx {
+                if let Ok(mut ph) = Placeholder::open(&path)
+                    && let Err(e) = ph.hydrate(..)
+                {
+                    eprintln!("retifs-cloudfiles: {}: keeping: {e}", path.display());
+                }
+            }
+        });
+        Ok(Library { sync: Sync { shared: shared.clone(), hydrate: hydrate_tx, changed: Mutex::new(HashSet::new()) }, shared, daemon, applied: None, said_skipped: Mutex::new(HashSet::new()) })
+    }
+
+    fn round(&mut self) {
+        let (ns, folder, device) = (self.shared.ns.clone(), self.shared.root.clone(), self.shared.device.clone());
+        match self.daemon.may_write(&ns) {
+            Ok(may) if self.applied != Some(!may) => match set_read_only(&folder, !may) {
                 Ok(()) => {
-                    shared.read_only.store(!may, Ordering::Relaxed);
+                    self.shared.read_only.store(!may, Ordering::Relaxed);
                     if !may {
                         eprintln!("retifs-cloudfiles: {ns} is read-only here (this node has no write grant): the folder is read-only");
-                    } else if applied.is_some() {
+                    } else if self.applied.is_some() {
                         eprintln!("retifs-cloudfiles: {ns} may be written here now: the folder is writable");
-                        shared.refused.lock().unwrap().clear();
+                        self.shared.refused.lock().unwrap().clear();
                     }
-                    applied = Some(!may);
+                    self.applied = Some(!may);
                 }
                 Err(e) => eprintln!("retifs-cloudfiles: making the folder {}: {e}", if may { "writable" } else { "read-only" }),
             },
             Ok(_) => {}
             Err(e) => eprintln!("retifs-cloudfiles: {e}"),
         }
-        match daemon.query(ns, Vec::new()) {
+        match self.daemon.query(&ns, Vec::new()) {
             Ok(records) => {
-                *shared.kept.lock().unwrap() = records.iter().map(|r| (r.id.clone(), is_kept(r, &device))).collect();
-                let plan = names::plan(&Tree::build(&records), &records, &device);
-                for p in &plan.skipped {
-                    eprintln!("retifs-cloudfiles: {p}: not a Windows name, or another entry has it in other case; not shown");
+                *self.shared.kept.lock().unwrap() = records.iter().map(|r| (r.id.clone(), is_kept(r, &device))).collect();
+                let plan = Arc::new(names::plan(&Tree::build(&records), &records, &device));
+                let mut said = self.said_skipped.lock().unwrap();
+                for p in plan.skipped.iter().filter(|p| said.insert((*p).clone())) {
+                    eprintln!("retifs-cloudfiles: {ns}: {p}: not a Windows name, or another entry has it in other case; not shown");
                 }
-                sync.reconcile(&plan, &mut daemon);
+                drop(said);
+                *self.shared.plan.lock().unwrap() = Some(plan.clone());
+                self.sync.reconcile(&plan, &mut self.daemon);
+                for dir in self.sync.changed.lock().unwrap().drain() {
+                    shell_updated(&dir);
+                }
             }
             Err(e) => eprintln!("retifs-cloudfiles: {e}"),
         }
+    }
+}
+
+/// Runs a library's rounds until `stop`: on every change to the namespace
+/// or the folder (`wake`), and at least every `RESYNC`.
+fn serve(mut lib: Library, store: &Path, via: Option<String>, stop: Arc<AtomicBool>, wake_tx: mpsc::Sender<()>, wake: mpsc::Receiver<()>) {
+    watch(store, &lib.shared.ns, via, wake_tx.clone(), stop.clone());
+    watch_folder(&lib.shared.root, wake_tx);
+    while !stop.load(Ordering::Relaxed) {
+        lib.round();
         _ = wake.recv_timeout(RESYNC);
         // Let a burst of changes (a copy of many files) end first.
         std::thread::sleep(Duration::from_millis(500));
@@ -622,18 +976,21 @@ fn is_kept(r: &RecordView, device: &str) -> bool {
 
 /// Watches namespace `ns` on a thread of its own (a long poll on the local
 /// API) and wakes the sync loop on every change.
-fn watch(store: &Path, ns: &str, via: Option<String>, wake: mpsc::Sender<()>) {
+fn watch(store: &Path, ns: &str, via: Option<String>, wake: mpsc::Sender<()>, stop: Arc<AtomicBool>) {
     let (store, ns) = (store.to_path_buf(), ns.to_string());
     std::thread::spawn(move || {
         let Ok(rt) = tokio::runtime::Builder::new_current_thread().enable_all().build() else { return };
         let mut since = 0;
-        loop {
+        while !stop.load(Ordering::Relaxed) {
             let Ok(client) = rt.block_on(Client::connect(&store)) else {
                 std::thread::sleep(Duration::from_secs(5)); // the daemon restarting
                 continue;
             };
             let mut client = client.via(via.clone());
             while let Ok(Response::Changed { count }) = rt.block_on(client.call(Request::Watch { ns: ns.clone(), since, timeout_ms: 30_000 })) {
+                if stop.load(Ordering::Relaxed) {
+                    return;
+                }
                 if count != since {
                     since = count;
                     if wake.send(()).is_err() {
@@ -678,6 +1035,9 @@ fn watch_folder(root: &Path, wake: mpsc::Sender<()>) {
 struct Sync {
     shared: Arc<Shared>,
     hydrate: mpsc::Sender<PathBuf>,
+    /// Folders whose entries this round added, replaced or removed: Explorer
+    /// is told after it, or an open window shows them only on F5.
+    changed: Mutex<HashSet<PathBuf>>,
 }
 
 impl Sync {
@@ -697,11 +1057,18 @@ impl Sync {
         true
     }
 
+    /// Makes what's on disk match `plan`. A folder Windows hasn't asked for
+    /// the contents of yet is left alone: it's filled when first opened
+    /// (`fetch_placeholders`), so a large library costs nothing until it's
+    /// looked at.
     fn reconcile(&self, plan: &names::Plan, d: &mut Daemon) {
         self.sweep(Path::new(""), plan, d);
+        let mut open: HashMap<PathBuf, bool> = HashMap::new();
         for w in &plan.wants {
             let abs = self.root().join(&w.rel);
-            if fs::symlink_metadata(&abs).is_err() && !names::parse_identity(&w.blob).is_some_and(|(id, _)| self.shared.is_settling(id)) {
+            let parent = abs.parent().unwrap_or(self.root()).to_path_buf();
+            let filled = *open.entry(parent.clone()).or_insert_with(|| parent.is_dir() && !is_partial(&parent));
+            if filled && fs::symlink_metadata(&abs).is_err_and(|e| e.kind() == std::io::ErrorKind::NotFound) && !names::parse_identity(&w.blob).is_some_and(|(id, _)| self.shared.is_settling(id)) {
                 self.create(&abs, w, false);
             }
         }
@@ -717,12 +1084,8 @@ impl Sync {
             return;
         }
         let parent = abs.parent().unwrap_or(self.root());
-        let name = abs.file_name().unwrap_or_default();
-        let mut ph = PlaceholderFile::new(name).metadata(metadata(w)).blob(w.blob.clone()).mark_in_sync();
-        if w.dir {
-            ph = ph.has_no_children(); // all placeholders are made up front
-        }
-        match ph.create::<&Path>(parent) {
+        self.changed.lock().unwrap().insert(parent.to_path_buf());
+        match placeholder(w).create::<&Path>(parent) {
             Ok(_) => self.pin(abs, w),
             Err(e) => eprintln!("retifs-cloudfiles: {}: {e}", abs.display()),
         }
@@ -732,7 +1095,12 @@ impl Sync {
     /// changed, removes those whose record is gone (directories once empty),
     /// writes new and changed files to retifs. True if `rel` is now empty.
     fn sweep(&self, rel: &Path, plan: &names::Plan, d: &mut Daemon) -> bool {
-        let Ok(entries) = fs::read_dir(self.root().join(rel)) else { return false };
+        let dir = self.root().join(rel);
+        // Not opened yet: reading it would make Windows fill it.
+        if is_partial(&dir) {
+            return false;
+        }
+        let Ok(entries) = fs::read_dir(&dir) else { return false };
         let mut empty = true;
         for e in entries.flatten() {
             let r = rel.join(e.file_name());
@@ -764,6 +1132,7 @@ impl Sync {
                         // Its record is gone (or it was implied by files
                         // that are gone): removed once empty.
                         if self.sweep(&r, plan, d) {
+                            self.changed.lock().unwrap().insert(dir.clone());
                             if let Err(err) = fs::remove_dir(&abs) {
                                 empty = false;
                                 eprintln!("retifs-cloudfiles: {}: {err}", abs.display());
@@ -780,6 +1149,7 @@ impl Sync {
                 },
                 None => match state {
                     Some(i) if i.in_sync => {
+                        self.changed.lock().unwrap().insert(dir.clone());
                         if let Err(err) = fs::remove_file(&abs) {
                             empty = false;
                             eprintln!("retifs-cloudfiles: {}: {err}", abs.display());
@@ -823,7 +1193,10 @@ impl Sync {
             }
             return;
         }
-        if state.blob != w.blob {
+        // A size unlike the content's: made when records with thumbnails
+        // said the size of all their blocks (before 2026-11-09), and every
+        // read past the content's end failed.
+        if state.blob != w.blob || fs::metadata(abs).is_ok_and(|m| m.len() != w.size) {
             self.create(abs, w, true);
             return;
         }
@@ -926,6 +1299,10 @@ impl Sync {
             return;
         }
         let Some(path) = self.shared.tree_path(abs) else { return };
+        // No directory record can be there (a file put in one is, as in its parent).
+        if tree::is_virtual(&path) {
+            return;
+        }
         let name = path.rsplit('/').next().unwrap_or("").to_string();
         let attrs = vec![("path".into(), AttrValue::Str(path.clone())), ("type".into(), AttrValue::Str(libretifs::types::DIRECTORY.into())), ("name".into(), AttrValue::Str(name))];
         let record = match d.records_of(Request::RecordCreate { ns: self.shared.ns.clone(), attrs, data: None }) {
@@ -986,6 +1363,15 @@ fn is_local(abs: &Path) -> bool {
 /// A placeholder opened for changing it: an ordinary Win32 handle with write
 /// access (`CfUpdatePlaceholder` refuses the protected handles of
 /// `Placeholder::options().write_access()`). Opening doesn't hydrate it.
+/// Tells Explorer that `dir`'s entries changed, so an open window shows
+/// them now (placeholders made or removed under it don't always do).
+fn shell_updated(dir: &Path) {
+    use std::os::windows::ffi::OsStrExt;
+    use windows::Win32::UI::Shell::{SHChangeNotify, SHCNE_UPDATEDIR, SHCNF_FLUSHNOWAIT, SHCNF_PATHW};
+    let wide: Vec<u16> = dir.as_os_str().encode_wide().chain(std::iter::once(0)).collect();
+    unsafe { SHChangeNotify(SHCNE_UPDATEDIR, SHCNF_PATHW | SHCNF_FLUSHNOWAIT, Some(wide.as_ptr().cast()), None) };
+}
+
 fn open_rw(abs: &Path) -> windows::core::Result<Placeholder> {
     fs::OpenOptions::new().write(true).open(abs).map(Placeholder::from).map_err(|e| {
         windows::core::Error::from(windows::core::HRESULT::from_win32(e.raw_os_error().unwrap_or(0) as u32))

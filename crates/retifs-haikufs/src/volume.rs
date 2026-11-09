@@ -356,7 +356,16 @@ impl Volume {
             Some(Node::Dir { .. }) => return Err(Fail::IsDir),
             None => return Err(Fail::NotFound),
         };
-        self.act(Request::RecordDelete { ns: self.mount.ns.clone(), id })?;
+        // In an album's folder: out of the album, the record stays.
+        let request = match self.tree.album_of(&p) {
+            Some(album) => {
+                let attrs = self.records.get(&id).map(|r| r.attrs.clone()).unwrap_or_default();
+                let (attrs, unset) = tree::without_album(&attrs, album);
+                Request::RecordSet { ns: self.mount.ns.clone(), id, attrs, unset, data: None }
+            }
+            None => Request::RecordDelete { ns: self.mount.ns.clone(), id },
+        };
+        self.act(request)?;
         self.refresh(true).map_err(|_| Fail::Io)?;
         Ok(self.ino(&p))
     }
@@ -685,7 +694,8 @@ impl Volume {
             .tree
             .nodes
             .iter()
-            .filter(|(p, _)| !matches!(p.as_str(), "/" | tree::QUERY_DIR | tree::RECORDS_DIR))
+            // Each record once: an album's entry is the file elsewhere.
+            .filter(|(p, _)| !matches!(p.as_str(), "/" | tree::QUERY_DIR | tree::RECORDS_DIR | tree::ALBUMS_DIR) && !self.tree.albums.contains_key(p.as_str()))
             .filter(|(_, n)| candidates.as_ref().is_none_or(|c| n.id().is_some_and(|id| c.contains(id))))
             .filter(|(p, n)| {
                 let view = NodeView { name: tree::name(p), kind: n, record: n.id().and_then(|id| self.records.get(id)) };

@@ -60,6 +60,16 @@ impl PrnsTransport {
         self.request_path(peer).await
     }
 
+    /// How many hops the route to `peer` now has, if one is known.
+    pub async fn hops(&self, peer: DestinationHash) -> Option<u8> {
+        self.handle.route(peer).await.map(|r| r.hops)
+    }
+
+    /// Closes `link` (a request still on it fails).
+    pub fn close(&self, link: LinkId) {
+        let _ = self.handle.close_link(link);
+    }
+
     /// Asks the network for a fresh path (e.g. after a link over a known route failed).
     pub async fn request_path(&self, peer: DestinationHash) -> Result<(), String> {
         let deadline = tokio::time::Instant::now() + self.path_timeout;

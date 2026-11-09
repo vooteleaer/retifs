@@ -21,6 +21,9 @@ pub struct Want {
     /// Kept on this device (`keep` or `keep:<device>` is true): pinned,
     /// "Always keep on this device" in Explorer.
     pub keep: bool,
+    /// Under `/Albums`: the album (an entry's, or its folder's). Deleting
+    /// one there takes it out of the album.
+    pub album: Option<String>,
 }
 
 /// Every placeholder the folder should hold, parents before children, keyed
@@ -71,10 +74,11 @@ pub fn plan(tree: &Tree, records: &[RecordView], device: &str) -> Plan {
             }
             continue;
         }
+        let album = tree.album_of(path).map(str::to_string);
         let want = match node {
-            Node::Dir { id } => Want { blob: identity(id.as_deref().unwrap_or(""), None), rel, dir: true, size: 0, mtime_ms: None, keep: false },
+            Node::Dir { id } => Want { blob: identity(id.as_deref().unwrap_or(""), None), rel, dir: true, size: 0, mtime_ms: None, keep: false, album },
             Node::File { id, cap, size, mtime_ms } => {
-                Want { blob: identity(id, cap.as_deref()), rel, dir: false, size: *size, mtime_ms: *mtime_ms, keep: kept.contains(id.as_str()) }
+                Want { blob: identity(id, cap.as_deref()), rel, dir: false, size: *size, mtime_ms: *mtime_ms, keep: kept.contains(id.as_str()), album }
             }
         };
         plan.index.insert(key, plan.wants.len());

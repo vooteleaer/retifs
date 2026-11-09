@@ -1,8 +1,14 @@
 [workspace]
 resolver = "2"
 members = ["crates/retifs-core", "crates/retifs-store", "crates/retifs-net", "crates/retifs-node", "crates/libretifs", "crates/retifs-fuse", "crates/retifs-tree", "crates/retifs-cloudfiles", "crates/retifs-gateway", "crates/retifs-extract", "crates/retifs-haikufs"]
+exclude = ["vendor"]
 
 [workspace.package]
 edition = "2024"
 license = "MIT"
 repository = "https://github.com/vooteleaer/retifs"
+
+# cloud-filter 0.0.6 with its callbacks not panicking when failing a
+# request Windows already dropped (that aborted retifs-cloudfiles).
+[patch.crates-io]
+cloud-filter = { path = "vendor/cloud-filter" }

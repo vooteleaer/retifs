@@ -75,7 +75,7 @@ fn usage() -> ! {
          retifs [--store DIR] rec add NS [KEY=VALUE]... [--file PATH] | rec set NS ID [KEY=VALUE]... [--unset KEY]... [--file PATH]\n\
          retifs [--store DIR] rec get NS ID | rec rm NS ID | rec history NS ID | rec import NS < LINES | query NS[,NS]... [--at VERSION] [TERM]... [--search NODE]\n\
          retifs [--store DIR] ns address NS | ns info NS | ns checkpoint NS | ns search NS | ns verify NS | ns keep NS all|rules | ns copies NS [N] | ns join NAME ADDRESS [--from NODE]... [--lazy]\n\
-         retifs [--store DIR] ns announce NS [off] [--name LABEL] [--about TEXT] | heard | ns leave NS [--mine]\n\
+         retifs [--store DIR] ns announce NS [off] [--name LABEL] [--about TEXT] | heard | ns leave NS [--mine] | ns delete NS --yes\n\
          retifs [--store DIR] ns grant NS WRITER [--grant] [--from NODE]... | ns revoke NS WRITER\n\
          retifs [--store DIR] share create NAME --from NS [TERM]... [--id ID]... [--omit KEY]... [--qr] | share list NS | share rm NS ID\n\
          retifs [--store DIR] ns link NS [--name LABEL] [--q TERMS] [--qr] | open LINK [--as NAME] | ns join NAME LINK\n\
@@ -520,6 +520,18 @@ async fn main() {
                     let req = libretifs::Request::NsLeave { ns: ns.clone(), mine: rest.iter().any(|a| a == "--mine") };
                     match client.call(req).await.unwrap_or_else(|e| fail(e)) {
                         libretifs::Response::Done => println!("left {ns}: gone from view now; its data is removed in the background"),
+                        libretifs::Response::Error { message } => fail(message),
+                        _ => fail("unexpected response"),
+                    }
+                    return;
+                }
+                "delete" => {
+                    // Everywhere: every member's node lets it go (ADR-0034).
+                    if !rest.iter().any(|a| a == "--yes") {
+                        fail(format!("this deletes {ns} on every member's device, not only here; repeat with --yes (to drop only this device's copy: ns leave)"));
+                    }
+                    match client.call(libretifs::Request::NsDelete { ns: ns.clone() }).await.unwrap_or_else(|e| fail(e)) {
+                        libretifs::Response::Done => println!("deleted {ns}: every member's node lets it go as it hears of it"),
                         libretifs::Response::Error { message } => fail(message),
                         _ => fail("unexpected response"),
                     }

@@ -726,8 +726,9 @@ struct Daemon {
     node_hex: String,
     /// Wakes the seeker (new want).
     wake: Arc<Notify>,
-    /// Open links the seeker reuses, per peer.
-    links: Mutex<HashMap<PeerId, LinkId>>,
+    /// Open links the seeker reuses, per peer, with the hops of the route
+    /// each was made over.
+    links: Mutex<HashMap<PeerId, (LinkId, Option<u8>)>>,
     /// One item per `have`/`get` request when seeking: slower, but a peer
     /// can't group chunks by request (ADR-0010, request-pattern leaks).
     private_requests: bool,
@@ -805,6 +806,9 @@ struct Daemon {
     /// removed in the background by `leaver`.
     leaving: Mutex<std::collections::BTreeSet<String>>,
     leave_wake: Notify,
+    /// Libraries deleted by a member holding `grant` (`deleted` in the
+    /// store): hidden, and left once their grace is over (ADR-0034).
+    deleted: Mutex<std::collections::BTreeMap<String, u64>>,
 }
 
 /// A storage-less node's RAM folder for its slabs: in /dev/shm where there is
@@ -952,10 +956,11 @@ fn mark_leaving(d: &Daemon, ns: &str, on: bool) -> Result<(), String> {
     std::fs::write(d.store.root().join("leaving"), text).map_err(|e| e.to_string())
 }
 
-/// The libraries here, less those being left.
+/// The libraries here, less those being left or deleted.
 fn visible_namespaces(d: &Daemon) -> Result<Vec<String>, String> {
     let leaving = d.leaving.lock().unwrap().clone();
-    Ok(d.store.namespaces().map_err(|e| e.to_string())?.into_iter().filter(|n| !leaving.contains(n)).collect())
+    let deleted = d.deleted.lock().unwrap().clone();
+    Ok(d.store.namespaces().map_err(|e| e.to_string())?.into_iter().filter(|n| !leaving.contains(n) && !deleted.contains_key(n)).collect())
 }
 
 /// A stalled daemon, found and named: a heartbeat from the async runtime,
@@ -1048,8 +1053,68 @@ async fn leaver(d: Arc<Daemon>) {
 /// Leaving's work: the files only this library used are forgotten, then its
 /// records, index, keys and settings go.
 fn leave_now(d: &Daemon, ns: &str) -> Result<usize, String> {
+    let n = forget_files_of(d, ns, true)?;
+    // Joined again meanwhile: the leave is off, the library stays.
+    if !d.leaving.lock().unwrap().contains(ns) {
+        return Ok(0);
+    }
+    d.store.leave_namespace(ns).map_err(|e| e.to_string())?;
+    d.ns_cache.lock().unwrap().remove(ns);
+    d.ns_seeking.lock().unwrap().remove(ns);
+    d.changes.lock().unwrap().remove(ns);
+    d.deleted.lock().unwrap().remove(ns);
+    save_deleted(d);
+    Ok(n)
+}
+
+/// A deleted library's grace: its members' nodes keep it (hidden, its
+/// content let go) this long, so a member that was away still hears of the
+/// deletion from them, then leave it (ADR-0034).
+const DELETED_GRACE_MS: u64 = 30 * 24 * 3600 * 1000;
+/// The record whose `type` says a library was deleted, counted only from a
+/// writer holding `grant` (ADR-0034).
+const LIBRARY_DELETED: &str = "retifs.deleted";
+
+/// Library `ns` was deleted (by this node or, as merged, by another member
+/// holding `grant`): hidden now, not announced, its content let go; left
+/// once [`DELETED_GRACE_MS`] has passed.
+fn library_deleted(d: &Daemon, ns: &str) {
+    if d.deleted.lock().unwrap().insert(ns.to_string(), now_ms()).is_some() {
+        return;
+    }
+    save_deleted(d);
+    let _ = set_announced(&d.store, ns, None);
+    d.lib_wake.notify_one();
+    // The checkpoint stays: the library is still synced (and served) until it's left.
+    match forget_files_of(d, ns, false) {
+        Ok(n) => println!("{ns} was deleted: hidden, {n} file(s) let go; left in {} days", DELETED_GRACE_MS / 86_400_000),
+        Err(e) => eprintln!("{ns} was deleted: {e}"),
+    }
+    ns_changed(d, ns);
+}
+
+fn save_deleted(d: &Daemon) {
+    let text: String = d.deleted.lock().unwrap().iter().map(|(n, t)| format!("{n}\t{t}\n")).collect();
+    let _ = std::fs::write(d.store.root().join("deleted"), text);
+}
+
+/// Deleted libraries whose grace is over: left.
+fn leave_deleted(d: &Daemon) {
+    let due: Vec<String> = d.deleted.lock().unwrap().iter().filter(|(_, t)| now_ms().saturating_sub(**t) > DELETED_GRACE_MS).map(|(n, _)| n.clone()).collect();
+    for ns in due {
+        if mark_leaving(d, &ns, true).is_ok() {
+            d.leave_wake.notify_one();
+        }
+    }
+}
+
+/// Forgets the files only library `ns` uses here (its records', what it
+/// keeps, and its checkpoint if `checkpoint`): how many.
+fn forget_files_of(d: &Daemon, ns: &str, checkpoint: bool) -> Result<usize, String> {
     let mut files: Vec<FileRef> = d.store.records(ns).map_err(|e| e.to_string())?.into_iter().flat_map(|r| r.blocks).collect();
-    files.extend(d.store.ns_checkpoint(ns).map_err(|e| e.to_string())?);
+    if checkpoint {
+        files.extend(d.store.ns_checkpoint(ns).map_err(|e| e.to_string())?);
+    }
     files.extend(d.store.ns_kept(ns).map_err(|e| e.to_string())?);
     let others: std::collections::HashSet<Cid> = d
         .store
@@ -1063,14 +1128,6 @@ fn leave_now(d: &Daemon, ns: &str) -> Result<usize, String> {
     let mut seen = std::collections::HashSet::new();
     files.retain(|f| !others.contains(&f.root) && seen.insert(f.root));
     forget_all(d, &files)?;
-    // Joined again meanwhile: the leave is off, the library stays.
-    if !d.leaving.lock().unwrap().contains(ns) {
-        return Ok(0);
-    }
-    d.store.leave_namespace(ns).map_err(|e| e.to_string())?;
-    d.ns_cache.lock().unwrap().remove(ns);
-    d.ns_seeking.lock().unwrap().remove(ns);
-    d.changes.lock().unwrap().remove(ns);
     Ok(files.len())
 }
 
@@ -1307,12 +1364,34 @@ impl std::io::Read for SessionReader {
 }
 
 impl Daemon {
-    /// A link to `peer`, reusing an open one.
+    /// A link to `peer`, reusing an open one, unless a shorter route to it
+    /// has come since: a link stays on the route it was made over (a link
+    /// made over a public backbone before the direct route was heard stays
+    /// that slow), so it's made again over the shorter one. The new link is
+    /// the same encrypted, authenticated RNS link; only its route changes.
     async fn link_to(&self, peer: &PeerId) -> Result<LinkId, String> {
-        if let Some(l) = self.links.lock().unwrap().get(peer).copied() {
-            return Ok(l);
-        }
         let dest = parse_destination(&hex(peer)).expect("peer id");
+        let open = self.links.lock().unwrap().get(peer).copied();
+        if let Some((link, made_over)) = open {
+            let now = self.transport.hops(dest).await;
+            match (made_over, now) {
+                (Some(then), Some(now)) if now < then => {
+                    eprintln!("link <{}>: a shorter route ({now} hop(s), was {then}): linking again over it", hex(peer));
+                    let still_ours = {
+                        let mut links = self.links.lock().unwrap();
+                        let ours = links.get(peer).is_some_and(|(l, _)| *l == link);
+                        if ours {
+                            links.remove(peer);
+                        }
+                        ours
+                    };
+                    if still_ours {
+                        self.transport.close(link);
+                    }
+                }
+                _ => return Ok(link),
+            }
+        }
         let mut t = self.transport.clone();
         t.path_timeout = Duration::from_secs(20);
         // The shared instance may know a path this client's own route table
@@ -1339,7 +1418,8 @@ impl Daemon {
             Err(e) => return Err(format!("{}; {e}", path.unwrap_err())),
         };
         let _ = self.store.record_rtt(peer, rtt);
-        self.links.lock().unwrap().insert(*peer, link);
+        let hops = self.transport.hops(dest).await;
+        self.links.lock().unwrap().insert(*peer, (link, hops));
         Ok(link)
     }
 
@@ -1489,6 +1569,13 @@ async fn serve(store: Arc<SlabStore>, identity: node::IdentitySecret, endpoint: 
             std::fs::read_to_string(store.root().join("leaving")).unwrap_or_default().lines().map(str::trim).filter(|l| !l.is_empty()).map(String::from).collect(),
         ),
         leave_wake: Notify::new(),
+        deleted: Mutex::new(
+            std::fs::read_to_string(store.root().join("deleted"))
+                .unwrap_or_default()
+                .lines()
+                .filter_map(|l| l.split_once('\t').and_then(|(n, t)| Some((n.to_string(), t.trim().parse().ok()?))))
+                .collect(),
+        ),
     });
     println!("attached to shared instance {of}");
     println!("serving {} chunks as retifs.node <{}>", store.len().unwrap_or(0), daemon.node_hex);
@@ -1578,6 +1665,29 @@ async fn serve(store: Arc<SlabStore>, identity: node::IdentitySecret, endpoint: 
             }
         }
     });
+    // Prns doesn't join a shared instance again once it went away (its
+    // Reticulum app restarted, or was killed on a phone): this node would be
+    // gone from the network until restarted. Watched here: joined again once
+    // it's back, links made over the old one dropped, and announced on it, so
+    // the network finds this node again.
+    let watcher = daemon.clone();
+    let watch_handle = handle.clone();
+    tokio::spawn(async move {
+        use personal_rns::interfaces::ConnectionState;
+        loop {
+            tokio::time::sleep(Duration::from_secs(5)).await;
+            let up = watch_handle.interfaces().iter().any(|i| !matches!(i.connection, ConnectionState::Disconnected | ConnectionState::Failed));
+            if up {
+                continue;
+            }
+            let Ok(of) = attach(&watch_handle).await else { continue };
+            println!("shared instance went away; joined it again ({of})");
+            watcher.links.lock().unwrap().clear();
+            let _ = watch_handle.issue(PrnsCommand::AnnounceNow(AnnounceNow { destination: dest_hash, target: AnnounceTarget::AllInterfaces, app_data: AnnounceAppData::Registered }));
+            watcher.lib_wake.notify_one();
+            watcher.ns_wake.notify_one();
+        }
+    });
     let daemon_for_nn = daemon.clone();
     tokio::spawn(local_api(endpoint, daemon.clone(), false));
     tokio::spawn(local_api(libretifs::app_endpoint(&args.store), daemon.clone(), true));
@@ -1604,11 +1714,13 @@ async fn serve(store: Arc<SlabStore>, identity: node::IdentitySecret, endpoint: 
     }
     let redeemer = daemon.clone();
     tokio::spawn(async move {
-        // Invitations whose creator's node wasn't reachable (ADR-0020).
+        // Invitations whose creator's node wasn't reachable (ADR-0020), and
+        // deleted libraries whose grace is over (ADR-0034).
         let mut tick = tokio::time::interval(Duration::from_secs(30));
         loop {
             tick.tick().await;
             redeem_pending(&redeemer).await;
+            leave_deleted(&redeemer);
         }
     });
     let watcher = daemon.clone();
@@ -1991,7 +2103,7 @@ async fn redeem_here(d: &Daemon, link_id: &[u8], body: &[u8]) -> Result<String, 
 /// a Link. Done: the invitation is forgotten; refused for good (used,
 /// expired, unknown): too; unreachable: kept for the next sync.
 async fn redeem_there(d: &Daemon, ns: &str, inv: &Invitation) -> Result<String, String> {
-    let (_, writer, _) = chains(d, ns, false)?;
+    let writer = own_writer(d, ns)?;
     let node: [u8; 16] = parse_peers(std::slice::from_ref(&d.node_hex))?[0];
     let link = d.link_to(&inv.node).await?;
     let body = invite::redeem_request(&inv.secret, link.as_bytes(), &writer, &node);
@@ -2467,7 +2579,7 @@ async fn handle(d: &Daemon, req: Request) -> Result<Response, String> {
                 return Err(format!("{ns} is a followed channel, not a joined library"));
             }
             let (creator, _) = d.store.ns_info(&ns).map_err(|e| e.to_string())?.ok_or_else(|| format!("no library {ns}"))?;
-            let (_, own, _) = chains(d, &ns, false)?;
+            let own = own_writer(d, &ns)?;
             if creator == own && !mine {
                 return Err(format!("{ns} was created here: leaving it deletes it unless someone else holds it (repeat with --mine)"));
             }
@@ -2476,6 +2588,22 @@ async fn handle(d: &Daemon, req: Request) -> Result<Response, String> {
             set_announced(&d.store, &ns, None)?;
             mark_leaving(d, &ns, true)?;
             d.leave_wake.notify_one();
+            Ok(Response::Done)
+        }
+        Request::NsDelete { ns } => {
+            writable(&ns)?;
+            let own = own_writer(d, &ns)?;
+            if !materialize(d, &ns)?.writers.get(&own).is_some_and(|r| r.contains(&Right::Grant)) {
+                return Err(format!("{ns} may be deleted only by a member who may invite (holds grant); this node may leave it"));
+            }
+            // Every record goes, and the word that the library did, in one commit.
+            let mut steps: Vec<TxStep> = d.store.records(&ns).map_err(|e| e.to_string())?.iter().map(|r| TxStep::Delete { id: hex(&r.id) }).collect();
+            steps.push(TxStep::Create {
+                attrs: vec![("type".into(), AttrValue::Str(LIBRARY_DELETED.into())), ("by".into(), AttrValue::Str(d.node_hex.clone()))],
+                data: None,
+            });
+            transaction(d, &ns, steps).await?;
+            library_deleted(d, &ns);
             Ok(Response::Done)
         }
         Request::HeardLibraries => {
@@ -2697,7 +2825,7 @@ async fn handle(d: &Daemon, req: Request) -> Result<Response, String> {
                 return Err(format!("no namespace {ns}"));
             }
             let merged = materialize(d, &ns)?;
-            let (_, own, _) = chains(d, &ns, false)?;
+            let own = own_writer(d, &ns)?;
             if !merged.writers.get(&own).is_some_and(|r| r.contains(&Right::Grant)) {
                 return Err(format!("this node may not grant in {ns}, so it can't invite"));
             }
@@ -2768,6 +2896,10 @@ async fn handle(d: &Daemon, req: Request) -> Result<Response, String> {
                 Box::pin(handle(d, join)).await?;
             } else if current_addr(d, &ns)?.writer != inv.ns.writer {
                 return Err(format!("{ns} here is another namespace"));
+            } else if !d.store.ns_peers(&ns).map_err(|e| e.to_string())?.contains(&inv.node) {
+                // Here already (joined before, perhaps through a node gone
+                // since): the inviting node is one to sync with too.
+                d.store.add_ns_peers(&ns, &[inv.node]).map_err(|e| e.to_string())?;
             }
             d.store.put_redeem(&ns, &inv).map_err(|e| e.to_string())?;
             match redeem_there(d, &ns, &inv).await {
@@ -3050,7 +3182,7 @@ fn ns_view(d: &Daemon, ns: &str) -> Result<NsView, String> {
 fn ns_view_made(d: &Daemon, ns: &str) -> Result<NsView, String> {
     let kept_files = d.store.ns_kept(ns).map_err(|e| e.to_string())?;
     let merged = materialize(d, ns)?;
-    let (_, own, _) = chains(d, ns, false)?;
+    let own = own_writer(d, ns)?;
     Ok(NsView {
         name: ns.to_string(),
         address: current_addr(d, ns)?.to_string(),
@@ -3071,7 +3203,7 @@ fn ns_view_made(d: &Daemon, ns: &str) -> Result<NsView, String> {
                 (hex(w), shown)
             })
             .collect(),
-        records: d.store.records(ns).map_err(|e| e.to_string())?.len(),
+        records: d.store.record_count(ns).map_err(|e| e.to_string())?,
         peers: d.store.ns_peers(ns).map_err(|e| e.to_string())?.len(),
         checkpoint: d.store.ns_checkpoint(ns).map_err(|e| e.to_string())?.map(|f| f.to_string()),
         device: d.device.clone(),
@@ -3092,10 +3224,18 @@ fn ns_view_made(d: &Daemon, ns: &str) -> Result<NsView, String> {
 /// from each other), merges, and seeks record content not held yet.
 async fn ns_sync(d: Arc<Daemon>) {
     let mut tick = tokio::time::interval(Duration::from_secs(30));
+    // What syncing and answering freed goes back to the system now and then
+    // (an allocator keeps freed memory otherwise).
+    let mut trimmed = Instant::now();
     loop {
         tokio::select! {
             _ = d.ns_wake.notified() => {}
             _ = tick.tick() => {}
+        }
+        if trimmed.elapsed() > Duration::from_secs(300) {
+            park_idle(&d);
+            trim_memory();
+            trimmed = Instant::now();
         }
         for ns in d.store.ns_names().unwrap_or_default() {
             // A storage-less node's own chain after a restart: back from the
@@ -3139,7 +3279,7 @@ fn own_node(d: &Daemon) -> Result<PeerId, String> {
 /// others.
 async fn member_nodes(d: &Daemon, ns: &str) -> Result<(), String> {
     let merged = materialize(d, ns)?;
-    let (_, own, _) = chains(d, ns, false)?;
+    let own = own_writer(d, ns)?;
     let node = own_node(d)?;
     if merged.writers.get(&own).is_some_and(|r| r.contains(&Right::Write)) && merged.nodes.get(&own) != Some(&node) {
         write_ops(d, ns, vec![Op::Node(node)]).await?;
@@ -3163,7 +3303,7 @@ async fn sync_ns(d: &Daemon, ns: &str) -> Result<(), String> {
     if peers.is_empty() {
         return Ok(());
     }
-    let (addr, own, _) = chains(d, ns, false)?;
+    let (addr, own) = (current_addr(d, ns)?, own_writer(d, ns)?);
     let ns_id = addr.ns_id();
     let mut changed = false;
     // A member that joined starts from the latest checkpoint of a writer
@@ -3178,6 +3318,8 @@ async fn sync_ns(d: &Daemon, ns: &str) -> Result<(), String> {
         (e.needs_history || e.fetch_whole, e.needs_history && !e.fetch_whole)
     });
     let mut floors = if whole { HashMap::new() } else { checkpoint_floors(d, ns) };
+    let lazy = d.store.ns_lazy(ns).map_err(|e| e.to_string())?;
+    let mut advanced = false;
     for peer in peers {
         let link = match d.link_to(&peer).await {
             Ok(l) => l,
@@ -3290,6 +3432,18 @@ async fn sync_ns(d: &Daemon, ns: &str) -> Result<(), String> {
             );
             changed = true;
         }
+        if lazy && !seeking && !advanced {
+            match advance_lazy(d, ns, link).await {
+                Ok(Some(file)) => {
+                    println!("ns {ns}: moved to a newer checkpoint, {file} (held lazily: none of its own)");
+                    advanced = true;
+                    changed = true;
+                    floors = checkpoint_floors(d, ns);
+                }
+                Ok(None) => {}
+                Err(e) => eprintln!("ns {ns}: newer checkpoint from <{}>: {e}", hex(&peer)),
+            }
+        }
     }
     if seeking {
         // Every grant holder known after this round has been searched: no
@@ -3318,6 +3472,7 @@ async fn sync_ns(d: &Daemon, ns: &str) -> Result<(), String> {
             e.needs_history = false;
             e.fetch_whole = false;
             e.state = None;
+            e.parked = None;
         }
         changed = true;
     }
@@ -3390,7 +3545,7 @@ fn verify_checkpoint(d: &Daemon, ns: &str) -> Result<(bool, String), String> {
         if chain[at].1 != f.commit {
             problem = Some("a frontier commit differs from the chain's");
         }
-        upto.insert(f.writer, chain[..=at].iter().map(|(_, _, c)| c.clone()).collect());
+        upto.insert(f.writer, chain[..=at].iter().map(|(_, _, c)| (**c).clone()).collect());
     }
     let commits: usize = upto.values().map(Vec::len).sum();
     if problem.is_none() {
@@ -3404,6 +3559,7 @@ fn verify_checkpoint(d: &Daemon, ns: &str) -> Result<(bool, String), String> {
             let entry = ns_entry(d, ns);
             let mut e = entry.lock().unwrap();
             e.state = None;
+            e.parked = None;
             e.floors.clear();
             Ok((false, format!("checkpoint {file} does NOT match the history ({p}); dropped, rebuilding from the history")))
         }
@@ -3551,6 +3707,71 @@ async fn install_checkpoint(d: &Daemon, ns: &str, link: LinkId, file: &FileRef) 
     Ok(())
 }
 
+/// Moves a lazily held library to a newer checkpoint that a grant holder
+/// named in its chain (ADR-0018). A lazy member makes no checkpoint of its
+/// own (it doesn't hold the whole state), so without this the chains since
+/// the one it joined from grow without end, all of them in memory (the
+/// phone's eesti-kohad: 560 commits, 1.6 million operations). Taken once
+/// `CHECKPOINT_EVERY` commits have come since, never one behind the current
+/// for any writer. The creator's is preferred, then the latest named.
+async fn advance_lazy(d: &Daemon, ns: &str, link: LinkId) -> Result<Option<FileRef>, String> {
+    // None: joined before any was named, the state built from every commit,
+    // so whole: `materialize` makes this node's own first one instead.
+    let Some(current) = d.store.ns_checkpoint(ns).map_err(|e| e.to_string())? else { return Ok(None) };
+    let chains = ns_entry_get(d, ns).map(|e| e.lock().unwrap().chains.clone()).unwrap_or_default();
+    if chains.values().map(Vec::len).sum::<usize>() < CHECKPOINT_EVERY {
+        return Ok(None);
+    }
+    let addr = current_addr(d, ns)?;
+    let merged = materialize(d, ns)?;
+    let holds_grant = |w: &[u8; 32]| *w == addr.writer || merged.writers.get(w).is_some_and(|r| r.contains(&Right::Grant));
+    let mut named: Option<(bool, u64, FileRef)> = None;
+    for (w, chain) in &chains {
+        if !holds_grant(w) {
+            continue;
+        }
+        for (seq, _, c) in chain {
+            for op in &c.ops {
+                if let Op::Checkpoint(f) = op
+                    && f.root != current.root
+                    && named.as_ref().is_none_or(|(by_creator, at, _)| (*w == addr.writer, *seq) > (*by_creator, *at))
+                {
+                    named = Some((*w == addr.writer, *seq, *f));
+                }
+            }
+        }
+    }
+    let Some((_, _, file)) = named else { return Ok(None) };
+    let decode = |f: &FileRef| manifest::read_all(&*d.store, f).map_err(|e| e.to_string()).and_then(|b| Checkpoint::decode(&b).map_err(|e| format!("bad checkpoint: {e}")));
+    let old_frontier = decode(&current)?.frontier;
+    if manifest::read_all(&*d.store, &file).is_err() {
+        fetch_file(&d.transport, &[link], &file, FetchOpts::default(), &mut CacheTier(&d.store)).await.map_err(|e| e.to_string())?;
+    }
+    let new = decode(&file)?;
+    let at = |frontier: &[Frontier], w: &[u8; 32]| frontier.iter().find(|f| f.writer == *w).map_or(0, |f| f.seq);
+    let ahead = new.frontier.iter().any(|f| f.seq > at(&old_frontier, &f.writer));
+    let behind = old_frontier.iter().any(|f| at(&new.frontier, &f.writer) < f.seq);
+    if !ahead || behind {
+        return Ok(None);
+    }
+    install_checkpoint(d, ns, link, &file).await?;
+    // The old one's file is no longer needed here (its state tree's nodes
+    // are cache, or shared with the new tree).
+    let keep: std::collections::HashSet<Cid> = manifest_chunks(&d.store, &file)?.into_iter().map(|(c, _)| c).collect();
+    let gone: Vec<Cid> = manifest_chunks(&d.store, &current)?.into_iter().map(|(c, _)| c).filter(|c| !keep.contains(c)).collect();
+    d.store.release_chunks(&gone).map_err(|e| e.to_string())?;
+    Ok(Some(file))
+}
+
+/// The searchable keys `ns`'s settings records declare (ADR-0019), read
+/// through the store's index: only those records, not every one.
+fn declared_here(d: &Daemon, ns: &str) -> Result<Vec<String>, String> {
+    let term = retifs_store::Term::Eq("type".into(), Value::Str(index::SETTINGS_TYPE.into()));
+    let settings = d.store.query(ns, std::slice::from_ref(&term)).map_err(|e| e.to_string())?;
+    let attrs: Vec<Vec<(String, Value)>> = settings.iter().map(|r| r.attrs.iter().map(|(k, v)| (k.clone(), v.clone())).collect()).collect();
+    Ok(index::declared_keys(attrs.iter().map(|a| a.as_slice())))
+}
+
 /// Builds the blind index of `ns`'s declared keys and publishes it on the
 /// namespace's index channel (ADR-0019), when the checkpoint changed since
 /// the last one (or `force`). Returns the search capability, or None if the
@@ -3564,10 +3785,7 @@ async fn publish_index(d: &Daemon, ns: &str, force: bool) -> Result<Option<Strin
         materialize(d, ns)?;
     }
     let Some(checkpoint) = d.store.ns_checkpoint(ns).map_err(|e| e.to_string())? else { return Ok(None) };
-    let records = d.store.records(ns).map_err(|e| e.to_string())?;
-    let attrs: Vec<(RecordId, Vec<(String, Value)>)> =
-        records.iter().map(|r| (r.id, r.attrs.iter().map(|(k, v)| (k.clone(), v.clone())).collect())).collect();
-    let declared = index::declared_keys(attrs.iter().map(|(_, a)| a.as_slice()));
+    let declared = declared_here(d, ns)?;
     if declared.is_empty() {
         return Ok(None);
     }
@@ -3575,9 +3793,15 @@ async fn publish_index(d: &Daemon, ns: &str, force: bool) -> Result<Option<Strin
     let key = index::channel_key(&read_key);
     let capability = key.addr().to_string();
     let name = format!("idx:{ns}:{}", hex(&key_id(&read_key)[..4]));
+    // Published for this checkpoint already: nothing read (every record of a
+    // large library, every 30 s, took a GB each time).
     if !force && d.indexed.lock().unwrap().get(ns) == Some(&checkpoint.root) {
         return Ok(Some(capability));
     }
+    let records = d.store.records(ns).map_err(|e| e.to_string())?;
+    let attrs: Vec<(RecordId, Vec<(String, Value)>)> =
+        records.iter().map(|r| (r.id, r.attrs.iter().map(|(k, v)| (k.clone(), v.clone())).collect())).collect();
+    drop(records);
     let keys = index::IndexKeys::derive(&read_key);
     let search = index::search_secret(&read_key);
     let tree_keys = index::index_keys(&keys, attrs.iter().map(|(id, a)| (*id, a.as_slice())), &declared);
@@ -3644,11 +3868,11 @@ async fn fetch_index(d: &Daemon, f: &retifs_store::Follow) -> Result<(), String>
 /// against the records held here and checked against every term.
 async fn search_query(d: &Daemon, ns: &str, node: &str, terms: &[String]) -> Result<Response, String> {
     let parsed: Vec<retifs_store::Term> = terms.iter().map(|t| retifs_store::Term::parse(t)).collect::<Result<_, _>>()?;
-    let held: HashMap<RecordId, Record> = d.store.records(ns).map_err(|e| e.to_string())?.into_iter().map(|r| (r.id, r)).collect();
     // Where the settings are held here, only declared keys go to the search
-    // node; the other terms are checked on the matches here.
-    let attrs: Vec<Vec<(String, Value)>> = held.values().map(|r| r.attrs.iter().map(|(k, v)| (k.clone(), v.clone())).collect()).collect();
-    let declared = index::declared_keys(attrs.iter().map(|a| a.as_slice()));
+    // node; the other terms are checked on the matches here. Only the
+    // settings records are read (a large library's every record took
+    // hundreds of MB on each search).
+    let declared = declared_here(d, ns)?;
     let eq: Vec<(String, Value)> = parsed
         .iter()
         .filter_map(|t| match t {
@@ -3686,12 +3910,22 @@ async fn search_query(d: &Daemon, ns: &str, node: &str, terms: &[String]) -> Res
         });
     }
     let ids = ids.unwrap_or_default();
-    let mut held = held;
+    // Only the matches are read from the view.
+    let held_now = || -> Result<HashMap<RecordId, Record>, String> {
+        let mut held = HashMap::new();
+        for id in &ids {
+            if let Some(r) = d.store.get_record(ns, id).map_err(|e| e.to_string())? {
+                held.insert(*id, r);
+            }
+        }
+        Ok(held)
+    };
+    let mut held = held_now()?;
     if d.store.ns_lazy(ns).map_err(|e| e.to_string())? {
         let missing: Vec<RecordId> = ids.iter().filter(|id| !held.contains_key(*id)).copied().collect();
         if !missing.is_empty() && fetch_paths(d, ns, &missing, &[], false).await? > 0 {
             materialize(d, ns)?;
-            held = d.store.records(ns).map_err(|e| e.to_string())?.into_iter().map(|r| (r.id, r)).collect();
+            held = held_now()?;
         }
     }
     let mut records = Vec::new();
@@ -3711,18 +3945,42 @@ async fn search_query(d: &Daemon, ns: &str, node: &str, terms: &[String]) -> Res
 /// that answers): their blind index for the exact terms, the matches fetched
 /// here. None when no peer could answer (no index, unreachable, other terms).
 async fn lazy_search(d: &Daemon, ns: &str, terms: &[String]) -> Option<Vec<RecordView>> {
+    // A peer that couldn't answer (unreachable, or without this library's
+    // index) is left out for a while: each query waited for it again (a
+    // map's search, many queries, took 17 s on one unreachable peer).
+    static MISSED: Mutex<Option<HashMap<(String, PeerId), Instant>>> = Mutex::new(None);
+    let missed_lately = |peer: &PeerId| {
+        MISSED.lock().unwrap().as_ref().and_then(|m| m.get(&(ns.to_string(), *peer))).is_some_and(|t| t.elapsed() < LAZY_SEARCH_MISS)
+    };
+    let miss = |peer: &PeerId| {
+        MISSED.lock().unwrap().get_or_insert_with(HashMap::new).insert((ns.to_string(), *peer), Instant::now());
+    };
     for peer in d.store.ns_peers(ns).ok()? {
+        if missed_lately(&peer) {
+            continue;
+        }
         // A slow or far peer doesn't hold the answer up for long: past this,
         // the next peer, and in the end what's here.
         match tokio::time::timeout(LAZY_SEARCH_WAIT, search_query(d, ns, &hex(&peer), terms)).await {
             Ok(Ok(Response::Searched { records, .. })) => return Some(records),
             Ok(Ok(_)) => {}
-            Ok(Err(e)) => eprintln!("ns {ns}: searching at <{}>: {e}", hex(&peer)),
-            Err(_) => eprintln!("ns {ns}: searching at <{}>: no answer in {} s", hex(&peer), LAZY_SEARCH_WAIT.as_secs()),
+            // (Terms no index can answer aren't the peer's doing.)
+            Ok(Err(e)) if e.starts_with("a search needs") => return None,
+            Ok(Err(e)) => {
+                miss(&peer);
+                eprintln!("ns {ns}: searching at <{}>: {e}", hex(&peer));
+            }
+            Err(_) => {
+                miss(&peer);
+                eprintln!("ns {ns}: searching at <{}>: no answer in {} s", hex(&peer), LAZY_SEARCH_WAIT.as_secs());
+            }
         }
     }
     None
 }
+
+/// How long a peer that couldn't answer a lazy library's search is left out.
+const LAZY_SEARCH_MISS: Duration = Duration::from_secs(300);
 
 /// How long a lazy library's search waits for a peer (then answers from
 /// what's here): a lookup on a slow link took over a minute.
@@ -3805,7 +4063,9 @@ async fn fetch_paths(d: &Daemon, ns: &str, ids: &[RecordId], extra: &[PeerId], p
         // Reload: the records of the new leaves come from the checkpoint,
         // then every commit since applies on top.
         if let Some(e) = ns_entry_get(d, ns) {
-            e.lock().unwrap().state = None;
+            let mut e = e.lock().unwrap();
+            e.state = None;
+            e.parked = None;
         }
     }
     Ok(fetched)
@@ -3936,6 +4196,7 @@ async fn restore_own(d: &Daemon, ns: &str) -> Result<(), String> {
         if let Some(e) = ns_entry_get(d, ns) {
             let mut e = e.lock().unwrap();
             e.state = None;
+            e.parked = None;
             e.gaps.remove(&own);
         }
         let merged = materialize(d, ns)?;
@@ -3959,7 +4220,7 @@ async fn publish_checkpoint(d: &Daemon, ns: &str) -> Result<(), String> {
         return Ok(());
     }
     let merged = materialize(d, ns)?;
-    let (_, own, _) = chains(d, ns, false)?;
+    let own = own_writer(d, ns)?;
     if !merged.writers.get(&own).is_some_and(|r| r.contains(&Right::Grant)) {
         return Ok(());
     }
@@ -4220,8 +4481,10 @@ async fn transaction(d: &Daemon, ns: &str, steps: Vec<TxStep>) -> Result<Vec<Rec
                         .iter()
                         .map(|c| c.parse().map_err(|e: retifs_core::ManifestError| e.to_string()))
                         .collect::<Result<_, _>>()?;
-                    if !attrs.iter().any(|(k, _)| k == "size") {
-                        ops.push(Op::Set(id, "size".into(), Value::Int(refs.iter().map(|f| f.size).sum::<u64>() as i64)));
+                    // The record's content is its first block; the others are
+                    // its thumbnails and the like (ADR-0026), not its size.
+                    if let (false, Some(first)) = (attrs.iter().any(|(k, _)| k == "size"), refs.first()) {
+                        ops.push(Op::Set(id, "size".into(), Value::Int(first.size as i64)));
                     }
                     for f in &refs {
                         d.store.need_file(f).map_err(|e| e.to_string())?;
@@ -4312,7 +4575,7 @@ async fn write_ops(d: &Daemon, ns: &str, mut ops: Vec<Op>) -> Result<u64, String
         let merged = materialize(d, ns)?;
         // Writes before this node's grant has arrived would never count (they'd
         // be stamped before it): refuse them clearly instead of losing them.
-        let (_, own, _) = chains(d, ns, false)?;
+        let own = own_writer(d, ns)?;
         let writes_data = ops.iter().any(|op| matches!(op, Op::Set(..) | Op::Unset(..) | Op::Blocks(..) | Op::Delete(_)));
         if writes_data && merged.writers.get(&own).is_some_and(|r| !r.contains(&Right::Write)) {
             return Err(format!("this node reads {ns} (a member invited to read): it may not write to it"));
@@ -4562,7 +4825,7 @@ fn apply_keep(d: &Daemon, ns: &str, records: &[Record]) -> Result<(), String> {
 }
 
 /// One walked commit of a writer chain.
-type Walked = (u64, Cid, WriterCommit);
+type Walked = (u64, Cid, Arc<WriterCommit>);
 /// A commit chunk by CID and seed.
 type CommitRef = (Cid, retifs_core::Seed);
 
@@ -4582,6 +4845,8 @@ struct NsCache {
     floors: HashMap<[u8; 32], Cid>,
     /// Commits applied since the last checkpoint.
     since_checkpoint: usize,
+    /// Their operations: an import is a few commits of many.
+    ops_since_checkpoint: usize,
     /// A rebuild needs history a checkpoint let this node skip: the state
     /// stays as it was until sync has fetched it.
     needs_history: bool,
@@ -4589,10 +4854,67 @@ struct NsCache {
     fetch_whole: bool,
     /// Writers whose chain here has a missing commit below its head.
     gaps: std::collections::HashSet<[u8; 32]>,
+    /// Parked: the state was let go to free memory (a large library takes
+    /// hundreds of MB), with the heads it was at and its metadata.
+    /// `materialize` answers from these while the heads stay; a new commit
+    /// brings the state back from the checkpoint. Reading never needed the
+    /// state: it reads the store's record view.
+    parked: Option<(Heads, retifs_core::ops::Merged)>,
+    /// Brought back from parking: the view still matches (see `resume`).
+    unparked: bool,
+    /// When the state last changed: one idle for `PARK_AFTER` is parked.
+    changed_at: Option<Instant>,
 }
 
-/// A checkpoint is written after this many new commits (ADR-0018).
+/// Every writer's head here, own chain included: what a parked state is
+/// compared by.
+type Heads = Vec<([u8; 32], Cid)>;
+
+/// A library whose state hasn't changed for this long is parked.
+const PARK_AFTER: Duration = Duration::from_secs(600);
+
+fn heads_now(d: &Daemon, ns: &str) -> Result<Heads, String> {
+    let addr = current_addr(d, ns)?;
+    let mut heads: Heads = d.store.writer_heads(&addr.ns_id()).map_err(|e| e.to_string())?.iter().map(|h| (h.writer, h.commit.0)).collect();
+    if let Some((cid, _)) = d.store.own_channel(&ns_channel(ns)).map_err(|e| e.to_string())?.and_then(|c| c.last) {
+        heads.push(([0; 32], cid)); // this node's own chain
+    }
+    heads.sort_by(|a, b| a.0.cmp(&b.0).then(a.1.as_bytes().cmp(b.1.as_bytes())));
+    Ok(heads)
+}
+
+/// Parks the libraries whose state has been idle for `PARK_AFTER`, when it
+/// can come back as it was: the view built from it, nothing held back.
+fn park_idle(d: &Daemon) {
+    let entries: Vec<(String, Arc<Mutex<NsCache>>)> = d.ns_cache.lock().unwrap().iter().map(|(n, e)| (n.clone(), e.clone())).collect();
+    let mut parked = Vec::new();
+    for (ns, arc) in entries {
+        let Ok(heads) = heads_now(d, &ns) else { continue };
+        let mut e = arc.lock().unwrap();
+        let idle = e.changed_at.is_none_or(|t| t.elapsed() > PARK_AFTER);
+        if !idle || !e.view_built || e.needs_history || e.fetch_whole || !e.gaps.is_empty() {
+            continue;
+        }
+        let Some(meta) = e.state.as_ref().map(|s| s.merged_meta()) else { continue };
+        e.parked = Some((heads, meta));
+        e.state = None;
+        e.chains.clear();
+        e.applied.clear();
+        e.floors.clear();
+        parked.push(ns);
+    }
+    if !parked.is_empty() {
+        println!("parked {} idle librar{} ({}): memory freed, brought back on a change", parked.len(), if parked.len() == 1 { "y" } else { "ies" }, parked.join(", "));
+        trim_memory();
+    }
+}
+
+/// A checkpoint is written after this many new commits (ADR-0018), or
+/// after `CHECKPOINT_OPS` operations in fewer: an import of thousands of
+/// records in a few commits was otherwise never checkpointed, every node
+/// replaying it on each start.
 const CHECKPOINT_EVERY: usize = 64;
+const CHECKPOINT_OPS: usize = 10_000;
 
 /// A writer's chain, oldest first, as far back as its commits and operations
 /// files are local. Only commits newer than `cached` are read from the store.
@@ -4632,7 +4954,7 @@ fn walk_ops_chain(
         else {
             break;
         };
-        newer.push((commit.seq, cid, WriterCommit { seq: commit.seq, time_ms: commit.time_ms, ops: ops.ops }));
+        newer.push((commit.seq, cid, Arc::new(WriterCommit { seq: commit.seq, time_ms: commit.time_ms, ops: ops.ops })));
         next = commit.prev;
     }
     newer.reverse();
@@ -4645,7 +4967,18 @@ fn walk_ops_chain(
     }
 }
 
-type Chains = std::collections::BTreeMap<[u8; 32], Vec<(u64, WriterCommit)>>;
+/// (Commits shared with the cache: a large library's chain is many MB, and
+/// each merge copied it twice.)
+type Chains = std::collections::BTreeMap<[u8; 32], Vec<(u64, Arc<WriterCommit>)>>;
+
+/// The writer this node writes `ns` as (its own chain's), without walking any chain.
+fn own_writer(d: &Daemon, ns: &str) -> Result<[u8; 32], String> {
+    let addr = current_addr(d, ns)?;
+    Ok(match d.store.own_channel(&ns_channel(ns)).map_err(|e| e.to_string())? {
+        Some(c) => channel_key(d, &c).writer(),
+        None => addr.writer,
+    })
+}
 
 /// Every writer chain of a namespace held here: this node's and the others'.
 /// Resumed from a checkpoint, only commits after it, unless `full`.
@@ -4695,6 +5028,15 @@ fn apply_view(d: &Daemon, ns: &str) -> Result<(), String> {
     let entry = &mut *cache;
     let changed;
     let dirty = entry.state.as_mut().map(|s| s.take_dirty()).unwrap_or_default();
+    // A granter's word that the library is deleted (ADR-0034).
+    let says_deleted = |st: &State, id: &RecordId| {
+        st.set_by_granter(id, "type") && st.record(id).is_some_and(|r| r.attrs.get("type") == Some(&Value::Str(LIBRARY_DELETED.into())))
+    };
+    let deleted = match (entry.view_built, entry.state.as_ref()) {
+        (true, Some(st)) => dirty.iter().any(|id| says_deleted(st, id)),
+        (false, Some(st)) => st.records().iter().any(|r| says_deleted(st, &r.id)),
+        _ => false,
+    };
     if let (true, Some(st)) = (entry.view_built, entry.state.as_ref()) {
         // Only the records the state says changed: no copy of every record,
         // no comparison of everything on each write.
@@ -4720,6 +5062,9 @@ fn apply_view(d: &Daemon, ns: &str) -> Result<(), String> {
     if changed {
         ns_changed(d, ns);
     }
+    if deleted {
+        library_deleted(d, ns);
+    }
     Ok(())
 }
 
@@ -4735,8 +5080,15 @@ fn resume(d: &Daemon, ns: &str) -> Result<(), String> {
     if ns_entry_get(d, ns).is_some_and(|e| e.lock().unwrap().state.is_some()) {
         return Ok(());
     }
+    // One load at a time: a second caller waits, then finds the state here.
+    static RESUMING: Mutex<()> = Mutex::new(());
+    let _one = RESUMING.lock().unwrap();
+    if ns_entry_get(d, ns).is_some_and(|e| e.lock().unwrap().state.is_some()) {
+        return Ok(());
+    }
     let Some(file) = d.store.ns_checkpoint(ns).map_err(|e| e.to_string())? else { return Ok(()) };
     let Some((creator, _)) = d.store.ns_info(ns).map_err(|e| e.to_string())? else { return Ok(()) };
+    let began = Instant::now();
     let loaded = manifest::read_all(&*d.store, &file)
         .map_err(|e| e.to_string())
         .and_then(|b| Checkpoint::decode(&b).map_err(|e| e.to_string()))
@@ -4751,6 +5103,14 @@ fn resume(d: &Daemon, ns: &str) -> Result<(), String> {
             return Ok(());
         }
     };
+    // The store's view is kept when it's this state's, plus later commits:
+    // back from parking, and after a restart when it holds as many records
+    // (a view is written in one transaction, before any checkpoint of it, so
+    // it's never behind the checkpoint). The commits since apply again and
+    // mark their records to compare. Otherwise it's rewritten whole.
+    let view_count = d.store.record_count(ns).map_err(|e| e.to_string())?;
+    let state_count = state.record_count();
+    let view_matches = view_count > 0 && view_count == state_count;
     let arc = ns_entry(d, ns);
     let mut cache = arc.lock().unwrap();
     let entry = &mut *cache;
@@ -4758,9 +5118,11 @@ fn resume(d: &Daemon, ns: &str) -> Result<(), String> {
     entry.floors = cp.frontier.iter().map(|f| (f.writer, f.commit)).collect();
     entry.chains.clear();
     entry.state = Some(state);
-    entry.view_built = false;
+    entry.view_built = std::mem::take(&mut entry.unparked) || view_matches;
     entry.since_checkpoint = 0;
-    println!("ns {ns}: resumed from checkpoint ({} writer(s))", cp.frontier.len());
+    entry.ops_since_checkpoint = 0;
+    let view = if entry.view_built { "view kept".to_string() } else { format!("view rewritten: {view_count} record(s) there, {state_count} in the state") };
+    println!("ns {ns}: resumed from checkpoint ({} writer(s)) in {:.1} s; {view}", cp.frontier.len(), began.elapsed().as_secs_f64());
     drop(cache);
     trim_memory();
     Ok(())
@@ -4805,8 +5167,27 @@ fn save_checkpoint(d: &Daemon, ns: &str, state: &State, frontier: Vec<Frontier>)
 /// The result's `records` is empty: the records are in the store's view
 /// (`d.store.records(ns)`), updated here from what changed.
 fn materialize(d: &Daemon, ns: &str) -> Result<retifs_core::ops::Merged, String> {
+    // Parked and nothing new: its metadata as it was, the state not loaded.
+    if let Some(arc) = ns_entry_get(d, ns) {
+        let mut e = arc.lock().unwrap();
+        if e.state.is_none() && e.parked.is_some() {
+            let heads = heads_now(d, ns)?;
+            if e.parked.as_ref().is_some_and(|(h, _)| *h == heads) {
+                return Ok(e.parked.as_ref().expect("checked").1.clone());
+            }
+            // Something new: back from the checkpoint, the view kept.
+            e.parked = None;
+            e.unparked = true;
+        }
+    }
     resume(d, ns)?;
+    // (No checkpoint to come back from: the state is built from the chains
+    // and the view rewritten, as for any rebuild.)
+    if let Some(arc) = ns_entry_get(d, ns) {
+        arc.lock().unwrap().unparked = false;
+    }
     let lazy = d.store.ns_lazy(ns).map_err(|e| e.to_string())?;
+    let has_checkpoint = d.store.ns_checkpoint(ns).map_err(|e| e.to_string())?.is_some();
     let (addr, _, mut chains) = chains(d, ns, false)?;
     let now = now_ms();
     let mut checkpoint = None;
@@ -4842,7 +5223,7 @@ fn materialize(d: &Daemon, ns: &str) -> Result<retifs_core::ops::Merged, String>
                 }
             }
             if !rebuild {
-                let commits: Vec<([u8; 32], &WriterCommit)> = new.iter().map(|(w, _, c)| (*w, *c)).collect();
+                let commits: Vec<([u8; 32], &WriterCommit)> = new.iter().map(|(w, _, c)| (*w, &***c)).collect();
                 rebuild = !entry.state.as_mut().expect("checked").apply_commits(&commits);
             }
         }
@@ -4868,6 +5249,9 @@ fn materialize(d: &Daemon, ns: &str) -> Result<retifs_core::ops::Merged, String>
         }
         let cids: HashMap<[u8; 32], Cid> =
             entry.chains.iter().filter_map(|(w, c)| c.last().map(|(_, cid, _)| (*w, *cid))).collect();
+        if rebuild || !new.is_empty() || entry.changed_at.is_none() {
+            entry.changed_at = Some(Instant::now());
+        }
         if rebuild {
             // A writer whose chain has a gap is left out until it's filled (its
             // later commits alone would mark it applied past the missing ones).
@@ -4875,7 +5259,7 @@ fn materialize(d: &Daemon, ns: &str) -> Result<retifs_core::ops::Merged, String>
             let plain = chains
                 .iter()
                 .filter(|(w, _)| complete(w))
-                .map(|(w, c)| (*w, c.iter().map(|(_, c)| c.clone()).collect()))
+                .map(|(w, c)| (*w, c.iter().map(|(_, c)| (**c).clone()).collect()))
                 .collect();
             entry.state = Some(State::build(&addr.writer, &plain, now));
             entry.view_built = false;
@@ -4885,8 +5269,10 @@ fn materialize(d: &Daemon, ns: &str) -> Result<retifs_core::ops::Merged, String>
                 .filter_map(|(w, c)| c.last().and_then(|(seq, wc)| cids.get(w).map(|cid| (*w, (*seq, wc.time_ms, *cid)))))
                 .collect();
             entry.since_checkpoint += chains.values().map(Vec::len).sum::<usize>();
+            entry.ops_since_checkpoint += chains.values().flatten().map(|(_, c)| c.ops.len()).sum::<usize>();
         } else {
             entry.since_checkpoint += new.len();
+            entry.ops_since_checkpoint += new.iter().map(|(_, _, c)| c.ops.len()).sum::<usize>();
             for (w, seq, c) in new {
                 // (No cached chain after an incomplete walk: keep the old commit;
                 // checkpoints wait until the gap is filled anyway.)
@@ -4895,8 +5281,16 @@ fn materialize(d: &Daemon, ns: &str) -> Result<retifs_core::ops::Merged, String>
             }
         }
         let state = entry.state.as_ref().expect("built above");
-        if entry.since_checkpoint >= CHECKPOINT_EVERY && !held_back && entry.gaps.is_empty() && !lazy {
+        // A lazily held library checkpoints only while it has none: then its
+        // state was built from every commit, so it's whole (else it moves to
+        // a grant holder's, `advance_lazy`). Without one, every commit since
+        // it joined stayed in memory and was replayed on each resume.
+        // (Its first one at once: a few commits can be many operations.)
+        let lazy_first = lazy && !has_checkpoint && from_start && entry.since_checkpoint > 0;
+        let due = entry.since_checkpoint >= CHECKPOINT_EVERY || entry.ops_since_checkpoint >= CHECKPOINT_OPS;
+        if (due || lazy_first) && !held_back && entry.gaps.is_empty() && (!lazy || lazy_first) {
             entry.since_checkpoint = 0;
+            entry.ops_since_checkpoint = 0;
             let frontier: Vec<Frontier> = entry
                 .applied
                 .iter()
@@ -4915,6 +5309,9 @@ fn materialize(d: &Daemon, ns: &str) -> Result<retifs_core::ops::Merged, String>
         }
         break state.merged_meta();
     };
+    // The view first: a checkpoint is never ahead of it (`resume` keeps the
+    // view after a restart on that).
+    apply_view(d, ns)?;
     if let Some((state, frontier)) = checkpoint {
         let reach: Vec<([u8; 32], u64, Cid)> = frontier.iter().map(|f| (f.writer, f.seq, f.commit)).collect();
         match save_checkpoint(d, ns, &state, frontier) {
@@ -4937,7 +5334,6 @@ fn materialize(d: &Daemon, ns: &str) -> Result<retifs_core::ops::Merged, String>
             Err(e) => println!("ns {ns}: checkpoint failed: {e}"),
         }
     }
-    apply_view(d, ns)?;
     // Rotated read keys wrapped to this node: take them, newest last.
     if let Some(identity) = d.store.ns_identity(ns).map_err(|e| e.to_string())? {
         let me: [u8; 32] = keywrap::public(&identity)[32..].try_into().unwrap();
@@ -4965,7 +5361,7 @@ fn versions(d: &Daemon, ns: &str, visit: impl FnMut(u64, u64, &State)) -> Result
     }
     let (addr, own, chains) = chains(d, ns, true)?;
     let plain: std::collections::BTreeMap<[u8; 32], Vec<WriterCommit>> =
-        chains.into_iter().map(|(w, c)| (w, c.into_iter().map(|(_, wc)| wc).collect())).collect();
+        chains.into_iter().map(|(w, c)| (w, c.into_iter().map(|(_, wc)| Arc::unwrap_or_clone(wc)).collect())).collect();
     retifs_core::ops::versions(&addr.writer, &plain, &own, now_ms(), visit);
     Ok(())
 }
@@ -5238,6 +5634,24 @@ fn trim_memory() {
     // SAFETY: malloc_trim only returns free memory to the OS.
     unsafe {
         libc::malloc_trim(0);
+    }
+    // Android's allocator (scudo) keeps freed memory too: a phone that synced
+    // a large library stayed at gigabytes it no longer used.
+    #[cfg(target_os = "android")]
+    {
+        unsafe extern "C" {
+            fn mallopt(param: libc::c_int, value: libc::c_int) -> libc::c_int;
+        }
+        // M_PURGE_ALL (Android 14+) releases more than M_PURGE; older ones
+        // refuse it (0) and get M_PURGE.
+        const M_PURGE: libc::c_int = -101;
+        const M_PURGE_ALL: libc::c_int = -104;
+        // SAFETY: both only return free memory to the OS.
+        unsafe {
+            if mallopt(M_PURGE_ALL, 0) == 0 {
+                mallopt(M_PURGE, 0);
+            }
+        }
     }
 }
 
@@ -5564,9 +5978,16 @@ fn sorted(chunks: &[(Cid, ChunkToken)]) -> Vec<(Cid, ChunkToken)> {
 /// where they ask: the most any of its namespaces asks.
 fn copies_wanted(d: &Daemon) -> HashMap<Cid, usize> {
     let mut out: HashMap<Cid, usize> = HashMap::new();
+    let placement = retifs_store::Term::Eq("type".into(), Value::Str(libretifs::PLACEMENT_TYPE.into()));
     for ns in d.store.ns_names().unwrap_or_default() {
+        // Its placement record found by the index: every record is read only
+        // where one asks (a large library's records took a GB on each pass).
+        let Ok(asked) = d.store.query(&ns, std::slice::from_ref(&placement)) else { continue };
+        if asked.is_empty() {
+            continue;
+        }
         let Ok(records) = d.store.records(&ns) else { continue };
-        let wanted = records.iter().find_map(|r| {
+        let wanted = asked.iter().find_map(|r| {
             (r.attrs.get("type") == Some(&Value::Str(libretifs::PLACEMENT_TYPE.into()))).then(|| match r.attrs.get("copies") {
                 Some(Value::Int(n)) if *n >= 1 => Some(*n as usize),
                 _ => None,
