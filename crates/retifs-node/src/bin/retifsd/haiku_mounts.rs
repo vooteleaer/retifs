@@ -20,6 +20,8 @@ use super::{Daemon, visible_namespaces};
 
 /// How often the libraries are looked at again.
 const EVERY: Duration = Duration::from_secs(10);
+/// How long after the desktop is up the first mount waits.
+const SETTLE: Duration = Duration::from_secs(30);
 /// A mount that failed is tried again after this.
 const RETRY: Duration = Duration::from_secs(300);
 /// By their full paths: a launch_daemon job (retifsd at login) has no PATH.
@@ -42,9 +44,13 @@ fn is_mounted(dir: &Path) -> bool {
     d.dev() != p.dev()
 }
 
-/// Whether the desktop is up: Tracker runs.
+/// Whether the desktop is up: Tracker and Deskbar run.
 fn desktop_up() -> bool {
-    Command::new(PS).output().is_ok_and(|o| String::from_utf8_lossy(&o.stdout).lines().any(|l| l.trim_start().starts_with("/boot/system/Tracker")))
+    Command::new(PS).output().is_ok_and(|o| {
+        let text = String::from_utf8_lossy(&o.stdout);
+        let runs = |path: &str| text.lines().any(|l| l.trim_start().starts_with(path));
+        runs("/boot/system/Tracker") && runs("/boot/system/Deskbar")
+    })
 }
 
 fn mount(store: &Path, ns: &str) -> Result<(), String> {
@@ -93,8 +99,10 @@ pub async fn keeper(d: Arc<Daemon>, store: PathBuf) {
     while !tokio::task::spawn_blocking(desktop_up).await.unwrap_or(false) {
         tokio::time::sleep(Duration::from_secs(2)).await;
     }
-    // Let the desktop finish coming up.
-    tokio::time::sleep(Duration::from_secs(5)).await;
+    // Let the desktop finish coming up: the login's other jobs may still be
+    // starting, and a first mount among them hung with the boot screen still
+    // up (2026-11-09, 5 s after Tracker; one boot in a few).
+    tokio::time::sleep(SETTLE).await;
     let mut failed: HashMap<String, Instant> = HashMap::new();
     loop {
         let names = visible_namespaces(&d).unwrap_or_default();
