@@ -13,6 +13,8 @@ static PAYLOAD: &[u8] = include_bytes!(concat!(env!("OUT_DIR"), "/payload.zst"))
 const VERSION: &str = env!("CARGO_PKG_VERSION");
 const RUN_KEY: PCWSTR = w!("Software\\Microsoft\\Windows\\CurrentVersion\\Run");
 const UNINSTALL_KEY: PCWSTR = w!("Software\\Microsoft\\Windows\\CurrentVersion\\Uninstall\\retifs");
+/// The `retifs:` URL protocol, this user's.
+const LINK_KEY: PCWSTR = w!("Software\\Classes\\retifs");
 /// Our own programs: stopped before files are replaced or removed.
 const PROGRAMS: [&str; 5] = ["retifs-desktop.exe", "retifsd.exe", "retifs-cloudfiles.exe", "retifs-photos.exe", "retifs-map.exe"];
 /// The Start menu's entries: (program, shortcut name, what it says), each
@@ -212,6 +214,21 @@ fn register(dir: &Path) -> Result<(), String> {
                 shortcut(&target, &shortcut_path(name), about)?;
             }
         }
+
+        // retifs: links (invitations, libraries) open in the utility, which
+        // asks before joining anything.
+        if dir.join("retifs-desktop.exe").exists() {
+            let scheme = open_key(LINK_KEY)?;
+            set_string(scheme, PCWSTR::null(), "URL:retifs link")?;
+            set_string(scheme, w!("URL Protocol"), "")?;
+            let _ = RegCloseKey(scheme);
+            let open = open_key(w!("Software\\Classes\\retifs\\shell\\open\\command"))?;
+            set_string(open, PCWSTR::null(), &format!("\"{d}\\retifs-desktop.exe\" --open \"%1\""))?;
+            let _ = RegCloseKey(open);
+            let icon = open_key(w!("Software\\Classes\\retifs\\DefaultIcon"))?;
+            set_string(icon, PCWSTR::null(), &format!("\"{d}\\retifs-desktop.exe\",0"))?;
+            let _ = RegCloseKey(icon);
+        }
     }
     Ok(())
 }
@@ -254,6 +271,7 @@ fn uninstall() {
             let _ = set_user_path(&kept.join(";"));
         }
         let _ = RegDeleteTreeW(HKEY_CURRENT_USER, UNINSTALL_KEY);
+        let _ = RegDeleteTreeW(HKEY_CURRENT_USER, LINK_KEY);
     }
     for (_, name, _) in SHORTCUTS {
         let _ = std::fs::remove_file(shortcut_path(name));
