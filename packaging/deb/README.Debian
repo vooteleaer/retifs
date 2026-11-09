@@ -8,13 +8,12 @@ What runs
 ---------
 - retifsd, as a systemd user service in every user's session
   (`systemctl --user status retifsd`). Its store is ~/.local/share/retifs.
-- Reticulum: retifsd needs a shared instance on the machine. If none runs
-  (no rnsd, no prnsd of your own), the bundled prnsd starts with your
-  config in ~/.reticulum (`systemctl --user status retifs-prnsd`).
-  Out of the box it only finds others on the local network. To reach
-  further, add an interface, e.g. a TCP connection to a node you trust:
-      /usr/lib/retifs/prnsd interfaces add
-      /usr/lib/retifs/prnsd status
+- Reticulum: retifsd joins a shared instance on the machine, which this
+  package doesn't bring: install Prns (prnsd), or run any other Reticulum
+  shared instance (rnsd). retifsd waits for it at start. Its connections
+  are Reticulum's, e.g. a TCP connection to a node you trust:
+      prnsd interfaces add
+      prnsd status
   or use the retifs-desktop utility.
 
 First steps

@@ -2,10 +2,11 @@
 //! needed, and uninstalls it (`--uninstall`, from Apps & features).
 //!
 //! - The programs go to `%LOCALAPPDATA%\Programs\retifs`: retifsd, the
-//!   retifs command, the Cloud Files provider, prnsd (Reticulum, bundled)
-//!   and retifs-desktop, the utility in the notification area.
-//! - retifs-desktop starts at login (`--autostart`) and starts Reticulum
-//!   where none runs yet, then retifsd; nothing runs as a service.
+//!   retifs command, the Cloud Files provider and retifs-desktop, the
+//!   utility in the notification area. No Reticulum: that's Prns's own
+//!   (or another shared instance), installed apart.
+//! - retifs-desktop starts at login (`--autostart`) and starts retifsd once
+//!   Reticulum is up; nothing runs as a service.
 //! - The folder is put on the user's PATH (for `retifs`), a Start menu
 //!   shortcut is made, and Apps & features lists it.
 //! - Uninstalling removes all that and leaves the user's data: the store in

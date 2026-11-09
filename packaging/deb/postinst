@@ -1,12 +1,15 @@
 #!/bin/sh
 set -e
-# Every user's session starts retifsd (and Reticulum where none runs yet).
+# Every user's session starts retifsd, on Reticulum (Prns's, installed apart).
 if [ "$1" = configure ] && command -v systemctl >/dev/null; then
-    systemctl --global enable retifsd.service retifs-prnsd.service >/dev/null 2>&1 || true
+    # Older packages brought a prnsd of their own, enabled for everyone.
+    rm -f /etc/systemd/user/default.target.wants/retifs-prnsd.service
+    systemctl --global enable retifsd.service >/dev/null 2>&1 || true
     cat <<MSG
 retifs is installed. It starts with your next login; to start it now, as yourself:
     systemctl --user daemon-reload
     systemctl --user start retifsd
+retifs needs Reticulum: install Prns (prnsd), or run another shared instance.
 Then: retifs ping, retifs heard, retifs ns join ... (see /usr/share/doc/retifs/README.Debian).
 On a machine without a desktop session: sudo loginctl enable-linger USER.
 MSG

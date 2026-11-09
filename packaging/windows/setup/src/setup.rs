@@ -14,7 +14,7 @@ const VERSION: &str = env!("CARGO_PKG_VERSION");
 const RUN_KEY: PCWSTR = w!("Software\\Microsoft\\Windows\\CurrentVersion\\Run");
 const UNINSTALL_KEY: PCWSTR = w!("Software\\Microsoft\\Windows\\CurrentVersion\\Uninstall\\retifs");
 /// Our own programs: stopped before files are replaced or removed.
-const PROGRAMS: [&str; 4] = ["retifs-desktop.exe", "retifsd.exe", "prnsd.exe", "retifs-cloudfiles.exe"];
+const PROGRAMS: [&str; 3] = ["retifs-desktop.exe", "retifsd.exe", "retifs-cloudfiles.exe"];
 const CREATE_NO_WINDOW: u32 = 0x0800_0000;
 
 fn install_dir() -> PathBuf {
@@ -43,7 +43,7 @@ fn install() {
     if !quiet
         && ask(
             &format!(
-                "Install retifs {VERSION} for this user?\n\nIt goes to {}, starts with your login (in the notification area) and brings Reticulum (prnsd) along, used only where none runs yet.\n\nretifs is a prototype: its formats still change. Keep nothing in it you can't lose.",
+                "Install retifs {VERSION} for this user?\n\nIt goes to {} and starts with your login (in the notification area). It runs on Reticulum: install Prns too, or have another Reticulum shared instance running.\n\nretifs is a prototype: its formats still change. Keep nothing in it you can't lose.",
                 dir.display()
             ),
             MB_OKCANCEL | MB_ICONINFORMATION,
@@ -68,8 +68,8 @@ fn install() {
     }
 }
 
-/// Stops our programs (those in the install folder only by name: another
-/// prnsd of the user's, under another name, is left alone).
+/// Stops our programs (by name; Reticulum is Prns's, never ours, and is
+/// left alone).
 fn stop_programs() {
     for p in PROGRAMS {
         let _ = Command::new("taskkill").args(["/IM", p, "/F"]).creation_flags_hidden().output();
@@ -88,6 +88,26 @@ impl Hidden for Command {
     }
 }
 
+/// Writes a program file, waiting for a stopped program to let go of it:
+/// `taskkill /F` returns before the process is gone, and the utility may
+/// start retifsd again meanwhile (an update failed with "being used by
+/// another process"). Our programs are stopped again between tries, for up
+/// to ten seconds.
+fn write_when_free(target: &Path, bytes: &[u8]) -> Result<(), String> {
+    const ERROR_SHARING_VIOLATION: i32 = 32;
+    let mut tries = 0;
+    loop {
+        match std::fs::write(target, bytes) {
+            Err(e) if e.raw_os_error() == Some(ERROR_SHARING_VIOLATION) && tries < 20 => {
+                tries += 1;
+                stop_programs();
+                std::thread::sleep(std::time::Duration::from_millis(500));
+            }
+            r => return r.map_err(|e| format!("{}: {e}", target.display())),
+        }
+    }
+}
+
 fn install_files(dir: &Path) -> Result<(), String> {
     stop_programs();
     std::fs::create_dir_all(dir).map_err(|e| format!("{}: {e}", dir.display()))?;
@@ -101,9 +121,12 @@ fn install_files(dir: &Path) -> Result<(), String> {
         let len = u64::from_le_bytes(packed[at..at + 8].try_into().unwrap()) as usize;
         at += 8;
         let target = dir.join(&name);
-        std::fs::write(&target, &packed[at..at + len]).map_err(|e| format!("{}: {e}", target.display()))?;
+        write_when_free(&target, &packed[at..at + len])?;
         at += len;
     }
+    // The prnsd older installers brought (where it still runs, it stays
+    // until the next install).
+    let _ = std::fs::remove_file(dir.join("prnsd.exe"));
     // The installer itself, to uninstall with.
     if let Ok(me) = std::env::current_exe() {
         let _ = std::fs::copy(me, dir.join("retifs-setup.exe"));
