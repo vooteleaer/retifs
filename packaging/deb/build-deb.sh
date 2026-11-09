@@ -7,8 +7,9 @@
 #
 # On a Debian or Ubuntu x86_64 machine (WSL works) with Rust, dpkg-deb and
 # `rustup target add aarch64-unknown-linux-gnu`. With cargo-zigbuild (and
-# zig) the binaries are linked against glibc $GLIBC (default 2.36: Debian 12,
-# Raspberry Pi OS bookworm), whatever the build machine has; without it,
+# zig) the binaries are linked against glibc $GLIBC (default 2.31: Debian 11,
+# Ubuntu 20.04 and 22.04, elementary OS 6 and 7, Raspberry Pi OS bullseye and
+# later), whatever the build machine has; without it,
 # against the build machine's glibc, and arm64 needs gcc-aarch64-linux-gnu.
 # Prns 0.3.8 (retifsd's transport, and its licenses) is expected next to
 # retifs (`../Prns-0.3.8`, see the README), or at $PRNS.
@@ -27,7 +28,7 @@ COMMIT=$(git -C "$ROOT" rev-parse --short HEAD 2>/dev/null || echo unknown)
 DATE=$(git -C "$ROOT" log -1 --format=%cd --date=format:%Y%m%d 2>/dev/null || date +%Y%m%d)
 DEBVER="$VERSION~git$DATE.$COMMIT"
 BINS="retifsd retifs retifs-mount retifs-gateway retifs-extractd"
-GLIBC=${GLIBC:-2.36}
+GLIBC=${GLIBC:-2.31}
 if command -v cargo-zigbuild >/dev/null; then
     BUILD="cargo zigbuild"; SUFFIX=".$GLIBC"
 else

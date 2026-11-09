@@ -6,7 +6,7 @@ Everything the apps do goes through `retifsd`'s local API ([native API](07-api.m
 
 retifs runs on Linux, Windows and Haiku. The daemon, `retifsd`, attaches to the machine's Reticulum shared instance, so start [prnsd](https://github.com/KenAKAFrosty/Prns) (or Python `rnsd`) first. retifs never brings its own.
 
-**Debian, Ubuntu, Raspberry Pi OS (amd64, arm64):** install a `retifs_*.deb` (built by `packaging/deb/build-deb.sh`) with `sudo apt install ./retifs_*.deb`. It starts `retifsd` in every user's session once Reticulum is up; see `/usr/share/doc/retifs/README.Debian`. It needs glibc 2.36 or newer (Debian 12).
+**Debian, Ubuntu, Raspberry Pi OS (amd64, arm64):** install a `retifs_*.deb` (built by `packaging/deb/build-deb.sh`) with `sudo apt install ./retifs_*.deb`. It starts `retifsd` in every user's session once Reticulum is up; see `/usr/share/doc/retifs/README.Debian`. It needs glibc 2.31 or newer: Debian 11, Ubuntu 20.04 and 22.04, elementary OS 6 and 7, Raspberry Pi OS bullseye and later. The GTK apps (retifs-desktop, Photos, Map, Contacts, Calendar) as .deb need GTK 4.12 and libadwaita 1.4 (Debian 13, Ubuntu 24.04); on older systems use their Flatpaks.
 
 **Windows 10 and 11:** run `retifs-setup-*.exe` (built by `packaging\windows\build-setup.ps1`). It installs for the current user, no administrator needed: the programs in `%LOCALAPPDATA%\Programs\retifs`, `retifs` on the PATH, and a utility in the notification area, started at login, which starts `retifsd` once Reticulum is up. Uninstall from Apps & features; your data stays.
 
