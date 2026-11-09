@@ -1714,9 +1714,10 @@ impl Daemon {
         };
         let (link, rtt) = match attempt(&t).await {
             Ok(l) => l,
-            // The known route may be stale: ask for a fresh path and try once more.
+            // The known route may be stale: forget it, ask for a fresh path and try once more.
             Err(e) if path.is_ok() => {
-                t.request_path(dest).await.map_err(|p| format!("{e}; {p}"))?;
+                eprintln!("link <{}>: {e}; asking for a new path", hex(peer));
+                t.refresh_path(dest).await.map_err(|p| format!("{e}; {p}"))?;
                 attempt(&t).await?
             }
             Err(e) => return Err(format!("{}; {e}", path.unwrap_err())),
@@ -2485,13 +2486,23 @@ async fn remote_call(d: &Daemon, requester: Option<[u8; 16]>, body: &[u8]) -> Re
 /// Sends `req` to own node `peer` over a Link, identifying this node first.
 async fn remote_request(d: &Daemon, peer: &PeerId, req: &Request) -> Result<Response, String> {
     let body = rmp_serde::to_vec_named(req).map_err(|e| e.to_string())?;
+    // A watch is a long poll: the answer may come only when it ends, later
+    // than the link's default response timeout.
+    let watch = match req {
+        Request::Watch { timeout_ms, .. } => Some(Duration::from_millis((*timeout_ms).min(REMOTE_MAX_WATCH_MS)) + Duration::from_secs(15)),
+        _ => None,
+    };
     for attempt in 0..2 {
         let link = d.link_to(peer).await?;
         if !d.identified.lock().unwrap().contains(&link) {
             d.transport.identify(link, d.identity_hash).await?;
             d.identified.lock().unwrap().insert(link);
         }
-        match d.ask(link, API_ENDPOINT, body.clone()).await {
+        let answer = match watch {
+            Some(wait) => d.transport.request_waiting(link, API_ENDPOINT, body.clone(), wait).await,
+            None => d.ask(link, API_ENDPOINT, body.clone()).await,
+        };
+        match answer {
             Ok(bytes) => return rmp_serde::from_slice(&bytes).map_err(|e| format!("bad answer from <{}>: {e}", hex(peer))),
             // A cached link may have gone stale: once more on a new one.
             Err(e) if attempt == 0 => {

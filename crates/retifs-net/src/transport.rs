@@ -85,6 +85,29 @@ impl PrnsTransport {
         Err(format!("no path within {:?} (last: {last})", self.path_timeout))
     }
 
+    /// Forgets the known route to `peer` and asks for a fresh one: a request
+    /// for a route already held is answered with the same announce, which
+    /// Prns rejects as a replay (see [`ensure_path`](Self::ensure_path)), so
+    /// the old route is dropped first. Used after a link over it failed.
+    pub async fn refresh_path(&self, peer: DestinationHash) -> Result<(), String> {
+        use personal_rns::runtime::RoutingControl;
+        let _ = self.handle.drop_route(peer).await;
+        self.request_path(peer).await
+    }
+
+    /// Like [`Transport::request`], with the response awaited up to `timeout`
+    /// rather than the link's default (a long poll outlasts that default).
+    pub async fn request_waiting(&self, link: LinkId, endpoint: &'static str, body: Vec<u8>, timeout: Duration) -> Result<Vec<u8>, String> {
+        use personal_rns::engine::RequestResponseTimeout;
+        let timeout = RequestResponseTimeout::Exact(personal_rns::units::DurationMillis(timeout.as_millis() as u64));
+        let (response, _rtt) = self
+            .handle
+            .request_with_response_timeout(link, RequestEndpointId::of(endpoint), &body, timeout)
+            .await
+            .map_err(|e| format!("{e:?}"))?;
+        Ok(response.as_slice().to_vec())
+    }
+
     /// Reveals this node's identity (by hash; the node holds the secret) to
     /// the other end of `link`, so it can tell who is asking.
     pub async fn identify(&self, link: LinkId, identity_hash: [u8; 16]) -> Result<(), String> {
