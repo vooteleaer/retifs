@@ -49,6 +49,11 @@ The details are in the [architecture](docs/01-architecture.md).
 
 - **Windows 10 and 11:** `retifs-setup-*.exe` installs for the current user, no administrator needed. Your libraries appear in Explorer under `%USERPROFILE%\retifs`.
 - **Debian, Ubuntu, Raspberry Pi OS:** `sudo apt install ./retifs_*.deb`.
+- **Already running retifs?** The installers are also a retifs library, `retifs-installers` (every install joins it by itself). To join it by hand, paste this link in **Join a library → Join with link**, or run `retifs open <link>`:
+
+  ```
+  retifs:ns/1:02fe66c2ccd78d25a90c1b53bbde71232bb2315d3f1b8f8fb55951b5efa1467f:4f775b9411ee2d2431d621df27af64c2b682bf9ed09be17c6e1aa5193608435a?name=retifs%20installers&from=e0b84d8d7903ce16e85906101af4f6e0
+  ```
 - **From source**, and everything the `retifs` command can do: [using retifs from the command line](docs/10-command-line.md).
 
 ---
