@@ -20,7 +20,9 @@ The two devices must reach each other over Reticulum: on the same network they f
 From the [release](https://github.com/vooteleaer/retifs/releases):
 
 - **Windows 10/11:** run `retifs-setup-*.exe`. It installs for you only (no administrator) and puts the retifs utility in the notification area.
-- **Debian, Ubuntu, Raspberry Pi OS:** `sudo apt install ./retifs_*.deb ./retifs-desktop_*.deb` (the second is the utility, a GTK app).
+- **Debian, Ubuntu, Raspberry Pi OS, elementary OS:** `sudo apt install ./retifs_*.deb` (retifs itself, with your libraries as folders in `~/retifs`; Debian 11, Ubuntu 20.04 and newer).
+  - The apps (the utility, Photos, Map, Contacts, Calendar) on Debian 13 or Ubuntu 24.04 and newer: their `.deb`s (`retifs-desktop_*.deb` and so on).
+  - On older systems (elementary OS 7, Ubuntu 22.04) or any other distribution: their Flatpaks, `flatpak install --user ./org.retifs.Desktop-*.flatpak` (and `org.retifs.Photos`, `.Map`, `.Contacts`, `.Calendar`). They use the retifs the `.deb` installed.
 - **Android:** install `retifs-android-*.apk` (allow installing from your browser or file manager). Open it once: it starts retifs and stays running.
 - **Haiku:** `pkgman install` the `prns` and `retifs` packages (or open them in Tracker), then restart.
 
