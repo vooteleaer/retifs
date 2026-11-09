@@ -487,6 +487,9 @@ struct Args {
     nomadnet_name: String,
     /// This device's name for keep tags and rules (ADR-0005).
     device: String,
+    /// The libraries a new install joins (`--default-libraries`, else the
+    /// package's `default-libraries` file; see [`join_defaults`]).
+    default_libraries: Option<PathBuf>,
 }
 
 /// The machine's name, lower case: the default device name for keep tags.
@@ -560,6 +563,7 @@ fn args() -> Args {
         nomadnet: None,
         nomadnet_name: "retifs site".into(),
         device: hostname(),
+        default_libraries: None,
     };
     // The store's settings file first, then the command line: a flag given
     // there overrides the file (the last value of a flag counts).
@@ -599,13 +603,14 @@ fn args() -> Args {
             "--min-copies" => a.min_copies = it.next().and_then(|v| v.parse().ok()).filter(|n| *n >= 1).expect("--min-copies N (1 or more)"),
             "--lease-term" => a.lease_term = duration_secs(&it.next().expect("--lease-term DURATION")).max(60),
             "--device" => a.device = it.next().expect("--device NAME").to_lowercase(),
+            "--default-libraries" => a.default_libraries = Some(it.next().expect("--default-libraries FILE").into()),
             "--announce-every" => a.announce_s = (duration_secs(&it.next().expect("--announce-every DURATION")) as u32).max(60),
             "-h" | "--help" => {
                 println!(
                     "retifsd [--store DIR] [--max-store SIZE] [--min-free SIZE] [--cache-max SIZE] [--private-requests]
                              [--hold-for-others SIZE] [--db-cache SIZE] [--lease-term DURATION] [--loss-target P] [--min-copies N] [--compact] [--no-storage] [--site NAME] [--slow-link-budget DURATION]\n        \
                      [--stamp-cost BITS] [--max-stamp-cost BITS] [--announce-every DURATION]\n        \
-                     [--nomadnet NAMESPACE [--nomadnet-name NAME]] [--device NAME] [--public] [--put FILE]..."
+                     [--nomadnet NAMESPACE [--nomadnet-name NAME]] [--device NAME] [--default-libraries FILE] [--public] [--put FILE]..."
                 );
                 std::process::exit(0);
             }
@@ -1131,6 +1136,43 @@ fn forget_files_of(d: &Daemon, ns: &str, checkpoint: bool) -> Result<usize, Stri
     Ok(files.len())
 }
 
+/// Joins the libraries the install brings in its `default-libraries` file
+/// (`--default-libraries FILE`, else next to retifsd or in
+/// `../share/retifs/`): `name address [node,…]` per line, `#` comments.
+/// Each lazily (nothing fetched until it's opened), and once: an address
+/// this store has had isn't joined again, so leaving one keeps it left
+/// (`<store>/defaults-joined`). One that can't be joined now is tried at the
+/// next start.
+async fn join_defaults(d: Arc<Daemon>, file: Option<PathBuf>) {
+    let exe_dir = std::env::current_exe().ok().and_then(|e| e.parent().map(|p| p.to_path_buf()));
+    let candidates: Vec<PathBuf> = file
+        .into_iter()
+        .chain(exe_dir.iter().flat_map(|dir| [dir.join("default-libraries"), dir.join("../share/retifs/default-libraries")]))
+        .collect();
+    let Some(text) = candidates.iter().find_map(|p| std::fs::read_to_string(p).ok()) else { return };
+    let done_path = d.store.root().join("defaults-joined");
+    let mut done: std::collections::BTreeSet<String> = std::fs::read_to_string(&done_path).unwrap_or_default().lines().map(|l| l.trim().to_string()).filter(|l| !l.is_empty()).collect();
+    for line in text.lines().map(str::trim).filter(|l| !l.is_empty() && !l.starts_with('#')) {
+        let mut words = line.split_whitespace();
+        let (Some(name), Some(address)) = (words.next(), words.next()) else { continue };
+        if done.contains(address) {
+            continue;
+        }
+        let from: Vec<String> = words.next().map(|n| n.split(',').map(String::from).collect()).unwrap_or_default();
+        match handle(&d, Request::NsJoin { ns: name.into(), address: address.into(), from, lazy: true }).await {
+            Ok(_) => println!("joined {name}, a library this install brings (fetched as it's opened)"),
+            // Here already, under this name or another: nothing to do.
+            Err(e) if e.contains("already") || e.contains("is here") => {}
+            Err(e) => {
+                eprintln!("default library {name}: {e}; tried again at the next start");
+                continue;
+            }
+        }
+        done.insert(address.to_string());
+        let _ = std::fs::write(&done_path, done.iter().map(|a| format!("{a}\n")).collect::<String>());
+    }
+}
+
 /// A library announce heard.
 struct HeardLib {
     lib: Option<retifs_core::announce::LibraryAnnounce>,
@@ -1587,6 +1629,8 @@ async fn serve(store: Arc<SlabStore>, identity: node::IdentitySecret, endpoint: 
         Some(n) => println!("holding up to {n} bytes for others"),
         None => println!("holding data for others up to the store limit"),
     }
+
+    tokio::spawn(join_defaults(daemon.clone(), args.default_libraries.clone()));
 
     // Public libraries heard announced (ADR-0029): the latest of each, the
     // oldest dropped beyond HEARD_LIBS_MAX.

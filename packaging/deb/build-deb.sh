@@ -56,6 +56,8 @@ for ARCH in $ARCHS; do
         install -m 0755 "$BIN/$b" "$STAGE/usr/bin/$b"
     done
     install -m 0755 "$HERE/wait-shared-instance" "$STAGE/usr/lib/retifs/"
+    # The libraries a new install joins (retifsd reads ../share/retifs/ from /usr/bin).
+    install -D -m 0644 "$ROOT/packaging/default-libraries" "$STAGE/usr/share/retifs/default-libraries"
     # The user units, pointed at the installed binaries.
     for u in "$ROOT"/packaging/systemd/*.service; do
         sed -e 's|%h/.cargo/bin/|/usr/bin/|g' -e '/^#   cp packaging/d' "$u" > "$STAGE/usr/lib/systemd/user/$(basename "$u")"

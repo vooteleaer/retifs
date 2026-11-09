@@ -40,6 +40,8 @@ New-Item -ItemType Directory -Force $Stage | Out-Null
 foreach ($b in "retifsd.exe", "retifs.exe", "retifs-cloudfiles.exe") { Copy-Item "$Built\$b" $Stage }
 if ($HasDesktop) { Copy-Item "$Built\retifs-desktop.exe" $Stage }
 Copy-Item "$Root\LICENSE" "$Stage\LICENSE-retifs.txt"
+# The libraries a new install joins (retifsd reads it next to itself).
+Copy-Item "$Root\packaging\default-libraries" "$Stage\default-libraries"
 # retifsd is built with Prns's crates: their licenses come along.
 Copy-Item "$Prns\LICENSE-MIT" "$Stage\LICENSE-prns-MIT.txt"
 Copy-Item "$Prns\LICENSE-APACHE" "$Stage\LICENSE-prns-APACHE.txt"

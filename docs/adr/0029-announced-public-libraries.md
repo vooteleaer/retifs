@@ -44,3 +44,4 @@ A public library (a map, a country's places, a site, later an app store) is publ
 - Maps, places and other public data can be found without passing links and without the internet.
 - A new node format in retifsd (built: `retifs_core::announce`), plus an "Announces" view in the apps.
 - Test vectors for the app data: not yet made.
+- **Libraries an install brings (2026-11-09):** the packages carry `default-libraries` (`packaging/default-libraries`: `name address node,…` per line), which retifsd reads next to itself, in `../share/retifs/`, or from `--default-libraries FILE` (the Android app passes it). Each is joined once and lazily; an address the store has had (`<store>/defaults-joined`) isn't joined again, so one left stays left. The retifs packages bring `retifs-installers`, from cafa-cloud's node.

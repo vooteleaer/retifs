@@ -23,6 +23,8 @@ From the [release](https://github.com/vooteleaer/retifs/releases):
 - **Android:** install `retifs-android-*.apk` (allow installing from your browser or file manager). Open it once: it starts retifs and stays running.
 - **Haiku:** `pkgman install` the `prns` and `retifs` packages (or open them in Tracker), then restart.
 
+Every install also joins the library **retifs-installers** by itself (nothing of it is fetched until you open it): new versions of retifs and the apps arrive there, through retifs. Leave it if you don't want it; it isn't joined again.
+
 Open the utility (the tray icon, or the retifs app). It should say retifs is running and show this device. If it waits for Reticulum, check step 1.
 
 ## 3. Your first library
