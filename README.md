@@ -11,7 +11,7 @@ Most people keep their photos and documents "in the cloud": on a company's serve
 
 retifs keeps them on **your own devices** instead: your phone, your laptop, a computer at home, a small box at a relative's. Each device has what it needs, they keep each other up to date, and between them they keep **three copies** of everything by default, so losing one device doesn't lose anything. Everything is **encrypted before it leaves the device it was made on**: a device that only stores your data for you, yours or someone else's, sees nothing but noise.
 
-On your computer it looks like an ordinary folder (in Windows Explorer, on Linux, on Haiku). Files open as usual; the ones not on this device yet are fetched when you open them. Apps for photos, maps, contacts and calendars work on the same data (they live in their own repositories and are coming).
+On your computer it looks like an ordinary folder (in Windows Explorer, on Linux, on Haiku). Files open as usual; the ones not on this device yet are fetched when you open them. Apps for [photos](https://github.com/vooteleaer/retifs-photos), [maps](https://github.com/vooteleaer/retifs-map), [contacts](https://github.com/vooteleaer/retifs-contacts) and [calendars](https://github.com/vooteleaer/retifs-calendar) work on the same data, and [retifs-desktop](https://github.com/vooteleaer/retifs-desktop) manages it all; they're demos, each in its own repository.
 
 ## Why not just Google Drive, Dropbox or iCloud?
 
@@ -45,7 +45,7 @@ The details are in the [architecture](docs/01-architecture.md).
 
 ## Try it
 
-You need Reticulum running on the machine first ([Prns](https://github.com/KenAKAFrosty/Prns), or Python `rnsd`); retifs joins it.
+**[Getting started](docs/getting-started.md)** walks you through two devices and the apps in about half an hour. In short: you need Reticulum running on the machine first ([Prns](https://github.com/KenAKAFrosty/Prns), or Python `rnsd`); retifs joins it. Installers are on the [releases page](https://github.com/vooteleaer/retifs/releases).
 
 - **Windows 10 and 11:** `retifs-setup-*.exe` installs for the current user, no administrator needed. Your libraries appear in Explorer under `%USERPROFILE%\retifs`.
 - **Debian, Ubuntu, Raspberry Pi OS:** `sudo apt install ./retifs_*.deb`.
@@ -146,6 +146,7 @@ See the [prototype plan](docs/05-prototype-plan.md).
 | [Open questions](docs/06-open-questions.md) | Unresolved topics |
 | [Native API](docs/07-api.md) | `libretifs`: records, attributes, blocks, queries, history (draft) |
 | [External review](docs/09-external-review.md) | What the crypto review should look at |
+| [Getting started](docs/getting-started.md) | Two devices and the apps, step by step (test release) |
 | [Command line](docs/10-command-line.md) | Installing, and every `retifs` command by task |
 | [ADRs](docs/adr/) | Decision log |
 
