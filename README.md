@@ -45,7 +45,7 @@ The details are in the [architecture](docs/01-architecture.md).
 
 ## Try it
 
-**[Getting started](docs/getting-started.md)** walks you through two devices and the apps in about half an hour. In short: you need Reticulum running on the machine first ([Prns](https://github.com/KenAKAFrosty/Prns), or Python `rnsd`); retifs joins it. Installers are on the [releases page](https://github.com/vooteleaer/retifs/releases).
+**[Getting started](docs/getting-started.md)** walks you through two devices and the apps in about half an hour. In short: you need Reticulum running on the machine first ([Prns](https://github.com/KenAKAFrosty/Prns/releases/tag/v0.3.8)'s `prnsd`, or Python `rnsd`); retifs joins it. Installers are on the [releases page](https://github.com/vooteleaer/retifs/releases).
 
 - **Windows 10 and 11:** `retifs-setup-*.exe` installs for the current user, no administrator needed. Your libraries appear in Explorer under `%USERPROFILE%\retifs`.
 - **Debian, Ubuntu, Raspberry Pi OS:** `sudo apt install ./retifs_*.deb`.

@@ -8,7 +8,7 @@ You'll need two devices: a computer (Windows or Linux) and a phone (Android), or
 
 retifs runs on [Reticulum](https://reticulum.network) and joins the device's Reticulum *shared instance*; it never brings its own. Start one on each device:
 
-- **Linux, Windows, macOS:** Python RNS. `pip install rns`, then run `rnsd` (leave it running; on Linux a systemd user service is handy). [Prns](https://github.com/KenAKAFrosty/Prns)'s `prnsd` works the same way if you build it.
+- **Linux, Windows, macOS:** [Prns](https://github.com/KenAKAFrosty/Prns)'s `prnsd`. Download it for your platform from the [Prns 0.3.8 release](https://github.com/KenAKAFrosty/Prns/releases/tag/v0.3.8) (`prnsd-0.3.8-<platform>`), unpack it and run `prnsd`. On first start it writes a configuration with the automatic interfaces on; on a desktop it sits in the tray. Python's `rnsd` (`pip install rns`) works too.
 - **Android:** an app that runs a Reticulum shared instance on the phone. retifs was tested with Prns's Android app (not released yet). Sideband and Columba run one too (on `127.0.0.1:37428`), but retifs hasn't been tried with them: tell us how it goes.
 - **Haiku:** install the `prns` package from the release; it starts `prnsd` at login.
 
