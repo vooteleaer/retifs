@@ -52,7 +52,7 @@ retifs mount photos --via home # a library your home node holds, nothing of it k
 
 (For `--via`, the home node admits this one first: `retifs app add laptop --ns photos --write --device <this node>`; `home` is a contact or a node address.)
 
-- **Linux:** a FUSE mount. Attributes are `user.retifs.*` xattrs; `.query/<terms>/` lists matches (`ls ~/retifs/photos/.query/album=Prangli\ 2026/`); `systemctl --user enable --now retifs-mount@photos` mounts it at login.
+- **Linux:** a FUSE mount. retifsd mounts every library by itself at `~/retifs/<library>` (the user's own store: not with `--store` or `--no-mounts`); `retifs unmount NAME` takes one down until retifsd starts again. Attributes are `user.retifs.*` xattrs; `.query/<terms>/` lists matches (`ls ~/retifs/photos/.query/album=Prangli\ 2026/`); `systemctl --user enable --now retifs-mount@photos` mounts it at login.
 - **Windows:** a folder in Explorer. Files are fetched when opened, "Always keep on this device" keeps them here, **Share with retifs…** is in the context menu, and a library you may only read is a read-only folder. `retifs unmount photos --forget` also removes it from Explorer.
 - **Haiku:** each library is a volume in `~/retifs`, with its attributes as Haiku attributes and live queries in Tracker.
 - Photos in albums also show under `Albums/<album>/`: the same files, and deleting one there only takes it out of the album.

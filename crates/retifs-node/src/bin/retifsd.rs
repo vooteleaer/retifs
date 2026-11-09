@@ -490,6 +490,11 @@ struct Args {
     /// The libraries a new install joins (`--default-libraries`, else the
     /// package's `default-libraries` file; see [`join_defaults`]).
     default_libraries: Option<PathBuf>,
+    /// The store was given (`--store`): not the user's own, so its
+    /// libraries aren't mounted as folders (Linux).
+    store_given: bool,
+    /// `--no-mounts`: no library as a folder in ~/retifs (Linux).
+    no_mounts: bool,
 }
 
 /// The machine's name, lower case: the default device name for keep tags.
@@ -539,6 +544,9 @@ mod settings;
 #[cfg(target_os = "haiku")]
 #[path = "retifsd/haiku_mounts.rs"]
 mod haiku_mounts;
+#[cfg(target_os = "linux")]
+#[path = "retifsd/linux_mounts.rs"]
+mod linux_mounts;
 
 fn args() -> Args {
     let mut a = Args {
@@ -564,6 +572,8 @@ fn args() -> Args {
         nomadnet_name: "retifs site".into(),
         device: hostname(),
         default_libraries: None,
+        store_given: false,
+        no_mounts: false,
     };
     // The store's settings file first, then the command line: a flag given
     // there overrides the file (the last value of a flag counts).
@@ -581,7 +591,11 @@ fn args() -> Args {
     let mut it = from_file.into_iter().chain(cli);
     while let Some(arg) = it.next() {
         match arg.as_str() {
-            "--store" => a.store = it.next().expect("--store DIR").into(),
+            "--store" => {
+                a.store = it.next().expect("--store DIR").into();
+                a.store_given = true;
+            }
+            "--no-mounts" => a.no_mounts = true,
             "--put" => a.put.push(it.next().expect("--put FILE").into()),
             "--public" => a.public = true,
             "--max-store" => a.budget.max_store = Some(size(&it.next().expect("--max-store SIZE"))),
@@ -610,7 +624,7 @@ fn args() -> Args {
                     "retifsd [--store DIR] [--max-store SIZE] [--min-free SIZE] [--cache-max SIZE] [--private-requests]
                              [--hold-for-others SIZE] [--db-cache SIZE] [--lease-term DURATION] [--loss-target P] [--min-copies N] [--compact] [--no-storage] [--site NAME] [--slow-link-budget DURATION]\n        \
                      [--stamp-cost BITS] [--max-stamp-cost BITS] [--announce-every DURATION]\n        \
-                     [--nomadnet NAMESPACE [--nomadnet-name NAME]] [--device NAME] [--default-libraries FILE] [--public] [--put FILE]..."
+                     [--nomadnet NAMESPACE [--nomadnet-name NAME]] [--device NAME] [--default-libraries FILE] [--no-mounts] [--public] [--put FILE]..."
                 );
                 std::process::exit(0);
             }
@@ -1136,6 +1150,83 @@ fn forget_files_of(d: &Daemon, ns: &str, checkpoint: bool) -> Result<usize, Stri
     Ok(files.len())
 }
 
+/// The record a member's node keeps in each library it writes, naming the
+/// nodes it leased that library's files to (ADR-0035): `type`, `node` (its
+/// own address), `holders` (theirs). Members then ask those nodes too, so a
+/// file is found while the node that placed it is away.
+const HOLDERS_TYPE: &str = "retifs.holders";
+/// How often a node's holders record is brought up to date.
+const HOLDERS_EVERY: Duration = Duration::from_secs(600);
+
+/// The nodes members' `retifs.holders` records name for library `ns`
+/// (this node's own left out).
+fn ns_holders(d: &Daemon, ns: &str) -> Vec<PeerId> {
+    let Ok(term) = retifs_store::Term::parse(&format!("type={HOLDERS_TYPE}")) else { return Vec::new() };
+    let mut out: Vec<PeerId> = Vec::new();
+    for r in d.store.query(ns, &[term]).unwrap_or_default() {
+        let Some(Value::List(list)) = r.attrs.get("holders") else { continue };
+        for v in list {
+            if let Value::Str(h) = v
+                && let Some(p) = parse_destination(h).map(|p| *p.as_bytes())
+                && p != d.node_id
+                && !out.contains(&p)
+            {
+                out.push(p);
+            }
+        }
+    }
+    out
+}
+
+/// Brings this node's holders record in `ns` up to date: the nodes holding
+/// leased copies of the library's files, written only when they changed.
+async fn update_holders(d: &Daemon, ns: &str) -> Result<(), String> {
+    let records = d.store.records(ns).map_err(|e| e.to_string())?;
+    let roots: std::collections::HashSet<Cid> = records.iter().flat_map(|r| r.blocks.iter().map(|b| b.root)).collect();
+    let mut holders: Vec<String> = d
+        .store
+        .own_leases()
+        .map_err(|e| e.to_string())?
+        .into_iter()
+        .filter(|l| l.roots.iter().any(|r| roots.contains(r)))
+        .map(|l| hex(&l.holder))
+        .collect();
+    holders.sort();
+    holders.dedup();
+    let mine = records.iter().find(|r| {
+        r.attrs.get("type") == Some(&Value::Str(HOLDERS_TYPE.into())) && r.attrs.get("node") == Some(&Value::Str(d.node_hex.clone()))
+    });
+    let now: Vec<Value> = holders.iter().cloned().map(Value::Str).collect();
+    let list = AttrValue::List(holders.into_iter().map(AttrValue::Str).collect());
+    let step = match mine {
+        Some(r) if r.attrs.get("holders") == Some(&Value::List(now.clone())) => return Ok(()),
+        Some(r) => TxStep::Set { id: hex(&r.id), attrs: vec![("holders".into(), list)], unset: Vec::new(), data: None, blocks: None },
+        None if now.is_empty() => return Ok(()),
+        None => TxStep::Create {
+            attrs: vec![("type".into(), AttrValue::Str(HOLDERS_TYPE.into())), ("node".into(), AttrValue::Str(d.node_hex.clone())), ("holders".into(), list)],
+            data: None,
+        },
+    };
+    transaction(d, ns, vec![step]).await.map(|_| ())
+}
+
+/// Every library this node may write: its holders record kept up to date.
+async fn holders_keeper(d: Arc<Daemon>) {
+    tokio::time::sleep(Duration::from_secs(60)).await;
+    loop {
+        for ns in visible_namespaces(&d).unwrap_or_default() {
+            if ns.starts_with("ch-") {
+                continue;
+            }
+            let may = own_writer(&d, &ns).ok().zip(materialize(&d, &ns).ok()).is_some_and(|(w, m)| m.writers.get(&w).is_some_and(|r| r.contains(&Right::Write)));
+            if may && let Err(e) = update_holders(&d, &ns).await {
+                eprintln!("holders {ns}: {e}");
+            }
+        }
+        tokio::time::sleep(HOLDERS_EVERY).await;
+    }
+}
+
 /// Joins the libraries the install brings in its `default-libraries` file
 /// (`--default-libraries FILE`, else next to retifsd or in
 /// `../share/retifs/`): `name address [node,…]` per line, `#` comments.
@@ -1631,6 +1722,7 @@ async fn serve(store: Arc<SlabStore>, identity: node::IdentitySecret, endpoint: 
     }
 
     tokio::spawn(join_defaults(daemon.clone(), args.default_libraries.clone()));
+    tokio::spawn(holders_keeper(daemon.clone()));
 
     // Public libraries heard announced (ADR-0029): the latest of each, the
     // oldest dropped beyond HEARD_LIBS_MAX.
@@ -1745,6 +1837,11 @@ async fn serve(store: Arc<SlabStore>, identity: node::IdentitySecret, endpoint: 
     tokio::spawn(leaver(daemon.clone()));
     #[cfg(target_os = "haiku")]
     tokio::spawn(haiku_mounts::keeper(daemon.clone(), args.store.clone()));
+    // The user's own store only (no --store: a test node's isn't anyone's files).
+    #[cfg(target_os = "linux")]
+    if !args.store_given && !args.no_mounts {
+        tokio::spawn(linux_mounts::keeper(daemon.clone(), args.store.clone()));
+    }
     watchdog(daemon.clone());
     if daemon.keyring.is_some() {
         let keeper = daemon.clone();
@@ -4295,7 +4392,12 @@ async fn read_range_fetching(d: &Daemon, file: &FileRef, range: std::ops::Range<
 async fn ensure_local(d: &Daemon, file: &FileRef, range: std::ops::Range<u64>, ns: Option<&str>, wait: Duration) -> Result<(), String> {
     let deadline = Instant::now() + wait;
     let mut peers: Vec<PeerId> = match ns {
-        Some(ns) => d.store.ns_peers(ns).map_err(|e| e.to_string())?,
+        // Its members, then the nodes they say hold copies (ADR-0035).
+        Some(ns) => {
+            let mut p = d.store.ns_peers(ns).map_err(|e| e.to_string())?;
+            p.extend(ns_holders(d, ns).into_iter().filter(|h| !p.contains(h)).collect::<Vec<_>>());
+            p
+        }
         None => Vec::new(),
     };
     for h in d.store.hints(&file.root).unwrap_or_default() {
@@ -4825,7 +4927,9 @@ fn apply_keep(d: &Daemon, ns: &str, records: &[Record]) -> Result<(), String> {
     }
     let all = !d.store.ns_keep_by_rules(ns).map_err(|e| e.to_string())?;
     let rules = keep_rules(records, &d.device);
-    let peers = d.store.ns_peers(ns).map_err(|e| e.to_string())?;
+    // Its members, then the nodes they say hold copies (ADR-0035).
+    let mut peers = d.store.ns_peers(ns).map_err(|e| e.to_string())?;
+    peers.extend(ns_holders(d, ns).into_iter().filter(|h| !peers.contains(h)).collect::<Vec<_>>());
     let mut keep: std::collections::HashSet<Cid> = std::collections::HashSet::new();
     let mut already: std::collections::HashSet<Cid> = d.store.ns_kept(ns).map_err(|e| e.to_string())?.iter().map(|f| f.root).collect();
     let mut pulled = 0;

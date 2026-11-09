@@ -22,11 +22,12 @@ First steps
     retifs heard                public libraries announced on the network
     retifs ns join NAME ADDRESS --lazy
     retifs nodes                storage nodes heard
-    retifs mount NAME           a library as files under ~/retifs/NAME
+    (every library is a folder in ~/retifs/NAME: retifsd mounts them itself)
+    retifs unmount NAME         takes one down until retifsd starts again
 
 Optional services (systemctl --user enable --now ...):
     retifs-gateway              libraries as websites at http://NAME.localhost:8740/
-    retifs-mount@NAME           a library mounted at login
+    retifs-mount@NAME           a library mounted by systemd instead (retifsd --no-mounts)
     retifs-extractd             attributes from files (see the unit for its token)
 
 Settings: ~/.local/share/retifs/retifs.toml (the daemon writes a commented
