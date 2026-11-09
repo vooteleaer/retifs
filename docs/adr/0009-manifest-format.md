@@ -51,7 +51,7 @@ The `retifs-core` tests cover:
 - detection of missing and tampered chunks and of inconsistent spans;
 - all stored blobs being class-sized.
 
-Still missing: cross-implementation manifest vectors.
+Cross-implementation vectors: `manifest-v1.json`, verified with RNS primitives by `verify_manifest_rns.py` (see Irreversible above).
 
 ## Blocking acceptance
 - ~~Inline tiny files~~: **added (2026-10-14)** as node kind 2: `version ‖ 2 ‖ u16_be len ‖ data`, allowed only as the root, for files of at most `INLINE_MAX` = 951 bytes. The root then fits the 1 KiB class (512 B for the smallest), so a tiny file is one blob and one fetch instead of two ([ADR-0013](0013-slow-links.md)).

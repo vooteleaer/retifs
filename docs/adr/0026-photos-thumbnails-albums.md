@@ -19,6 +19,7 @@ The API draft (§7) gave each content block a role (`original`, `thumb:256`). Th
 ### Block roles are attributes
 - `blocks[0]` is the record's content (the original), as always.
 - Other blocks are named by attributes: `block:<role> = <index>` into the list, e.g. `block:thumb = 1`, `block:preview = 2`.
+- `size` is the first block's size (the content's), not all blocks'. Until 2026-11-09 the daemon set it to the sum when blocks were given without a `size`, so file views made each photo look bigger than its content and every read past its end failed; the file tree now takes a file's size from its read-cap.
 - When the content is replaced, the record's blocks become the new content alone: the role attributes point past the list and mean nothing, and whatever made them makes them again (the extractor's `extracted` marker changes, [ADR-0023](0023-attribute-extraction.md)).
 - Writing blocks needs `@content` in an app's key limit (ADR-0023), and storing them first (`Put`) is allowed to such an app.
 
@@ -32,11 +33,12 @@ Made by the attribute producer (`retifs-extractd`, ADR-0023) for images:
 
 Turned the way the EXIF orientation says, so every app can show them as they are. Each is an encrypted block like any other, synced and placed with the record, so a phone shows a grid without fetching originals. Video frames come later.
 
-### Albums are records
-- An album: `type = application/x-vnd.retifs.album`, `name`, `note`, `cover` (a photo's record ID).
-- A photo is in an album by reference: `album:<album id> = <album name>` (a hint). In several albums: several keys. Renaming an album touches no photo.
-- An album's photos: `has:album:<id>`, in any library. Sharing an album is a share of that query ([ADR-0021](0021-shares.md)), kept up to date as photos are added.
-- A plain `album = "Prangli 2026"` (from before) is still shown as an album by name.
+### Albums are attributes on photos (2026-11-05; at first they were records)
+- A photo is in an album by its `album` attribute: a name, or a list of names. An album exists while some photo is in it; one name, in any case and in any library, is one album. There are no album records.
+- A cover: `cover-of` on the photo, the same way (the album's name, or a list).
+- An album's photos: `album=<name>` (a list matches by any of its names), in any library. Sharing an album is a share of that query ([ADR-0021](0021-shares.md)), kept up to date as photos are added.
+- The album records first made (`type = application/x-vnd.retifs.album`, with `album:<album id>` keys on their photos) are moved onto their photos by the apps, and dropped.
+- File views show a file in albums also under `/Albums/<album>/` ([ADR-0002](0002-os-integration.md)); deleting it there takes the file out of the album.
 
 ### Favourites and people
 - `favorite = true` marks a favourite.
@@ -50,5 +52,5 @@ Thumbnails are as private as the originals (same library, same keys). An album's
 
 ## Consequences
 - Any app, or Find, can show a photo small without the original.
-- Albums can be shared, renamed and given covers without touching their photos.
+- Albums can be shared and given covers; an album is its photos' attribute, so renaming one rewrites their `album`.
 - The extractor reads whole images to make thumbnails (it read only their heads before); it does so once per content.

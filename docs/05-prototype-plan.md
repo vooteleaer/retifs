@@ -73,6 +73,7 @@ Prototypes are throwaway. They're for learning, not for locking in the format. T
 - [ ] Search, continued: one builder per index channel, remote live query.
 - [x] Maps, places and addresses as public libraries: vector tiles, places by cell, a gazetteer searched through the blind index, no internet service ([ADR-0027](adr/0027-places.md), [ADR-0028](adr/0028-maps-over-retifs.md)).
 - [x] Per-writer commit chains (one commit per modification), merge, history queries, per-record `versions` ([ADR-0017](adr/0017-multi-writer-namespaces.md)).
+- [x] Leaving a library: hidden at once, its data goes in the background; one made here only with `--mine`. Deleting a library on every member's node: `ns delete NS --yes`, a `retifs.deleted` record counted only from a writer holding `grant`, 30 days' grace ([ADR-0034](adr/0034-deleting-a-library.md)).
 
 ## Phase 3: identity and permissions
 - [x] Group namespaces, validate-on-read (every reader checks grants on merge), key rotation on removal, limited grants narrowed on delegation ([ADR-0017](adr/0017-multi-writer-namespaces.md)).
@@ -83,8 +84,10 @@ Prototypes are throwaway. They're for learning, not for locking in the format. T
 - [x] Shares: a selection (records, a folder, a query) as its own namespace kept up to date by the owner's nodes, content by reference, attributes optionally left out; started from Explorer's context menu ([ADR-0021](adr/0021-shares.md)).
 - [ ] Shares, continued: write-back from members, resharing, default attribute filters (location in photos); Nautilus and Dolphin menus.
 - [x] Sharing: `retifs:` links and QR codes, one-use invitations (`/retifs/invite`), contacts as petnames in `me`, fingerprint words ([ADR-0020](adr/0020-sharing-names-invitations.md)).
+- [x] Readers as members: invitations to read (`invite create NS --read`), readers listed in `ns info`, rekeys wrapped to every member ([ADR-0017](adr/0017-multi-writer-namespaces.md), [ADR-0020](adr/0020-sharing-names-invitations.md)).
 - [ ] Sharing, continued: profiles (`/retifs/profile`), sending links over LXMF.
 - [ ] YubiKey-backed Prns `IdentitySigner` (upstream: fallible `sign()`, X25519 exchange through a trait).
+- [ ] Recovery kit: 24 words for a recovery identity that can bring the user's libraries back (proposed, nothing built; [ADR-0033](adr/0033-recovery.md)).
 - [x] Per-app capabilities on the local socket: an app socket with tokens scoped to namespaces and read/write, pinned to the executable on Linux ([ADR-0004](adr/0004-native-record-api.md)).
 - [ ] Session capabilities; app scopes as capability chains (record filters, keys).
 
@@ -93,8 +96,10 @@ Prototypes are throwaway. They're for learning, not for locking in the format. T
 - [x] Reads on demand: only the byte ranges read, fetched from peers within a wait, never hanging (offline semantics, [ADR-0002](adr/0002-os-integration.md)).
 - [x] Writes without whole-file buffering: write sessions spooled in the daemon, streamed into the store ([ADR-0002](adr/0002-os-integration.md)).
 - [x] `retifs mount NS [DIR]`, `retifs mount`, `retifs unmount NS`: one command for the file tree on Linux (FUSE) and Windows (Cloud Files) ([ADR-0002](adr/0002-os-integration.md)).
+- [x] Albums in the file views (`retifs-tree`): a file whose `album` names albums is also under `/Albums/<album>/`; deleting it there takes it out of the album ([ADR-0002](adr/0002-os-integration.md), [ADR-0026](adr/0026-photos-thumbnails-albums.md)).
 - [x] Packaging, first step: systemd user units for retifsd, retifs-mount@<namespace> and retifs-gateway (`packaging/systemd`), and "Try it" in the README.
-- [ ] Linux, continued: FUSE passthrough, several namespaces in one mount, distribution packages (.deb, apk).
+- [x] Debian packages (`packaging/deb`, amd64 and arm64): retifsd and the tools as user services; Reticulum (Prns or another shared instance) installed apart.
+- [ ] Linux, continued: FUSE passthrough, several namespaces in one mount, an Alpine package (apk).
 - [ ] apkovl in the user namespace.
 
 ## Later: user clients (Android, Linux, Haiku, Windows)
@@ -108,6 +113,8 @@ Prototypes are throwaway. They're for learning, not for locking in the format. T
 ## Windows client
 - [x] Cloud Files provider (`retifs-cloudfiles`): a namespace as a sync root, placeholders hydrated on demand, remote changes followed, keep tags as "Always keep on this device" / "Free up space" ([ADR-0002](adr/0002-os-integration.md)).
 - [x] Local changes as writes: new and edited files and folders, deletes (and the Recycle Bin), renames, saves that rename aside.
+- [x] Holding up in Explorer: `cloud-filter` vendored and patched (a failed read reports its range, no panic on failure), placeholders filled folders first, reads waiting for content that keeps arriving (up to 10 min), Explorer told when a folder's entries change.
+- [x] Installer: `retifs-setup.exe`, per user (`packaging/windows`).
 - [x] Share with retifs… in Explorer's context menu ([ADR-0021](adr/0021-shares.md)): a classic verb ("Show more options" on Windows 11), the recipient's command on the clipboard.
 - [ ] In Windows 11's top-level menu (a packaged `IExplorerCommand`), a share dialog (in the desktop utility); attributes as properties and columns.
 

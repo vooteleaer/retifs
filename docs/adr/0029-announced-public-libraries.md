@@ -2,7 +2,7 @@
 
 - **Status:** accepted (prototype)
 - **Date:** 2026-10-28
-- **Irreversible:** no while proposed. Once nodes and apps rely on it, the announce's app data is a network format: versioned (`v`), and changes need a new version.
+- **Irreversible:** partly. Nodes and apps rely on it now, so the announce's app data is a network format: versioned (`v`), and changes need a new version.
 
 ## Context
 A public library (a map, a country's places, a site, later an app store) is published as a channel ([ADR-0015](0015-signed-channels.md), [ADR-0016](0016-records-and-snapshots.md)). To join one now, someone has to pass its link along. Reticulum apps solve finding things differently: nodes **announce** what they offer, and apps show what they have heard. Sideband and MeshChat have an "Announces" view, and NomadNet lists the nodes it heard. Maps over retifs ([ADR-0028](0028-maps-over-retifs.md)) need the same thing, so that a map for an area can be found without the internet or a directory server.
@@ -25,7 +25,7 @@ A public library (a map, a country's places, a site, later an app store) is publ
   - `seq`: the channel's latest version, so a listener can see it's alive and current.
   - `fmt`: the library's format version (channel and records), so a node knows before joining whether it can read it.
   - The whole app data stays within 300 bytes (an announce has room for 316). `retifs.*` records (placement, shares) aren't content and aren't listed; to fit, the description is shortened first (to 24 bytes), then the least common types are left out.
-- **Listening:** every node keeps the library announces it hears (the latest per library, with the announcing node (its `retifs.node` address, from the announcing identity: joining asks it first), hop count and time heard; at most 500, the oldest dropped), and answers `retifs heard` / the local API `HeardLibraries`, which also says which of them are here already.
+- **Listening:** every node keeps the library announces it hears (the latest per library, with the announcing node (its `retifs.node` address, from the announcing identity: joining asks it first), hop count and time heard; at most 500, the oldest dropped; kept across restarts in the store's `heard` file, up to a week old), and answers `retifs heard` / the local API `HeardLibraries`, which also says which of them are here already.
 - **In the apps, an "Announces" view as in LXMF apps:** public libraries heard, newest first, with name, about, what they hold, hops and when. Each has a **Join** button (follows the channel lazily, ADR-0028). Each app shows the ones it can use: the map app the ones with tilesets or places in view, the desktop utility all of them.
 - **When it isn't compatible**, the general rules of [ADR-0030](0030-data-outlives-apps.md) apply: nothing breaks, and nothing is joined that can't be used. For announced libraries they mean:
   1. **A newer announce** (`v` this node doesn't know): kept and listed as "needs a newer retifs", with only the fields it can read. Never parsed by guessing.
@@ -42,5 +42,5 @@ A public library (a map, a country's places, a site, later an app store) is publ
 
 ## Consequences
 - Maps, places and other public data can be found without passing links and without the internet.
-- A new node format to implement in retifsd, plus the "Announces" view in the desktop utility and the map app.
-- Test vectors for the app data once accepted.
+- A new node format in retifsd (built: `retifs_core::announce`), plus an "Announces" view in the apps.
+- Test vectors for the app data: not yet made.

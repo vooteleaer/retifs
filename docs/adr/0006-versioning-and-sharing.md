@@ -49,6 +49,7 @@ Option 3.
 - **A share is a namespace.**
   - **Group namespace:** one group key, wrapped separately for each member (X25519 → HKDF → Token). All members may write within their capabilities.
   - **Share namespace** (filtered, read-only): the owner's daemon maintains a projection of a query (e.g. `album = "Prangli 2026"`) with its own key and index. Only per-block keys are re-wrapped, so no content is copied or re-encrypted. While the capability is valid, the share stays live.
+  - Superseded in part by [ADR-0021](0021-shares.md): a share's records are copies of the selected records' attributes and content references (read-caps carry their own seeds), so no keys are re-wrapped.
 - A filter given together with the full namespace key would be a promise, not crypto. That's why filtered shares get their own namespace and key.
 - **Removing a member** rotates the group key and re-wraps it for the remaining members. The removed member keeps what they had, gets nothing new, and their later writes fail validation.
 - **Membership changes are commits** and are ordered causally: a write counts if its author's capability was valid in the history that write had seen. The exact rule for writes made concurrently with a removal is an open question.
@@ -77,6 +78,6 @@ See the [threat model](../04-threat-model.md).
 - **History:** `retifs rec history NS ID` walks the commit chain and shows the versions where a record changed; `retifs query NS --at VERSION …` queries the namespace as it was (the same terms, matched in memory against that version's snapshot).
 - **Retention:** every version is kept locally; only the latest is placed on other nodes (older ones are unneeded there but stay pinned here).
 - **Sharing:** a namespace's channel address shares it read-only; followers get its latest version. Followed namespaces (`ch-…`) are read-only.
-- **Since done (2026-10-20):** several writers per namespace and transactions over several records ([ADR-0017](0017-multi-writer-namespaces.md)); history fetched from peers on demand when a node started from a checkpoint ([ADR-0018](0018-state-trees.md)).
+- **Since done (2026-10-20 to 2026-11-03):** several writers per namespace and transactions over several records ([ADR-0017](0017-multi-writer-namespaces.md)); history fetched from peers on demand when a node started from a checkpoint ([ADR-0018](0018-state-trees.md)); removing a member rotates the read key, for every remaining member, readers included (ADR-0017); filtered shares ([ADR-0021](0021-shares.md)).
 - **Not yet:** thinning policies.
 

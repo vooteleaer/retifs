@@ -34,6 +34,6 @@ BeOS did this with MIME types: every file had `BEOS:TYPE`. A person in People wa
 None.
 
 ## Consequences
-- Haiku's Tracker and People can read retifs contacts as they are, once the Haiku frontend maps `type` to `BEOS:TYPE`.
+- Haiku's Tracker and People read retifs contacts as they are: the Haiku frontend (`retifs-haikufs`) maps `type` to `BEOS:TYPE`, and People's `META:` attributes to the contact's keys.
 - Bridges and other systems recognise the kinds without a table of ours.
 - Types are longer to type in a query than `type=contact`; Find and apps hide that.

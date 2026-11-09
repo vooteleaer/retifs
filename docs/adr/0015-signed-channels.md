@@ -54,7 +54,7 @@ See the [threat model](../04-threat-model.md).
 
 ## Consequences
 - Easier: sites and app updates without a server or a name system; followers keep content alive and nearby; history is a walkable chain.
-- Harder: polling for heads costs a small request per channel per hint every 30 s (announce-driven updates need announce app data from Prns); key rotation and thresholds are still to design.
+- Harder: polling for heads costs a small request per channel per hint every 30 s (announce-driven updates need announce app data from Prns, passed on since Prns 0.3.8); key rotation and thresholds are still to design.
 
 ## Implementation status (2026-10-16)
 - **Formats:** `retifs_core::channel` (`ChannelKey`, `ChannelAddr`, `Commit`, `Head`); vectors in `channel-v1.json`, verified by `verify_channel_rns.py` with RNS's HKDF, Ed25519 and Token (17/17: commit chunks decrypt, convergent seeds, layouts, signatures, the head's encrypted seed, the head byte for byte).
@@ -63,5 +63,5 @@ See the [threat model](../04-threat-model.md).
 - **CLI:** `retifs channel create NAME`, `retifs channel publish NAME FILE`, `retifs follow ADDRESS --from NODE`, `retifs channels`.
 - **Followers serve:** once a version is complete, a follower pins it and serves it (and the commit, and the head) to anyone proving the chunks' seeds, i.e. other readers. Following a channel thus mirrors it. The trade-off: other readers can see that this node follows the channel; that is the same exposure as holding published data.
 - **Live, three daemons:** P created a channel and published a 300 KB version; F1 followed it (hint P) and had it 32 s later. P published version 2 (one byte changed); F1 updated by itself within a minute and forgot version 1 (its chunks shared with version 2 stayed). With P offline, F2 followed with **only F1** as hint and got head, commit and content from F1 (hash matched version 2).
-- **Not yet:** announce-driven updates (polling every 30 s for now), staleness policy from `time`, walking history (`versions`), writer key rotation and thresholds, multi-writer namespaces, trees beyond snapshots (a version is one file, or a namespace snapshot with content blocks, [ADR-0016](0016-records-and-snapshots.md)).
+- **Not yet:** announce-driven updates (polling every 30 s for now), staleness policy from `time`, walking history (`versions`), writer key rotation and thresholds. (Since done: multi-writer namespaces, [ADR-0017](0017-multi-writer-namespaces.md); trees beyond snapshots, [ADR-0018](0018-state-trees.md). A channel's version is still one file, or a namespace snapshot with content blocks, [ADR-0016](0016-records-and-snapshots.md).)
 

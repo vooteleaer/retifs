@@ -80,8 +80,8 @@ Files, folders, albums, packages, versions and branches are all combinations of 
 - Renewal can be delegated to a pinning service via a capability.
 - **Seeking and replication** ([ADR-0010](adr/0010-continuous-seeking.md), proposed): a persistent chunk-level want-list and an event-driven seeker (`have` / `get` / `put` / `lease` / `receipt`). Missing data is a normal state that fills in as holders become reachable.
 - **Redundancy by default** ([ADR-0011](adr/0011-redundancy-by-default.md), proposed): every piece of own data has a replication target, met by own-node pools, recruited peers and volunteer storage nodes, with repair and storage proofs.
-- **Disk budget** ([ADR-0012](adr/0012-disk-budget.md), proposed): a store size limit and a free-space reserve; evict cache first, refuse new leases next, never silently drop pinned data or active leases.
-- **Placement follows need** ([ADR-0014](adr/0014-placement-follows-need.md), proposed): every node is a storage node by default; whoever needs data leases it to the nearest storage nodes (hops and link cost), renewing keeps it alive, and unneeded copies expire.
+- **Disk budget** ([ADR-0012](adr/0012-disk-budget.md), accepted as prototype): a store size limit and a free-space reserve; evict cache first, refuse new leases next, never silently drop pinned data or active leases.
+- **Placement follows need** ([ADR-0014](adr/0014-placement-follows-need.md), accepted as prototype): every node is a storage node by default; whoever needs data leases it to the nearest storage nodes (hops and link cost), renewing keeps it alive, and unneeded copies expire.
 - **Multi-writer namespaces** ([ADR-0017](adr/0017-multi-writer-namespaces.md), proposed): each writer commits operations to its own chain; every member merges all chains per field in stamp order; grants decide whose operations count; members sync each other without a server.
 - **NomadNet bridge:** `retifsd --nomadnet NS` serves a record namespace as a NomadNet node; any follower of a site's channel can serve it, so sites outlive their author's uptime ([ADR-0016](adr/0016-records-and-snapshots.md)).
 - **Signed channels** ([ADR-0015](adr/0015-signed-channels.md), proposed): a writer's signed chain of commits and a signed head; followers verify, update automatically and mirror. The basis for sites and app updates.
@@ -100,13 +100,15 @@ Files, folders, albums, packages, versions and branches are all combinations of 
 
 ## Client / OS
 
-- **Native API:** `retifsd` (cache, database, crypto, Prns) is a local shared instance, like `rnsd`. Applications use `libretifs` over a Unix socket and work with records, attributes, queries and history directly, with no paths. Each app gets a narrowed capability. Local and remote use the same messages. See [ADR-0004](adr/0004-native-record-api.md) and the [API draft](07-api.md).
-- **OS integration:** the file tree is one client of the native API, exposed through thin frontends. Linux (libfuse) is the primary target, Windows uses the Cloud Files API, and Haiku (userlandfs, native attributes and queries) comes later. See [ADR-0002](adr/0002-os-integration.md).
+- **Native API:** `retifsd` (cache, database, crypto, Prns) is a local shared instance, like `rnsd`. Applications use `libretifs` over a local endpoint (a Unix socket; a named pipe on Windows) and work with records, attributes, queries and history directly, with no paths. Each app gets a narrowed capability. Local and remote use the same messages. See [ADR-0004](adr/0004-native-record-api.md) and the [API draft](07-api.md).
+- **OS integration:** the file tree is one client of the native API, exposed through thin frontends. Linux (libfuse) is the primary target, Windows uses the Cloud Files API, and Haiku (userlandfs, native attributes and queries) is started. See [ADR-0002](adr/0002-os-integration.md).
 - **Clients of the local API today:**
   - the `retifs` CLI;
   - `retifs-mount`, the FUSE file tree: attributes as xattrs, `.query/` directories, reads on demand, writes through write sessions;
   - `retifs-cloudfiles`, the same tree in Windows Explorer as a Cloud Files sync root: placeholders hydrated on demand, changes in the folder written back, "Always keep on this device" as keep tags;
-  - `retifs-gateway`: namespaces as local read-only websites, one origin each.
+  - `retifs-gateway`: namespaces as local read-only websites, one origin each;
+  - `retifs-haikufs` (started): a namespace as a Haiku volume, attributes and live queries in Tracker;
+  - `retifs-extractd`: attributes from what's in files, an app with a key limit ([ADR-0023](adr/0023-attribute-extraction.md)).
 - **The local API's building blocks:** records and queries, transactions (several changes as one commit), `watch` (wait for a namespace to change), write sessions (content written in place without holding it whole), and on-demand range reads.
 - Thin client: a minimal local bootstrap, with applications and data on the network. **The local disk is a cache**, and a pinned set enables offline use.
 - **Identity travels with you:** a YubiKey (device key, authorised by the root) plus a root identity kept offline. Login issues a short-lived session capability.

@@ -8,21 +8,22 @@ Every crypto decision is checked against this.
 |---|---|---|
 | **Pinning node** | encrypted chunks, their (padded) size, request timing | content, structure (which chunks belong together), attributes, who the owner is |
 | **Foreign machine** (thin client) | what the session capability allows, during the session | root or device key; any rights after the session ends |
-| **Local application** | what its per-app capability allows (an app-socket token scoped to namespaces and read/write, pinned to its executable on Linux) | the rest of the user's data; a FUSE mount and the gateway are deliberate broad grants |
+| **Local application** | what its per-app capability allows (an app-socket token scoped to namespaces, read/write and optionally the attribute keys it writes, pinned to its executable on Linux) | the rest of the user's data; a FUSE mount and the gateway are deliberate broad grants |
 | **Network observer** | RNS traffic patterns | content, CIDs (the Link is encrypted) |
-| **Malicious co-author** (in a group) | everything they were granted; reading the whole namespace (limits restrict writes, not reads) | un-narrowed rights (limits only narrow on delegation), writes outside its keys or after its expiry, forging others' signatures, rewriting history |
+| **Malicious co-author** (in a group) | everything they were granted; reading the whole namespace (limits restrict writes, not reads); with `grant`, deleting the library on every member's device ([ADR-0034](adr/0034-deleting-a-library.md)) | un-narrowed rights (limits only narrow on delegation), writes outside its keys or after its expiry, forging others' signatures, rewriting history |
 | **Former member** | what they already received | new content after key rotation |
 | **Search node** (given a namespace's search capability) | the index: how many records share each opaque value of a declared key, which tokens members ask for and when, how posting lists change between versions | attribute names or values, record contents, the checkpoint, tokens it wasn't sent, which entries in different lists are one record ([ADR-0019](adr/0019-remote-query-and-blind-index.md)) |
 | **Sybil / spammer** | cheap identities | unlimited storage, announces, attributes (stamps, quotas) |
 | **Prober / tracker** (knows CIDs: created honeypot chunks, or computed them from a known public file) | whether *it* can fetch a chunk from nodes that serve it | which nodes hold, or read, a given chunk; what any node has in its cache |
 | **Lost/stolen YubiKey, stick or disk** | nothing (the local store is ciphertext; without the key it's noise) | the identity; the device key is revoked by the root |
+| **Whoever reads the recovery words** (proposed, [ADR-0033](adr/0033-recovery.md)) | every library the kit covers: read, write, admit, revoke | nothing to stop: the words are the account, so they stay offline (paper or a YubiKey) |
 
 ## Known leaks
 - Chunk count and size class, request timing.
 - Public content under a convergent key: anyone can compute the CIDs of a known file. That the file exists somewhere is accepted, since the content is public. **Who holds it is not**: see "Holder privacy" below.
 - Lease renewal timing (mitigation: delegated renewal).
 - **Lease grouping:** holders see which chunks a lease lists. Leases pack chunks of several files sorted by CID, so they show neither file boundaries nor chunk order; what remains is that chunks leased together were placed together ([ADR-0014](adr/0014-placement-follows-need.md)).
-- **Revoked members:** a revoke rotates the namespace's read key, wrapped to each remaining writer's RNS identity; later versions are unreadable to the revoked member, history it had stays readable ([ADR-0017](adr/0017-multi-writer-namespaces.md)).
+- **Revoked members:** a revoke rotates the namespace's read key, wrapped to each remaining member's RNS identity (readers included); later versions are unreadable to the revoked member, history it had stays readable ([ADR-0017](adr/0017-multi-writer-namespaces.md)).
 - **Junk leases:** per-lease signing keys rule out quotas per owner, so lease offers carry a proof-of-work stamp (LXMF construction, holder-set cost, [ADR-0014](adr/0014-placement-follows-need.md)); together with each holder's hold limit this makes filling nodes with junk costly, not impossible.
 - **Request patterns:** requests on one link are visibly one session, and bursts are visible in timing. Token linking is removed (per-chunk proofs), request grouping is avoidable (one item per request), and padding hides file size to a PADMÉ bucket; what remains is link/timing correlation ([ADR-0010](adr/0010-continuous-seeking.md)).
 - **File size** to a PADMÉ bucket (O(log log n) bits), not exactly ([ADR-0008](adr/0008-chunk-encryption-and-cid.md)).

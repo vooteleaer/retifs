@@ -19,6 +19,7 @@ Supports 4 (local-first), 1 (data at rest stays encrypted) and 7 (the local stor
 Option 3.
 
 - **Metadata is always local.** The database for the user's namespaces (indexes, attributes, commits) is synced in full. Queries, `watch` and history always work offline, and the daemon always knows whether a block is present.
+  - Superseded in part by [ADR-0018](0018-state-trees.md) (lazy members hold only part of a namespace's state) and [ADR-0031](0031-storage-less-nodes.md) (storage-less nodes keep only a keyring on disk).
 - **Content tiers** in one store:
 
   | Tier | What | Evicted? |
@@ -49,7 +50,7 @@ Ciphertext at rest means a stolen device without its key reveals only chunk coun
 - **Keep tags:** a record is kept on this device if its `keep` or `keep:<device>` attribute is `true`.
 - **Keep rules:** records with `type = "keep-rule"`, a `query` of comma-separated terms (the syntax `retifs query` takes, e.g. `album=Prangli 2026, type=photo`), and an optional `device`. Without `device` the rule applies to every device. A rule that doesn't parse is ignored.
 - **Keep mode per namespace on each node:** `retifs ns keep NS all|rules`.
-  - `all` is the default and today's behaviour: a member pulls all content.
+  - `all` is the default and today's behaviour: a member pulls all content. A lazy join (`ns join … --lazy`, [ADR-0018](0018-state-trees.md)) starts in `rules`.
   - `rules` pulls only tagged and matching records, for devices that can't hold everything.
   - `ns info` shows the mode, the device name and how many files were pulled because they're kept.
 - **After every sync and every local write:**

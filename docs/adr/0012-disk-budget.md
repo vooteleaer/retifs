@@ -72,7 +72,7 @@ Hole punching comes first; compaction comes later.
 `retifs status` and `ping` show usage per tier, the limits, the reserve, and what is being refused or evicted. Under-replication caused by full disks is reported as such.
 
 ### Configuration
-Flags or config: `--max-store`, `--min-free`, `--cache-max`, `--volunteer`, `--spare on|off|SIZE`. Later these become records in the node's own namespace, so they can be managed remotely.
+Flags or config: `--max-store`, `--min-free`, `--cache-max`, `--volunteer`, `--spare on|off|SIZE`. Later these become records in the node's own namespace, so they can be managed remotely. (Built: the first three, as flags or in `<store>/retifs.toml`; held leases are capped by `--hold-for-others` ([ADR-0014](0014-placement-follows-need.md)) instead of `--volunteer`; `--spare` isn't built.)
 
 ## Impact on the threat model
 See the [threat model](../04-threat-model.md).
