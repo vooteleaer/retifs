@@ -22,6 +22,8 @@
 //! head response    = head (258) | empty (unknown)
 //! put request      = lease_id (16) ‖ (u32_be len ‖ ciphertext) × n     1..=MAX_PUT chunks of that lease
 //! put response     = bitmap (n bits): stored
+//! reader request   = ns_id (16) ‖ (cid (33) ‖ get proof (16)) × n      1..=MAX_READER_PROOFS current commits (ADR-0035)
+//! reader response  = 0 noted | 1 not
 //! ```
 //! Lease formats: retifs_core::lease (decision 6).
 //! Every item carries its own proof of access, derived from that chunk's seed
@@ -69,6 +71,13 @@ pub const QUERY_ENDPOINT: &str = "/retifs/query";
 /// Redeems an invitation (ADR-0020): `id ‖ writer ‖ node ‖ proof` in, a
 /// status byte (0 granted) and a message out.
 pub const INVITE_ENDPOINT: &str = "/retifs/invite";
+/// A reader's node that keeps a library's content says so (ADR-0035):
+/// `ns_id (16) ‖ (cid (33) ‖ get proof (16))*`, proofs for current commits of
+/// the library, bound to this Link; the requester identifies. Answer: 0 noted,
+/// 1 not.
+pub const READER_ENDPOINT: &str = "/retifs/reader";
+/// At most this many commits per reader request.
+pub const MAX_READER_PROOFS: usize = 8;
 /// At most this many tokens per query.
 pub const MAX_QUERY_TOKENS: usize = 16;
 /// 16 chunks of up to 16 KiB: one resource of about 256 KiB.

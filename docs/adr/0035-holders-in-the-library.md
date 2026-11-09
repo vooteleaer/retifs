@@ -23,6 +23,14 @@ A node that writes a file leases copies of it to other nodes (ADR-0011, ADR-0014
 - A member's node seeking or reading the library's content asks the library's members first, then the holders all members' records name (its own node left out). A holder without the chunk answers "don't have" at once; with it, it serves the chunk to whoever proves the chunk's seed (holder privacy rule 1), which only members can.
 - Like every `retifs.*` record, it isn't a file in the file views.
 
+### Readers that keep content (2026-11-09)
+A reader (joined by a link, or invited without rights) can't write to the library, so the members' nodes didn't know it, though it keeps and serves what it holds (`serve_if_kept`). The user asked that every node holding parts of a library be its peer, readers included, and that readers take part in sending files they have chunks of.
+- A reader's node that keeps some of the library's content (not its cache) tells a writer's node so on `/retifs/reader`: `ns_id (16) ‖ (cid (33) ‖ get proof (16))*`, up to 8 items: the latest commits of the library's writers it knows, each with the ordinary `get` proof (ADR-0010) bound to this Link. The Link is identified, so the writer's node learns the reader's `retifs.node` address from Reticulum, not from the request. No new derivation: only members know commit seeds, so a file shared on its own isn't enough.
+- The writer's node checks a proof against the current commits it knows, notes the node (`<store>/readers/<ns_id>`, with the time), and lists it under `readers` in its holders record. A reader not heard from for 30 days is dropped; readers say so again daily, and every 10 minutes until they see themselves listed.
+- Every member adds the readers the records name to the nodes it syncs with and seeks content from. Commits and kept files are already passed on by readers to members proving their seeds.
+- The libraries view counts as peers every node holding some of a library: members, readers listed, holders.
+- Threat model: members learn which readers' nodes keep the library (as they learn its holders); a reader that doesn't want that doesn't keep content (lazy). Nothing changes for non-members: requests still need proofs.
+
 ## Impact on the threat model
 - Members learn which nodes hold copies of the library: they could already ask those nodes for the chunks; holders learn nothing new.
 - A member that isn't trusted to know the holders shouldn't be a member: the record is as visible as the library's records.
@@ -34,3 +42,4 @@ A node that writes a file leases copies of it to other nodes (ADR-0011, ADR-0014
 
 ## Implementation status (2026-11-09)
 - retifsd: `holders_keeper`, `update_holders`, `ns_holders`; reads (`ensure_local`) and keep-driven seeking (`apply_keep`) ask the holders after the members.
+- Readers: `ReaderEndpoint` (`/retifs/reader`), `say_reader`, `note_reader`/`noted_readers`, the `readers` field; readers named become sync peers in `holders_keeper`.

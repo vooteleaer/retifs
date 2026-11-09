@@ -77,6 +77,7 @@ use retifs_net::{
         encode_lease_status, encode_response, LeaseRequest, LeaseStatus, ReceiptReply, GET_ENDPOINT, HAVE_ENDPOINT, LEASE_ENDPOINT,
         PROVE_ENDPOINT, RECEIPT_ENDPOINT, decode_bitmap, decode_put, encode_have, encode_put, HAVE_PREFIX, MAX_HAVE,
         MAX_PUT, PUT_ENDPOINT, HEAD_ENDPOINT, API_ENDPOINT, MAX_QUERY_TOKENS, QUERY_ENDPOINT, INVITE_ENDPOINT,
+        READER_ENDPOINT, MAX_READER_PROOFS, GET_ITEM, encode_request,
     },
     seek::{pull_round, seek_round},
     transport::{PrnsTransport, Transport},
@@ -233,6 +234,90 @@ impl RequestEndpoint<Arc<Shared>> for InviteEndpoint {
         let _ = context.state.invites.send(call);
         Err(Decline::Ignore) // answered by `invite_server`
     }
+}
+
+/// `/retifs/reader` (ADR-0035): a reader's node keeping some of a library's
+/// content asks to be named in this node's holders record. It must identify,
+/// and prove on this Link that it knows the seed of a current commit of the
+/// library (only its members do); the node is then noted, and the holders
+/// keeper lists it if this node may write there.
+struct ReaderEndpoint;
+impl RequestEndpoint<Arc<Shared>> for ReaderEndpoint {
+    const ENDPOINT_ID: &'static str = READER_ENDPOINT;
+    const POLICY: RequestEndpointPolicy = RequestEndpointPolicy::AllowAll;
+
+    async fn handle(mut context: RequestContext<'_, Arc<Shared>>, _node: &impl PrnsNodeApi) -> Result<(), Decline> {
+        let data = context.data;
+        if data.len() < 16 + GET_ITEM || !(data.len() - 16).is_multiple_of(GET_ITEM) || (data.len() - 16) / GET_ITEM > MAX_READER_PROOFS {
+            return Err(Decline::Ignore);
+        }
+        let Ok(items) = decode_request(&data[16..]) else {
+            return Err(Decline::Ignore);
+        };
+        let ns_id: NsId = data[..16].try_into().unwrap();
+        let who = context.requester.map(|r| lease::node_destination_of(r.as_bytes()));
+        let nonce = context.respond_token().link_id.as_bytes().to_vec();
+        let store = &context.state.store;
+        let commits = ns_commits(store, &ns_id);
+        let proven = items.iter().any(|(cid, proof)| commits.iter().any(|(c, seed)| c == cid && ChunkToken::for_seed(seed).verify_get(&nonce, cid, proof)));
+        let noted = match who {
+            Some(node) if proven => note_reader(store.root(), &ns_id, &node).is_ok(),
+            _ => false,
+        };
+        context.respond(vec![if noted { 0 } else { 1 }])
+    }
+}
+
+/// The latest commit of every writer of namespace `ns_id` this node knows
+/// (its own included), with their seeds.
+fn ns_commits(store: &SlabStore, ns_id: &NsId) -> Vec<(Cid, retifs_core::chunk::Seed)> {
+    let mut out: Vec<(Cid, retifs_core::chunk::Seed)> = store
+        .own_channels()
+        .unwrap_or_default()
+        .into_iter()
+        .filter(|c| {
+            let key = match store.member_channel(&c.name).ok().flatten() {
+                Some(id) => ChannelKey::member(c.signing_seed, c.read_key, id),
+                None => ChannelKey::from_secrets(c.signing_seed, c.read_key),
+            };
+            key.ns_id() == *ns_id
+        })
+        .filter_map(|c| c.last)
+        .collect();
+    out.extend(store.writer_heads(ns_id).unwrap_or_default().into_iter().map(|h| h.commit));
+    out
+}
+
+/// How long a reader stays listed without saying again that it keeps the
+/// library (readers say so daily).
+const READER_TTL_MS: u64 = 30 * 24 * 3600 * 1000;
+
+fn readers_file(root: &std::path::Path, ns_id: &NsId) -> PathBuf {
+    root.join("readers").join(hex(ns_id))
+}
+
+/// Notes reader node `node` of namespace `ns_id` (`<store>/readers/<ns_id>`:
+/// `node ms` lines).
+fn note_reader(root: &std::path::Path, ns_id: &NsId, node: &[u8; 16]) -> std::io::Result<()> {
+    let mut readers = noted_readers(root, ns_id);
+    readers.insert(hex(node), now_ms());
+    let path = readers_file(root, ns_id);
+    std::fs::create_dir_all(path.parent().unwrap())?;
+    std::fs::write(path, readers.iter().map(|(n, t)| format!("{n} {t}\n")).collect::<String>())
+}
+
+/// The readers noted for `ns_id` that said so within [`READER_TTL_MS`].
+fn noted_readers(root: &std::path::Path, ns_id: &NsId) -> std::collections::BTreeMap<String, u64> {
+    let now = now_ms();
+    std::fs::read_to_string(readers_file(root, ns_id))
+        .unwrap_or_default()
+        .lines()
+        .filter_map(|l| {
+            let (n, t) = l.split_once(' ')?;
+            let t: u64 = t.trim().parse().ok()?;
+            (parse_destination(n).is_some() && now.saturating_sub(t) < READER_TTL_MS).then(|| (n.to_string(), t))
+        })
+        .collect()
 }
 
 struct Get;
@@ -1151,24 +1236,27 @@ fn forget_files_of(d: &Daemon, ns: &str, checkpoint: bool) -> Result<usize, Stri
 }
 
 /// The record a member's node keeps in each library it writes, naming the
-/// nodes it leased that library's files to (ADR-0035): `type`, `node` (its
-/// own address), `holders` (theirs). Members then ask those nodes too, so a
-/// file is found while the node that placed it is away.
+/// nodes that hold the library's content (ADR-0035): `type`, `node` (its
+/// own address), `holders` (the nodes it leased the library's files to) and
+/// `readers` (readers' nodes that keep some of it and said so, with proof).
+/// Members then sync with the readers and ask both, so a file is found
+/// while the node that placed it is away.
 const HOLDERS_TYPE: &str = "retifs.holders";
 /// How often a node's holders record is brought up to date.
 const HOLDERS_EVERY: Duration = Duration::from_secs(600);
+/// How often a reader listed already says again that it keeps a library.
+const READER_AGAIN_MS: u64 = 24 * 3600 * 1000;
 
-/// The nodes members' `retifs.holders` records name for library `ns`
-/// (this node's own left out).
-fn ns_holders(d: &Daemon, ns: &str) -> Vec<PeerId> {
+/// The nodes members' `retifs.holders` records name under `field`
+/// (`holders` or `readers`) for library `ns`, this node's own included.
+fn ns_listed(d: &Daemon, ns: &str, field: &str) -> Vec<PeerId> {
     let Ok(term) = retifs_store::Term::parse(&format!("type={HOLDERS_TYPE}")) else { return Vec::new() };
     let mut out: Vec<PeerId> = Vec::new();
     for r in d.store.query(ns, &[term]).unwrap_or_default() {
-        let Some(Value::List(list)) = r.attrs.get("holders") else { continue };
+        let Some(Value::List(list)) = r.attrs.get(field) else { continue };
         for v in list {
             if let Value::Str(h) = v
                 && let Some(p) = parse_destination(h).map(|p| *p.as_bytes())
-                && p != d.node_id
                 && !out.contains(&p)
             {
                 out.push(p);
@@ -1178,8 +1266,56 @@ fn ns_holders(d: &Daemon, ns: &str) -> Vec<PeerId> {
     out
 }
 
+/// The nodes holding copies of library `ns` that its members' records name
+/// (this node's own left out).
+fn ns_holders(d: &Daemon, ns: &str) -> Vec<PeerId> {
+    ns_listed(d, ns, "holders").into_iter().filter(|p| *p != d.node_id).collect()
+}
+
+/// A reader's node that keeps some of library `ns` says so to a writer's
+/// node (`/retifs/reader`), proving on the Link that it knows the seeds of
+/// the library's current commits. True once a writer's node noted it.
+async fn say_reader(d: &Daemon, ns: &str, merged: &retifs_core::ops::Merged) -> Result<bool, String> {
+    let ns_id = current_addr(d, ns)?.ns_id();
+    let mut commits = ns_commits(&d.store, &ns_id);
+    commits.truncate(MAX_READER_PROOFS);
+    if commits.is_empty() {
+        return Ok(false);
+    }
+    let mut nodes: Vec<PeerId> = merged
+        .nodes
+        .iter()
+        .filter(|(w, n)| **n != d.node_id && merged.writers.get(*w).is_some_and(|r| r.contains(&Right::Write)))
+        .map(|(_, n)| *n)
+        .collect();
+    if nodes.is_empty() {
+        nodes = d.store.ns_peers(ns).map_err(|e| e.to_string())?;
+    }
+    for peer in nodes {
+        let Ok(link) = d.link_to(&peer).await else { continue };
+        if !d.identified.lock().unwrap().contains(&link) {
+            if d.transport.identify(link, d.identity_hash).await.is_err() {
+                d.drop_link(&peer);
+                continue;
+            }
+            d.identified.lock().unwrap().insert(link);
+        }
+        let items: Vec<(Cid, [u8; 16])> = commits.iter().map(|(cid, seed)| (*cid, ChunkToken::for_seed(seed).get_proof(link.as_bytes(), cid))).collect();
+        match d.ask(link, READER_ENDPOINT, [ns_id.as_slice(), &encode_request(&items)].concat()).await {
+            Ok(a) if a.first() == Some(&0) => {
+                eprintln!("holders {ns}: told <{}> this node keeps some of it", hex(&peer));
+                return Ok(true);
+            }
+            Ok(_) => {}
+            Err(_) => d.drop_link(&peer),
+        }
+    }
+    Ok(false)
+}
+
 /// Brings this node's holders record in `ns` up to date: the nodes holding
-/// leased copies of the library's files, written only when they changed.
+/// leased copies of the library's files and the readers noted keeping some,
+/// written only when they changed.
 async fn update_holders(d: &Daemon, ns: &str) -> Result<(), String> {
     let records = d.store.records(ns).map_err(|e| e.to_string())?;
     let roots: std::collections::HashSet<Cid> = records.iter().flat_map(|r| r.blocks.iter().map(|b| b.root)).collect();
@@ -1193,34 +1329,69 @@ async fn update_holders(d: &Daemon, ns: &str) -> Result<(), String> {
         .collect();
     holders.sort();
     holders.dedup();
+    let ns_id = current_addr(d, ns)?.ns_id();
+    let readers: Vec<String> = noted_readers(d.store.root(), &ns_id).into_keys().filter(|n| *n != d.node_hex).collect();
     let mine = records.iter().find(|r| {
         r.attrs.get("type") == Some(&Value::Str(HOLDERS_TYPE.into())) && r.attrs.get("node") == Some(&Value::Str(d.node_hex.clone()))
     });
-    let now: Vec<Value> = holders.iter().cloned().map(Value::Str).collect();
-    let list = AttrValue::List(holders.into_iter().map(AttrValue::Str).collect());
+    let values = |l: &[String]| Value::List(l.iter().cloned().map(Value::Str).collect());
+    let list = |l: &[String]| AttrValue::List(l.iter().cloned().map(AttrValue::Str).collect());
     let step = match mine {
-        Some(r) if r.attrs.get("holders") == Some(&Value::List(now.clone())) => return Ok(()),
-        Some(r) => TxStep::Set { id: hex(&r.id), attrs: vec![("holders".into(), list)], unset: Vec::new(), data: None, blocks: None },
-        None if now.is_empty() => return Ok(()),
+        Some(r) if r.attrs.get("holders") == Some(&values(&holders)) && r.attrs.get("readers").cloned().unwrap_or(Value::List(Vec::new())) == values(&readers) => return Ok(()),
+        Some(r) => TxStep::Set {
+            id: hex(&r.id),
+            attrs: vec![("holders".into(), list(&holders)), ("readers".into(), list(&readers))],
+            unset: Vec::new(),
+            data: None,
+            blocks: None,
+        },
+        None if holders.is_empty() && readers.is_empty() => return Ok(()),
         None => TxStep::Create {
-            attrs: vec![("type".into(), AttrValue::Str(HOLDERS_TYPE.into())), ("node".into(), AttrValue::Str(d.node_hex.clone())), ("holders".into(), list)],
+            attrs: vec![
+                ("type".into(), AttrValue::Str(HOLDERS_TYPE.into())),
+                ("node".into(), AttrValue::Str(d.node_hex.clone())),
+                ("holders".into(), list(&holders)),
+                ("readers".into(), list(&readers)),
+            ],
             data: None,
         },
     };
     transaction(d, ns, vec![step]).await.map(|_| ())
 }
 
-/// Every library this node may write: its holders record kept up to date.
+/// Every library: a node that may write keeps its holders record up to
+/// date; a reader that keeps some of it says so (again daily); and the
+/// readers named become nodes to sync with.
 async fn holders_keeper(d: Arc<Daemon>) {
     tokio::time::sleep(Duration::from_secs(60)).await;
+    let mut said: HashMap<String, u64> = HashMap::new();
     loop {
         for ns in visible_namespaces(&d).unwrap_or_default() {
             if ns.starts_with("ch-") {
                 continue;
             }
-            let may = own_writer(&d, &ns).ok().zip(materialize(&d, &ns).ok()).is_some_and(|(w, m)| m.writers.get(&w).is_some_and(|r| r.contains(&Right::Write)));
-            if may && let Err(e) = update_holders(&d, &ns).await {
-                eprintln!("holders {ns}: {e}");
+            let Ok(merged) = materialize(&d, &ns) else { continue };
+            let may = own_writer(&d, &ns).ok().is_some_and(|w| merged.writers.get(&w).is_some_and(|r| r.contains(&Right::Write)));
+            if may {
+                if let Err(e) = update_holders(&d, &ns).await {
+                    eprintln!("holders {ns}: {e}");
+                }
+            } else if !d.no_storage && !d.store.ns_kept(&ns).unwrap_or_default().is_empty() {
+                let listed = ns_listed(&d, &ns, "readers").contains(&d.node_id);
+                if !listed || said.get(&ns).is_none_or(|t| now_ms().saturating_sub(*t) > READER_AGAIN_MS) {
+                    match say_reader(&d, &ns, &merged).await {
+                        Ok(true) => {
+                            said.insert(ns.clone(), now_ms());
+                        }
+                        Ok(false) => {}
+                        Err(e) => eprintln!("holders {ns}: {e}"),
+                    }
+                }
+            }
+            let known = d.store.ns_peers(&ns).unwrap_or_default();
+            let new: Vec<PeerId> = ns_listed(&d, &ns, "readers").into_iter().filter(|p| *p != d.node_id && !known.contains(p)).collect();
+            if !new.is_empty() && d.store.add_ns_peers(&ns, &new).is_ok() {
+                eprintln!("ns {ns}: {} reader node(s) keeping some of it to sync with", new.len());
             }
         }
         tokio::time::sleep(HOLDERS_EVERY).await;
@@ -1628,7 +1799,7 @@ async fn serve(store: Arc<SlabStore>, identity: node::IdentitySecret, endpoint: 
         pre_configured_destinations: destinations,
         app_state: shared.clone(),
         storage: GrowableHeap,
-        request_endpoints: request_endpoints![Get, Have, LeaseEndpoint, ReceiptEndpoint, ProveEndpoint, PutEndpoint, HeadEndpoint, ApiEndpoint, QueryEndpoint, InviteEndpoint],
+        request_endpoints: request_endpoints![Get, Have, LeaseEndpoint, ReceiptEndpoint, ProveEndpoint, PutEndpoint, HeadEndpoint, ApiEndpoint, QueryEndpoint, InviteEndpoint, ReaderEndpoint],
         on_event: move |event, _state| {
             match event {
                 PrnsEvent::Diagnostic(Diagnostic::AnnounceHeard { destination, hops, app_data, .. }) => {
@@ -3345,7 +3516,12 @@ fn ns_view_made(d: &Daemon, ns: &str) -> Result<NsView, String> {
             })
             .collect(),
         records: d.store.record_count(ns).map_err(|e| e.to_string())?,
-        peers: d.store.ns_peers(ns).map_err(|e| e.to_string())?.len(),
+        // Every node holding some of it: members, readers keeping some, holders.
+        peers: {
+            let mut p = d.store.ns_peers(ns).map_err(|e| e.to_string())?;
+            p.extend(ns_holders(d, ns).into_iter().filter(|h| !p.contains(h)).collect::<Vec<_>>());
+            p.len()
+        },
         checkpoint: d.store.ns_checkpoint(ns).map_err(|e| e.to_string())?.map(|f| f.to_string()),
         device: d.device.clone(),
         keep: if d.store.ns_keep_by_rules(ns).map_err(|e| e.to_string())? { "rules" } else { "all" }.into(),
