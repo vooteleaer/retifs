@@ -25,8 +25,14 @@ export CARGO_TARGET_DIR=${CARGO_TARGET_DIR:-$ROOT/target}
 
 VERSION=$(sed -n 's/^version = "\(.*\)"/\1/p' "$ROOT/crates/retifs-node/Cargo.toml" | head -1 | tr -d '\r')
 COMMIT=$(git -C "$ROOT" rev-parse --short HEAD 2>/dev/null || echo unknown)
-DATE=$(git -C "$ROOT" log -1 --format=%cd --date=format:%Y%m%d 2>/dev/null || date +%Y%m%d)
-DEBVER="$VERSION~git$DATE.$COMMIT"
+# A release when this commit is tagged with the version, else a build towards
+# it; the commit count keeps those in order (retifs docs/versioning.md).
+COUNT=$(git -C "$ROOT" rev-list --count HEAD 2>/dev/null || echo 0)
+if [ "$(git -C "$ROOT" describe --exact-match --tags HEAD 2>/dev/null)" = "v$VERSION" ]; then
+    DEBVER=$VERSION
+else
+    DEBVER="$VERSION~dev.$COUNT.$COMMIT"
+fi
 BINS="retifsd retifs retifs-mount retifs-gateway retifs-extractd"
 GLIBC=${GLIBC:-2.31}
 if command -v cargo-zigbuild >/dev/null; then

@@ -1056,7 +1056,7 @@ checksum = "ce5d3ddc6d3fa000eb1536d85e147bfe31aacaba692ed6a876f95cb7c855be78"
 
 [[package]]
 name = "libretifs"
-version = "0.0.1"
+version = "0.1.0"
 dependencies = [
  "libc",
  "rmp-serde",
@@ -1590,7 +1590,7 @@ dependencies = [
 
 [[package]]
 name = "retifs-cloudfiles"
-version = "0.0.1"
+version = "0.1.0"
 dependencies = [
  "cloud-filter",
  "libretifs",
@@ -1602,7 +1602,7 @@ dependencies = [
 
 [[package]]
 name = "retifs-core"
-version = "0.0.1"
+version = "0.1.0"
 dependencies = [
  "aes",
  "cbc",
@@ -1620,7 +1620,7 @@ dependencies = [
 
 [[package]]
 name = "retifs-extract"
-version = "0.0.1"
+version = "0.1.0"
 dependencies = [
  "image",
  "imagesize",
@@ -1635,7 +1635,7 @@ dependencies = [
 
 [[package]]
 name = "retifs-fuse"
-version = "0.0.1"
+version = "0.1.0"
 dependencies = [
  "fuser",
  "libc",
@@ -1646,7 +1646,7 @@ dependencies = [
 
 [[package]]
 name = "retifs-gateway"
-version = "0.0.1"
+version = "0.1.0"
 dependencies = [
  "libretifs",
  "tiny_http",
@@ -1656,7 +1656,7 @@ dependencies = [
 
 [[package]]
 name = "retifs-haikufs"
-version = "0.0.1"
+version = "0.1.0"
 dependencies = [
  "libc",
  "libretifs",
@@ -1666,7 +1666,7 @@ dependencies = [
 
 [[package]]
 name = "retifs-net"
-version = "0.0.1"
+version = "0.1.0"
 dependencies = [
  "hex",
  "personal-rns",
@@ -1676,7 +1676,7 @@ dependencies = [
 
 [[package]]
 name = "retifs-node"
-version = "0.0.1"
+version = "0.1.0"
 dependencies = [
  "getrandom 0.3.4",
  "libc",
@@ -1696,7 +1696,7 @@ dependencies = [
 
 [[package]]
 name = "retifs-store"
-version = "0.0.1"
+version = "0.1.0"
 dependencies = [
  "fs4",
  "libc",
@@ -1708,7 +1708,7 @@ dependencies = [
 
 [[package]]
 name = "retifs-tree"
-version = "0.0.1"
+version = "0.1.0"
 dependencies = [
  "libretifs",
  "serde_json",

@@ -1,6 +1,6 @@
 [package]
 name = "retifs-store"
-version = "0.0.1"
+version = "0.1.0"
 description = "retifs local slab store (prototype, unstable)"
 edition.workspace = true
 license.workspace = true

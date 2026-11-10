@@ -61,8 +61,12 @@ $env:RETIFS_SETUP_FILES = $Stage
 Invoke-Cargo build --release --manifest-path "$PSScriptRoot\setup\Cargo.toml"
 Remove-Item Env:RETIFS_SETUP_FILES
 $Version = (Select-String -Path "$Root\crates\retifs-node\Cargo.toml" -Pattern '^version = "(.*)"').Matches[0].Groups[1].Value
-$Commit = (& git -C $Root rev-parse --short HEAD)
+# A release's name when this commit is tagged with the version, else a build
+# towards it, counted in commits (docs/versioning.md).
+$Count = (& git -C $Root rev-list --count HEAD)
+$Tag = (& git -C $Root describe --exact-match --tags HEAD 2>$null)
+$Name = if ($Tag -eq "v$Version") { $Version } else { "$Version-dev.$Count" }
 New-Item -ItemType Directory -Force $Out | Out-Null
-$Setup = Join-Path $Out "retifs-setup-$Version-$Commit.exe"
+$Setup = Join-Path $Out "retifs-setup-$Name.exe"
 Copy-Item "$Built\retifs-setup.exe" $Setup
 "== $Setup ({0:N1} MB)" -f ((Get-Item $Setup).Length / 1MB)
