@@ -69,7 +69,7 @@ use personal_rns::routing::request_handlers::{RequestPathHash, RequestPolicy};
 use personal_rns::routing::links::LinkId;
 use retifs_net::{
     fetch::{fetch_file, FetchOpts},
-    node::{self, attach, block_on, destination_hex, load_or_create_identity, parse_destination},
+    node::{self, attach, destination_hex, load_or_create_identity, parse_destination},
     protocol::{
         decode_have, decode_lease_request, decode_lease_status, decode_lease_statuses, decode_prove, decode_prove_reply,
         decode_receipt_replies, decode_receipt_request, encode_receipt_replies, encode_receipt_request, MAX_BUNDLE,
@@ -810,8 +810,11 @@ fn main() {
         }
         None => {
             // After an unclean stop the index is checked first: minutes on a large store.
-            let (at, since) = (args.store.clone(), now_ms());
+            let (at, since, said) = (args.store.clone(), now_ms(), std::cell::Cell::new(false));
             SlabStore::open_reporting(&args.store, args.db_cache, move |p| {
+                if !said.replace(true) {
+                    println!("the store wasn't closed cleanly last time: checking its index");
+                }
                 libretifs::set_starting(&at, "checking the store after an unclean stop", Some(p), since)
             })
         }
@@ -851,7 +854,144 @@ fn main() {
     let identity = load_or_create_identity(&args.store.join("node_identity")).expect("node identity");
     let endpoint = libretifs::endpoint(&args.store);
     let store = Arc::new(store);
-    block_on(move || serve(store, identity, endpoint, args));
+    let kept = store.clone();
+    run_until_stopped(move || serve(store, identity, endpoint, args));
+    close_store(kept);
+}
+
+/// What's running, by name (a marker each piece of work holds while it
+/// runs): a stopping daemon closes its store only once every marker is
+/// down, and says which work it's still waiting for.
+static BUSY: Mutex<std::collections::BTreeMap<u64, &'static str>> = Mutex::new(std::collections::BTreeMap::new());
+
+/// A piece of work's marker: down when it's dropped (the work ended or was cancelled).
+struct Busy(u64);
+
+impl Drop for Busy {
+    fn drop(&mut self) {
+        BUSY.lock().unwrap().remove(&self.0);
+    }
+}
+
+fn busy(what: &'static str) -> Busy {
+    static NEXT: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+    let id = NEXT.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+    BUSY.lock().unwrap().insert(id, what);
+    Busy(id)
+}
+
+/// The work still running, named, for the log ("library sync ×2, seeker").
+fn still_busy() -> String {
+    let mut counts: std::collections::BTreeMap<&str, usize> = std::collections::BTreeMap::new();
+    for what in BUSY.lock().unwrap().values() {
+        *counts.entry(what).or_default() += 1;
+    }
+    counts.into_iter().map(|(w, n)| if n > 1 { format!("{w} ×{n}") } else { w.to_string() }).collect::<Vec<_>>().join(", ")
+}
+
+/// Spawns `work` with its marker up while it runs.
+fn worker<F: std::future::Future + Send + 'static>(what: &'static str, work: F) -> tokio::task::JoinHandle<F::Output>
+where
+    F::Output: Send + 'static,
+{
+    tokio::spawn(async move {
+        let _marker = busy(what);
+        work.await
+    })
+}
+
+/// Asked to stop by the owner (the local API's Stop: Windows has no signal
+/// another program can send a console-less process).
+static STOP: Notify = Notify::const_new();
+/// Stopping: no new links are made (work waiting on the network ends sooner).
+static STOPPING: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+
+/// Whether the daemon is stopping: long loops end early.
+fn stopping() -> bool {
+    STOPPING.load(std::sync::atomic::Ordering::Relaxed)
+}
+
+/// Runs the daemon until it's asked to stop (SIGTERM or SIGINT; Ctrl+C, a
+/// closed console or a shutdown on Windows; the owner's Stop), then stops
+/// its work, waiting up to 10 s for what's still running, so that the store
+/// can be closed cleanly. Killed instead, its index is checked at the next
+/// start: minutes on a large store.
+fn run_until_stopped<F: std::future::Future<Output = ()>>(make: impl FnOnce() -> F + Send + 'static) {
+    std::thread::Builder::new()
+        .stack_size(64 << 20)
+        .spawn(move || {
+            let rt = tokio::runtime::Builder::new_multi_thread().enable_all().thread_stack_size(16 << 20).build().expect("tokio runtime");
+            rt.block_on(async {
+                tokio::select! {
+                    _ = make() => {}
+                    why = stop_asked() => {
+                        STOPPING.store(true, std::sync::atomic::Ordering::Relaxed);
+                        println!("stopping ({why}): finishing what's running, then closing the store")
+                    }
+                }
+            });
+            rt.shutdown_timeout(Duration::from_secs(10));
+        })
+        .expect("spawn runtime thread")
+        .join()
+        .expect("runtime thread panicked");
+}
+
+/// Waits for a reason to stop, and names it.
+async fn stop_asked() -> &'static str {
+    let asked = async {
+        STOP.notified().await;
+        "asked to"
+    };
+    #[cfg(unix)]
+    {
+        use tokio::signal::unix::{SignalKind, signal};
+        let (Ok(mut term), Ok(mut int)) = (signal(SignalKind::terminate()), signal(SignalKind::interrupt())) else {
+            return asked.await;
+        };
+        tokio::select! {
+            _ = term.recv() => "SIGTERM",
+            _ = int.recv() => "SIGINT",
+            why = asked => why,
+        }
+    }
+    #[cfg(windows)]
+    {
+        use tokio::signal::windows::{ctrl_c, ctrl_close, ctrl_shutdown};
+        let (Ok(mut c), Ok(mut close), Ok(mut down)) = (ctrl_c(), ctrl_close(), ctrl_shutdown()) else {
+            return asked.await;
+        };
+        tokio::select! {
+            _ = c.recv() => "Ctrl+C",
+            _ = close.recv() => "console closed",
+            _ = down.recv() => "system shutting down",
+            why = asked => why,
+        }
+    }
+}
+
+/// Closes the store once nothing else holds it (the work stopped): its index
+/// written as closed, so the next start needn't check it.
+fn close_store(mut store: Arc<SlabStore>) {
+    // Work still finishing (a blocking task) holds it a while longer: every
+    // 5 s, what it's still waiting for.
+    for i in 0..200 {
+        if i % 50 == 49 {
+            println!("stopping: still waiting for {}", still_busy());
+        }
+        match Arc::try_unwrap(store) {
+            Ok(s) => {
+                drop(s);
+                println!("stopped: the store closed cleanly");
+                return;
+            }
+            Err(still) => {
+                store = still;
+                std::thread::sleep(Duration::from_millis(100));
+            }
+        }
+    }
+    eprintln!("stopped, but the store was still in use (by {}): its index is checked at the next start", still_busy());
 }
 
 struct Daemon {
@@ -1116,10 +1256,14 @@ fn watchdog(d: Arc<Daemon>) {
             tokio::time::sleep(Duration::from_secs(5)).await;
         }
     });
+    // Weakly: a daemon stopping closes its store once nothing holds it.
+    let weak = Arc::downgrade(&d);
+    drop(d);
     let _ = std::thread::Builder::new().name("watchdog".into()).spawn(move || {
         let mut held: HashMap<String, u64> = HashMap::new();
         loop {
             std::thread::sleep(Duration::from_secs(30));
+            let Some(d) = weak.upgrade() else { return };
             let now = now_ms();
             let free = |name: &str, ok: bool, held: &mut HashMap<String, u64>| {
                 if ok {
@@ -1707,6 +1851,12 @@ impl Daemon {
     /// that slow), so it's made again over the shorter one. The new link is
     /// the same encrypted, authenticated RNS link; only its route changes.
     async fn link_to(&self, peer: &PeerId) -> Result<LinkId, String> {
+        if stopping() {
+            // Yielding lets the runtime cancel the caller, which would
+            // otherwise go on to its next try at once, never pausing.
+            tokio::task::yield_now().await;
+            return Err("stopping".into());
+        }
         let dest = parse_destination(&hex(peer)).expect("peer id");
         let open = self.links.lock().unwrap().get(peer).copied();
         if let Some((link, made_over)) = open {
@@ -1748,7 +1898,7 @@ impl Daemon {
         let (link, rtt) = match attempt(&t).await {
             Ok(l) => l,
             // The known route may be stale: forget it, ask for a fresh path and try once more.
-            Err(e) if path.is_ok() => {
+            Err(e) if path.is_ok() && !e.contains("NodeStopped") => {
                 eprintln!("link <{}>: {e}; asking for a new path", hex(peer));
                 t.refresh_path(dest).await.map_err(|p| format!("{e}; {p}"))?;
                 attempt(&t).await?
@@ -1929,13 +2079,13 @@ async fn serve(store: Arc<SlabStore>, identity: node::IdentitySecret, endpoint: 
         None => println!("holding data for others up to the store limit"),
     }
 
-    tokio::spawn(join_defaults(daemon.clone(), args.default_libraries.clone()));
-    tokio::spawn(holders_keeper(daemon.clone()));
+    worker("default libraries", join_defaults(daemon.clone(), args.default_libraries.clone()));
+    worker("holders", holders_keeper(daemon.clone()));
 
     // Public libraries heard announced (ADR-0029): the latest of each, the
     // oldest dropped beyond HEARD_LIBS_MAX.
     let listener = daemon.clone();
-    tokio::spawn(async move {
+    worker("heard libraries", async move {
         while let Some((from, hops, v, lib)) = lib_rx.recv().await {
             if from == *lib_hash.as_bytes() {
                 continue;
@@ -1974,7 +2124,7 @@ async fn serve(store: Arc<SlabStore>, identity: node::IdentitySecret, endpoint: 
     let lib_announcer = daemon.clone();
     let lib_handle = handle.clone();
     let lib_every = Duration::from_secs(args.announce_s.max(60) as u64);
-    tokio::spawn(async move {
+    worker("library announces", async move {
         tokio::time::sleep(Duration::from_secs(20)).await;
         loop {
             for (ns, name, about) in announced_libraries(&lib_announcer.store) {
@@ -2016,7 +2166,7 @@ async fn serve(store: Arc<SlabStore>, identity: node::IdentitySecret, endpoint: 
     // the network finds this node again.
     let watcher = daemon.clone();
     let watch_handle = handle.clone();
-    tokio::spawn(async move {
+    worker("shared instance watch", async move {
         use personal_rns::interfaces::ConnectionState;
         loop {
             tokio::time::sleep(Duration::from_secs(5)).await;
@@ -2035,25 +2185,25 @@ async fn serve(store: Arc<SlabStore>, identity: node::IdentitySecret, endpoint: 
     let daemon_for_nn = daemon.clone();
     tokio::spawn(local_api(endpoint, daemon.clone(), false, Some(args.store.clone())));
     tokio::spawn(local_api(libretifs::app_endpoint(&args.store), daemon.clone(), true, None));
-    tokio::spawn(api_server(daemon.clone(), handle.clone(), api_rx));
-    tokio::spawn(invite_server(daemon.clone(), handle.clone(), invite_rx));
-    tokio::spawn(lease_puller(daemon.clone(), shared.clone()));
-    tokio::spawn(lease_upkeep(daemon.clone()));
-    tokio::spawn(follower(daemon.clone()));
-    tokio::spawn(ns_sync(daemon.clone()));
-    tokio::spawn(share_keeper(daemon.clone()));
-    tokio::spawn(leaver(daemon.clone()));
+    worker("remote API", api_server(daemon.clone(), handle.clone(), api_rx));
+    worker("invitations", invite_server(daemon.clone(), handle.clone(), invite_rx));
+    worker("lease puller", lease_puller(daemon.clone(), shared.clone()));
+    worker("lease upkeep", lease_upkeep(daemon.clone()));
+    worker("follower", follower(daemon.clone()));
+    worker("library sync", ns_sync(daemon.clone()));
+    worker("shares", share_keeper(daemon.clone()));
+    worker("leaver", leaver(daemon.clone()));
     #[cfg(target_os = "haiku")]
-    tokio::spawn(haiku_mounts::keeper(daemon.clone(), args.store.clone()));
+    worker("mounts", haiku_mounts::keeper(daemon.clone(), args.store.clone()));
     // The user's own store only (no --store: a test node's isn't anyone's files).
     #[cfg(target_os = "linux")]
     if !args.store_given && !args.no_mounts {
-        tokio::spawn(linux_mounts::keeper(daemon.clone(), args.store.clone()));
+        worker("mounts", linux_mounts::keeper(daemon.clone(), args.store.clone()));
     }
     watchdog(daemon.clone());
     if daemon.keyring.is_some() {
         let keeper = daemon.clone();
-        tokio::spawn(async move {
+        worker("keyring", async move {
             let mut tick = tokio::time::interval(Duration::from_secs(30));
             loop {
                 tick.tick().await;
@@ -2062,7 +2212,7 @@ async fn serve(store: Arc<SlabStore>, identity: node::IdentitySecret, endpoint: 
         });
     }
     let redeemer = daemon.clone();
-    tokio::spawn(async move {
+    worker("invitation redeemer", async move {
         // Invitations whose creator's node wasn't reachable (ADR-0020), and
         // deleted libraries whose grace is over (ADR-0034).
         let mut tick = tokio::time::interval(Duration::from_secs(30));
@@ -2073,7 +2223,7 @@ async fn serve(store: Arc<SlabStore>, identity: node::IdentitySecret, endpoint: 
         }
     });
     let watcher = daemon.clone();
-    tokio::spawn(async move {
+    worker("storage nodes heard", async move {
         // Every retifs node is a storage node (ADR-0014), recognised by its
         // identity (older nodes' app data says only `retifs/v0`); the app
         // data, when it says, gives how often it announces.
@@ -2112,11 +2262,11 @@ async fn serve(store: Arc<SlabStore>, identity: node::IdentitySecret, endpoint: 
             }
         }
     });
-    tokio::spawn(seeker(daemon));
+    worker("seeker", seeker(daemon));
 
     // Keep within the disk budget even when other programs fill the volume (ADR-0012).
     let budget_store = store.clone();
-    tokio::spawn(async move {
+    worker("disk budget", async move {
         let mut tick = tokio::time::interval(Duration::from_secs(30));
         loop {
             tick.tick().await;
@@ -2131,12 +2281,12 @@ async fn serve(store: Arc<SlabStore>, identity: node::IdentitySecret, endpoint: 
 
     if let (Some(ns), Some(nn)) = (args.nomadnet.clone(), nn_hash) {
         println!("NomadNet node \"{}\" <{}> serving namespace {ns}", args.nomadnet_name, destination_hex(&nn));
-        tokio::spawn(nomadnet::serve(daemon_for_nn.clone(), handle.clone(), nn, ns, args.nomadnet_name.clone(), nn_rx));
+        worker("nomadnet", nomadnet::serve(daemon_for_nn.clone(), handle.clone(), nn, ns, args.nomadnet_name.clone(), nn_rx));
     }
 
     let announcer = handle.clone();
     let announce_every = args.announce_s;
-    tokio::spawn(async move {
+    worker("node announces", async move {
         // Once at start (the first tick is immediate), then every ten minutes:
         // announces travel the whole network, LoRa links included.
         let mut tick = tokio::time::interval(Duration::from_secs(announce_every as u64));
@@ -2183,7 +2333,7 @@ async fn local_api(endpoint: String, daemon: Arc<Daemon>, apps: bool, started: O
                 // Read with recvmsg, so descriptors sent with PutFd arrive.
                 let stream = libretifs::fdpass::FdStream::new(stream);
                 let fds = Some(stream.fds.clone());
-                tokio::spawn(connection(stream, daemon.clone(), exe, fds));
+                worker("local API request", connection(stream, daemon.clone(), exe, fds));
             }
             Err(e) => eprintln!("local API accept: {e}"),
         }
@@ -2209,7 +2359,7 @@ async fn local_api(endpoint: String, daemon: Arc<Daemon>, apps: bool, started: O
         }
         let connected = server;
         server = ServerOptions::new().create(&endpoint).expect("next pipe instance");
-        tokio::spawn(connection(connected, daemon.clone(), apps.then_some(None), None));
+        worker("local API request", connection(connected, daemon.clone(), apps.then_some(None), None));
     }
 }
 
@@ -2394,7 +2544,7 @@ async fn api_server(d: Arc<Daemon>, handle: PrnsNodeHandle, mut calls: mpsc::Unb
     while let Some(call) = calls.recv().await {
         let d = d.clone();
         let handle = handle.clone();
-        tokio::spawn(async move {
+        worker("remote request", async move {
             let resp = remote_call(&d, call.requester, &call.body).await.unwrap_or_else(|message| Response::Error { message });
             let bytes = rmp_serde::to_vec_named(&resp).unwrap_or_default();
             handle.respond_owned_packed(call.token, bytes);
@@ -2407,7 +2557,7 @@ async fn invite_server(d: Arc<Daemon>, handle: PrnsNodeHandle, mut calls: mpsc::
     while let Some(call) = calls.recv().await {
         let d = d.clone();
         let handle = handle.clone();
-        tokio::spawn(async move {
+        worker("invitation", async move {
             let out = match redeem_here(&d, &call.link_id, &call.body).await {
                 Ok(msg) => [&[0u8][..], msg.as_bytes()].concat(),
                 Err(e) => {
@@ -2647,6 +2797,11 @@ async fn handle(d: &Daemon, req: Request) -> Result<Response, String> {
             } else {
                 Err(format!("no app {name}"))
             }
+        }
+
+        Request::Stop => {
+            STOP.notify_one();
+            Ok(Response::Done)
         }
 
         Request::Ping => {
@@ -6909,6 +7064,13 @@ async fn seeker(d: Arc<Daemon>) {
 async fn seek_pass(d: &Daemon) -> Result<(), String> {
     let store = &d.store;
     for file in store.wanted_files().map_err(|e| e.to_string())? {
+        // A point to be cancelled at, file by file: a pass over thousands of
+        // files whose links all fail at once (stopping, or nobody reachable)
+        // would otherwise never yield, and hold the store for minutes.
+        tokio::task::yield_now().await;
+        if stopping() {
+            return Ok(());
+        }
         let root = file.root;
         expand_local(store, &root)?;
         if store.wants(&root, 1).map_err(|e| e.to_string())?.is_empty() {
@@ -6923,6 +7085,9 @@ async fn seek_pass(d: &Daemon) -> Result<(), String> {
         for hint in store.hints(&root).map_err(|e| e.to_string())? {
             if hint.next_try_ms > now_ms() {
                 continue;
+            }
+            if stopping() {
+                return Ok(());
             }
             let peer_hex = hex(&hint.peer);
             let link = match d.link_to(&hint.peer).await {

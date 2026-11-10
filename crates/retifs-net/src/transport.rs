@@ -78,6 +78,8 @@ impl PrnsTransport {
             let left = deadline - tokio::time::Instant::now();
             match tokio::time::timeout(left, self.handle.request_path(peer)).await {
                 Ok(Ok(_found)) => return Ok(()),
+                // The node is stopping: no path will come.
+                Ok(Err(e)) if format!("{e:?}").contains("NodeStopped") => return Err(format!("{e:?}")),
                 Ok(Err(e)) => last = format!("{e:?}"),
                 Err(_) => last = "timed out".into(),
             }

@@ -1,6 +1,6 @@
 //! retifs CLI (prototype): a thin client of the local retifsd (libretifs).
 //!
-//!     retifs [--store DIR] ping | nodes
+//!     retifs [--store DIR] ping | nodes | stop
 //!     retifs [--store DIR] put FILE [--public] [--compress] [--publish] [--record NAME | --one-off]
 //!
 //! `put` treats the file's absolute path as its record by default, so putting
@@ -59,7 +59,7 @@ use libretifs::{default_store_dir, Client};
 
 fn usage() -> ! {
     eprintln!(
-        "retifs [--store DIR] ping | nodes\n\
+        "retifs [--store DIR] ping | nodes | stop\n\
          retifs [--store DIR] put FILE [--public] [--compress] [--publish] [--record NAME | --one-off]\n\
          retifs [--store DIR] get READ-CAP [--from NODE]... [-o OUT] [--links N] [--batch N]\n\
          retifs [--store DIR] status READ-CAP\n\
@@ -160,6 +160,11 @@ async fn main() {
                 println!("{}  {} hop(s)  heard {}  {link}{}{}{record}{avoid}", n.node, n.hops, ago(n.last_heard_ms), if n.slow { " (slow)" } else { "" }, if n.same_site { "  same site" } else { "" });
             }
             println!("{} storage node(s)", nodes.len());
+        }
+        // Stops retifsd cleanly (its store closed), as SIGTERM does.
+        "stop" => {
+            client.stop().await.unwrap_or_else(|e| fail(e));
+            println!("retifsd is stopping");
         }
         "ping" => {
             let (node, chunks, usage) = client.ping().await.unwrap_or_else(|e| fail(e));

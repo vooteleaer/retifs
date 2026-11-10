@@ -364,6 +364,9 @@ pub enum Request {
     /// once) and redeems it with the creator's node, now or, if that node
     /// isn't reachable, on later syncs until it expires.
     InviteAccept { ns: String, link: String },
+    /// Owner only: stop the daemon cleanly (its store closed), as SIGTERM
+    /// does; for Windows, where no signal reaches a console-less process.
+    Stop,
 }
 
 /// An attribute value (ADR-0016).
@@ -1064,6 +1067,14 @@ impl Client {
         match reply.msg {
             Response::Error { message } => Err(ClientError::Daemon(message)),
             other if reply.id == id => Ok(other),
+            _ => Err(ClientError::Unexpected),
+        }
+    }
+
+    /// Asks the daemon to stop cleanly (owner only).
+    pub async fn stop(&mut self) -> Result<(), ClientError> {
+        match self.call(Request::Stop).await? {
+            Response::Done => Ok(()),
             _ => Err(ClientError::Unexpected),
         }
     }

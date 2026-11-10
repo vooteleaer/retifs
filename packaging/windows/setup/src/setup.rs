@@ -78,12 +78,41 @@ fn install() {
 }
 
 /// Stops our programs (by name; Reticulum is Prns's, never ours, and is
-/// left alone).
+/// left alone). retifsd is asked to stop first, so it closes its store:
+/// killed, its index is checked at the next start (minutes on a large
+/// store). Killed only if it hasn't stopped within 35 s.
 fn stop_programs() {
-    for p in PROGRAMS {
+    let kill = |p: &str| {
         let _ = Command::new("taskkill").args(["/IM", p, "/F"]).creation_flags_hidden().output();
+    };
+    // The utility first: it would start retifsd again.
+    kill("retifs-desktop.exe");
+    let cli = install_dir().join("retifs.exe");
+    if running("retifsd.exe") && cli.exists() {
+        // An older retifs.exe has no `stop`: then it's killed as before.
+        if Command::new(&cli).arg("stop").creation_flags_hidden().output().is_ok_and(|o| o.status.success()) {
+            for _ in 0..70 {
+                if !running("retifsd.exe") {
+                    break;
+                }
+                std::thread::sleep(std::time::Duration::from_millis(500));
+            }
+        }
+    }
+    for p in PROGRAMS {
+        kill(p);
     }
     std::thread::sleep(std::time::Duration::from_millis(800));
+}
+
+/// Whether a program of this name runs.
+fn running(exe: &str) -> bool {
+    Command::new("tasklist")
+        .args(["/FI", &format!("IMAGENAME eq {exe}"), "/NH"])
+        .creation_flags_hidden()
+        .output()
+        .map(|o| String::from_utf8_lossy(&o.stdout).to_ascii_lowercase().contains(&exe.to_ascii_lowercase()))
+        .unwrap_or(false)
 }
 
 trait Hidden {
