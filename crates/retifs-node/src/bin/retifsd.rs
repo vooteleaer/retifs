@@ -292,6 +292,27 @@ fn ns_commits(store: &SlabStore, ns_id: &NsId) -> Vec<(Cid, retifs_core::chunk::
 /// library (readers say so daily).
 const READER_TTL_MS: u64 = 30 * 24 * 3600 * 1000;
 
+/// The last time another node answered a sync of each namespace (`ns ms` lines).
+fn load_seen(file: &std::path::Path) -> HashMap<String, u64> {
+    std::fs::read_to_string(file)
+        .unwrap_or_default()
+        .lines()
+        .filter_map(|l| l.rsplit_once(' ').and_then(|(ns, ms)| Some((ns.to_string(), ms.parse().ok()?))))
+        .collect()
+}
+
+/// Notes that another node holding `ns` answered just now (shown with the library).
+fn saw_ns(d: &Daemon, ns: &str) {
+    let mut seen = d.ns_seen.lock().unwrap();
+    let now = now_ms();
+    // Written at most once a minute per library: syncs come often.
+    if seen.insert(ns.to_string(), now).is_some_and(|was| now - was < 60_000) {
+        return;
+    }
+    let text: String = seen.iter().map(|(n, ms)| format!("{n} {ms}\n")).collect();
+    let _ = std::fs::write(d.store.root().join("seen"), text);
+}
+
 fn readers_file(root: &std::path::Path, ns_id: &NsId) -> PathBuf {
     root.join("readers").join(hex(ns_id))
 }
@@ -758,6 +779,8 @@ fn main() {
         println!("no storage: nothing of its own kept here beyond a cache of {} MB (ADR-0031)", args.budget.cache_max.unwrap_or(0) >> 20);
     }
     std::fs::create_dir_all(&args.store).expect("create store dir");
+    // The apps show what starting is at (libretifs::starting) until the local API answers.
+    libretifs::set_starting(&args.store, "opening the store", None, now_ms());
     // A storage-less node (ADR-0031): its index and slabs in memory (a RAM
     // folder for the slabs), only the keyring and settings on disk.
     let ram = args.no_storage.then(|| ram_dir(&args.store));
@@ -785,12 +808,19 @@ fn main() {
             let _ = std::fs::copy(args.store.join("namespace_key"), dir.join("namespace_key"));
             SlabStore::open_in_memory(dir, args.db_cache)
         }
-        None => SlabStore::open_with_cache(&args.store, args.db_cache),
+        None => {
+            // After an unclean stop the index is checked first: minutes on a large store.
+            let (at, since) = (args.store.clone(), now_ms());
+            SlabStore::open_reporting(&args.store, args.db_cache, move |p| {
+                libretifs::set_starting(&at, "checking the store after an unclean stop", Some(p), since)
+            })
+        }
     };
     let store = match opened {
         Ok(mut s) => {
             s.set_budget(args.budget.clone());
             if args.compact {
+                libretifs::set_starting(&args.store, "compacting the index", None, now_ms());
                 let before = std::fs::metadata(args.store.join("index.redb")).map(|m| m.len()).unwrap_or(0);
                 match s.compact() {
                     Ok(_) => println!("index compacted: {} MB to {} MB", before >> 20, std::fs::metadata(args.store.join("index.redb")).map(|m| m.len()).unwrap_or(0) >> 20),
@@ -880,6 +910,9 @@ struct Daemon {
     /// from here while the namespace is busy (a sync merging it), so an app
     /// asking what's here isn't held up for seconds.
     ns_views: Mutex<HashMap<String, (NsView, std::time::Instant)>>,
+    /// When another node holding each namespace last answered a sync (ms),
+    /// kept in `<store>/seen` across restarts.
+    ns_seen: Mutex<HashMap<String, u64>>,
     /// Joined namespaces still looking for a checkpoint to start from.
     ns_seeking: Mutex<std::collections::HashSet<String>>,
     /// When a storage-less node last tried to fetch its own chain back, per
@@ -1827,7 +1860,9 @@ async fn serve(store: Arc<SlabStore>, identity: node::IdentitySecret, endpoint: 
         remote_control: personal_rns::remote_control::RemoteControlService::Unavailable.into(),
     });
     let handle = node.handle();
+    libretifs::set_starting(&args.store, "joining Reticulum", None, now_ms());
     let of = attach(&handle).await.unwrap_or_else(|e| panic!("{e}"));
+    libretifs::set_starting(&args.store, "starting its services", None, now_ms());
     let daemon = Arc::new(Daemon {
         store: store.clone(),
         transport: PrnsTransport::new(handle.clone()),
@@ -1855,6 +1890,7 @@ async fn serve(store: Arc<SlabStore>, identity: node::IdentitySecret, endpoint: 
         max_stamp_cost: args.max_stamp_cost,
         follow_wake: Notify::new(),
         ns_wake: Notify::new(),
+        ns_seen: Mutex::new(load_seen(&store.root().join("seen"))),
         ns_cache: Mutex::new(HashMap::new()),
         ns_views: Mutex::new(HashMap::new()),
         own_tried: Mutex::new(HashMap::new()),
@@ -1997,8 +2033,8 @@ async fn serve(store: Arc<SlabStore>, identity: node::IdentitySecret, endpoint: 
         }
     });
     let daemon_for_nn = daemon.clone();
-    tokio::spawn(local_api(endpoint, daemon.clone(), false));
-    tokio::spawn(local_api(libretifs::app_endpoint(&args.store), daemon.clone(), true));
+    tokio::spawn(local_api(endpoint, daemon.clone(), false, Some(args.store.clone())));
+    tokio::spawn(local_api(libretifs::app_endpoint(&args.store), daemon.clone(), true, None));
     tokio::spawn(api_server(daemon.clone(), handle.clone(), api_rx));
     tokio::spawn(invite_server(daemon.clone(), handle.clone(), invite_rx));
     tokio::spawn(lease_puller(daemon.clone(), shared.clone()));
@@ -2123,11 +2159,15 @@ async fn serve(store: Arc<SlabStore>, identity: node::IdentitySecret, endpoint: 
 }
 
 #[cfg(not(windows))]
-async fn local_api(endpoint: String, daemon: Arc<Daemon>, apps: bool) {
+/// `started`: the store whose starting step is cleared once this answers.
+async fn local_api(endpoint: String, daemon: Arc<Daemon>, apps: bool, started: Option<PathBuf>) {
     use std::os::unix::fs::PermissionsExt;
     let _ = std::fs::remove_file(&endpoint); // stale socket from a previous run
     let listener = tokio::net::UnixListener::bind(&endpoint).unwrap_or_else(|e| panic!("bind {endpoint}: {e}"));
     std::fs::set_permissions(&endpoint, std::fs::Permissions::from_mode(0o600)).expect("socket permissions");
+    if let Some(store) = started {
+        libretifs::clear_starting(&store);
+    }
     loop {
         match listener.accept().await {
             Ok((stream, _)) => {
@@ -2151,13 +2191,17 @@ async fn local_api(endpoint: String, daemon: Arc<Daemon>, apps: bool) {
 }
 
 #[cfg(windows)]
-async fn local_api(endpoint: String, daemon: Arc<Daemon>, apps: bool) {
+/// `started`: the store whose starting step is cleared once this answers.
+async fn local_api(endpoint: String, daemon: Arc<Daemon>, apps: bool, started: Option<PathBuf>) {
     use tokio::net::windows::named_pipe::ServerOptions;
     // first_pipe_instance: fail if another daemon already owns this store's pipe.
     let mut server = ServerOptions::new()
         .first_pipe_instance(true)
         .create(&endpoint)
         .unwrap_or_else(|e| panic!("create {endpoint}: {e} (is another retifsd running on this store?)"));
+    if let Some(store) = started {
+        libretifs::clear_starting(&store);
+    }
     loop {
         if let Err(e) = server.connect().await {
             eprintln!("local API connect: {e}");
@@ -3543,6 +3587,7 @@ fn ns_view_made(d: &Daemon, ns: &str) -> Result<NsView, String> {
         lazy: d.store.ns_lazy(ns).map_err(|e| e.to_string())?,
         announced: announced_libraries(&d.store).into_iter().any(|(n, _, _)| n == ns),
         nodes: merged.nodes.iter().map(|(w, n)| (hex(w), hex(n))).collect(),
+        last_seen_ms: d.ns_seen.lock().unwrap().get(ns).copied(),
     })
 }
 
@@ -3669,7 +3714,10 @@ async fn sync_ns(d: &Daemon, ns: &str) -> Result<(), String> {
         let gaps = chains_with_gaps(d, ns);
         for w in writers {
             let raw = match d.ask(link, HEAD_ENDPOINT, [ns_id.as_slice(), &w].concat()).await {
-                Ok(r) => r,
+                Ok(r) => {
+                    saw_ns(d, ns);
+                    r
+                }
                 Err(e) => {
                     d.drop_link(&peer);
                     eprintln!("ns {ns}: <{}>: {e}", hex(&peer));

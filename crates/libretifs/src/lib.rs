@@ -507,6 +507,10 @@ pub struct NsView {
     /// a member is (a contact's node).
     #[serde(default)]
     pub nodes: Vec<(String, String)>,
+    /// When another node holding it last answered a sync (ms since the Unix
+    /// epoch); None if none has yet.
+    #[serde(default)]
+    pub last_seen_ms: Option<u64>,
 }
 
 fn yes() -> bool {
@@ -805,6 +809,50 @@ pub fn app_endpoint(store: &Path) -> String {
     {
         store.join("apps.sock").to_string_lossy().into_owned()
     }
+}
+
+/// What a starting retifsd is doing before its local API answers, so the
+/// apps can say so rather than "not running" (opening the store can take
+/// minutes after an unclean stop). retifsd keeps it in `<store>/starting`
+/// and removes it once it serves.
+#[derive(Debug, Clone, PartialEq)]
+pub struct Starting {
+    /// The step, in words ("opening the store").
+    pub step: String,
+    /// How far the step is (0.0 to 1.0), when it's known.
+    pub progress: Option<f64>,
+    /// When the step began (ms since the Unix epoch).
+    pub since_ms: u64,
+}
+
+fn starting_file(store: &Path) -> PathBuf {
+    store.join("starting")
+}
+
+/// The step a retifsd starting on `store` is at; `None` if none is (it
+/// serves, or isn't running: a file left by one that stopped while starting
+/// is ignored where its process can be checked).
+pub fn starting(store: &Path) -> Option<Starting> {
+    let text = std::fs::read_to_string(starting_file(store)).ok()?;
+    let mut lines = text.lines();
+    let pid: u32 = lines.next()?.parse().ok()?;
+    if cfg!(any(target_os = "linux", target_os = "android")) && !Path::new(&format!("/proc/{pid}")).exists() {
+        return None;
+    }
+    let since_ms = lines.next()?.parse().ok()?;
+    let progress = lines.next()?.parse().ok();
+    Some(Starting { step: lines.collect::<Vec<_>>().join(" "), progress, since_ms })
+}
+
+/// Says (as retifsd) which step starting is at.
+pub fn set_starting(store: &Path, step: &str, progress: Option<f64>, since_ms: u64) {
+    let progress = progress.map(|p| format!("{p:.3}")).unwrap_or_default();
+    let _ = std::fs::write(starting_file(store), format!("{}\n{since_ms}\n{progress}\n{step}\n", std::process::id()));
+}
+
+/// Says (as retifsd) that starting is over.
+pub fn clear_starting(store: &Path) {
+    let _ = std::fs::remove_file(starting_file(store));
 }
 
 pub fn endpoint(store: &Path) -> String {
@@ -1116,5 +1164,27 @@ impl Client {
             Response::Status(s) => Ok(s),
             _ => Err(ClientError::Unexpected),
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn starting_step_round_trips_and_clears() {
+        let store = std::env::temp_dir().join(format!("libretifs-starting-{}", std::process::id()));
+        std::fs::create_dir_all(&store).unwrap();
+        assert_eq!(starting(&store), None);
+        set_starting(&store, "checking the store after an unclean stop", Some(0.25), 1_000);
+        assert_eq!(
+            starting(&store),
+            Some(Starting { step: "checking the store after an unclean stop".into(), progress: Some(0.25), since_ms: 1_000 })
+        );
+        set_starting(&store, "joining Reticulum", None, 2_000);
+        assert_eq!(starting(&store).map(|s| (s.step, s.progress)), Some(("joining Reticulum".into(), None)));
+        clear_starting(&store);
+        assert_eq!(starting(&store), None);
+        let _ = std::fs::remove_dir_all(&store);
     }
 }

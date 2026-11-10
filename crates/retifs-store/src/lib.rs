@@ -248,9 +248,19 @@ impl SlabStore {
 
     /// Opens with an index page cache of `cache_bytes`.
     pub fn open_with_cache(root: impl AsRef<Path>, cache_bytes: usize) -> Result<Self, StoreError> {
+        Self::open_reporting(root, cache_bytes, |_| {})
+    }
+
+    /// Like [`open_with_cache`](Self::open_with_cache), calling `repairing`
+    /// with the progress (0.0 to 1.0) while an index left by an unclean stop
+    /// is checked and repaired: that can take minutes on a large store.
+    pub fn open_reporting(root: impl AsRef<Path>, cache_bytes: usize, repairing: impl Fn(f64) + 'static) -> Result<Self, StoreError> {
         let root = root.as_ref().to_path_buf();
         fs::create_dir_all(root.join("slabs"))?;
-        let db = redb::Builder::new().set_cache_size(cache_bytes).create(root.join("index.redb"))?;
+        let db = redb::Builder::new()
+            .set_cache_size(cache_bytes)
+            .set_repair_callback(move |s| repairing(s.progress()))
+            .create(root.join("index.redb"))?;
         Self::with_db(root, db)
     }
 
