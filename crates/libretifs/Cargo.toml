@@ -1,6 +1,6 @@
 [package]
 name = "libretifs"
-version = "0.1.0"
+version = "0.2.0"
 description = "Client library for the retifs local API (ADR-0004), prototype"
 edition.workspace = true
 license.workspace = true

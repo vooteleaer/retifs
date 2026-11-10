@@ -1,6 +1,6 @@
 [package]
 name = "retifs-core"
-version = "0.1.0"
+version = "0.2.0"
 description = "retifs core: chunk encryption, CIDs, chunking (prototype, unstable)"
 edition.workspace = true
 license.workspace = true
