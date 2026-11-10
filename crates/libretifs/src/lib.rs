@@ -955,6 +955,34 @@ async fn open_pipe(at: &str) -> io::Result<Stream> {
     }
 }
 
+/// Waits until one of several libraries changes, for at most `timeout`:
+/// the first that did, with its change count now; `None` if none did in
+/// time. Each watch is `(a connection of its own, the library, its change
+/// count as known)`. retifsd answers a watch the moment its library changes
+/// (a write here, or other members' writes merged in), so an app waiting
+/// on this sees a change at once, with no asking every few seconds.
+pub async fn watch_any(watches: Vec<(Client, String, u64)>, timeout: std::time::Duration) -> Result<Option<(String, u64)>, ClientError> {
+    let timeout_ms = timeout.as_millis() as u64;
+    let mut set = tokio::task::JoinSet::new();
+    for (mut c, ns, since) in watches {
+        set.spawn(async move {
+            let answer = c.call(Request::Watch { ns: ns.clone(), since, timeout_ms }).await;
+            (ns, since, answer)
+        });
+    }
+    // The rest are dropped (their watches ended) once one answers with a change.
+    while let Some(done) = set.join_next().await {
+        let Ok((ns, since, answer)) = done else { continue };
+        match answer? {
+            Response::Changed { count } if count != since => return Ok(Some((ns, count))),
+            Response::Changed { .. } => {}
+            Response::Error { message } => return Err(ClientError::Daemon(message)),
+            _ => return Err(ClientError::Unexpected),
+        }
+    }
+    Ok(None)
+}
+
 impl Client {
     /// Connects to the daemon owning `store` (see [`default_store_dir`]).
     pub async fn connect(store: &Path) -> Result<Self, ClientError> {
