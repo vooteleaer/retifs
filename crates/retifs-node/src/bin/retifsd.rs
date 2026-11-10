@@ -6264,6 +6264,11 @@ async fn lease_puller(d: Arc<Daemon>, shared: Arc<Shared>) {
 
 async fn pull_pass(d: &Daemon) -> Result<(), String> {
     for (held, missing) in d.store.lease_wants().map_err(|e| e.to_string())? {
+        // A point to be cancelled at, lease by lease (as the seeker's).
+        tokio::task::yield_now().await;
+        if stopping() {
+            return Ok(());
+        }
         let total = held.lease.entries.len();
         let mut have = total - missing.len();
         for src in &held.sources {
@@ -6323,6 +6328,9 @@ async fn lease_upkeep(d: Arc<Daemon>) {
         }
         // One exchange per holder however many leases it keeps (ADR-0014).
         for (holder, mut leases) in by_holder {
+            if stopping() {
+                break;
+            }
             match upkeep_holder(&d, &holder, &mut leases, &mut proved).await {
                 Ok(Some(ok)) => {
                     let _ = d.store.holder_result(&holder, ok, now_ms());
