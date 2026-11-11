@@ -27,6 +27,9 @@ The owner gave this key's OpenPGP application to retifs (its keys weren't in use
 
 So this YubiKey can be a retifs node's identity, with the secret never leaving the card, using only RNS's primitives.
 
+## In Rust (2026-11-11)
+`crates/retifs-card` talks to the card over PC/SC (`pcsc`): selects the OpenPGP application, reads both public keys (GENERATE ASYMMETRIC KEY PAIR in read mode), verifies the PIN, signs (PSO:COMPUTE DIGITAL SIGNATURE, extended length for messages over 255 bytes) and agrees (PSO:DECIPHER with the peer's X25519 key). Its example `card_check` signed a 400-byte message on the card (checked with ed25519-dalek), agreed with an ephemeral key made in software (the same secret both ways), and gave the identity hash and `retifs.node` destination Python RNS gave; [verify_card_rust.py](yubikey/verify_card_rust.py) checks its output with Python RNS. On Linux the crate needs pcsc-lite (`libpcsclite-dev` to build, `pcscd` to run).
+
 ## Next
 1. Prns: the `IdentitySigner` trait (fallible signing, agreement on the device), with a software implementation first and the card one behind it.
-2. retifs: the card's two operations over PC/SC (the `pcsc` crate: SELECT OpenPGP, VERIFY, PSO:CDS, PSO:DECIPHER) behind that trait, the PIN asked by the desktop utility.
+2. retifs: `retifs-card` behind that trait, and retifsd started with the card's identity, the PIN asked by the desktop utility.
