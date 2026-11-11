@@ -110,7 +110,7 @@ Files, folders, albums, packages, versions and branches are all combinations of 
   - `retifs-haikufs` (started): a namespace as a Haiku volume, attributes and live queries in Tracker;
   - `retifs-extractd`: attributes from what's in files, an app with a key limit ([ADR-0023](adr/0023-attribute-extraction.md)).
 - **The local API's building blocks:** records and queries, transactions (several changes as one commit), `watch` (wait for a namespace to change), write sessions (content written in place without holding it whole), and on-demand range reads.
-- Thin client: a minimal local bootstrap, with applications and data on the network. **The local disk is a cache**, and a pinned set enables offline use.
+- ~~Thin client~~ (removed from the plan, 2026-11-11): a minimal local bootstrap, with applications and data on the network. **The local disk is a cache**, and a pinned set enables offline use.
 - **Identity travels with you:** a YubiKey (device key, authorised by the root) plus a root identity kept offline. Login issues a short-lived session capability.
-- USB stick layout: EFI (UKI) · bootstrap EROFS + dm-verity · F2FS cache with LUKS (bound to the YubiKey) · writable layer on tmpfs.
+- ~~USB stick layout: EFI (UKI) · bootstrap EROFS + dm-verity · F2FS cache with LUKS (bound to the YubiKey) · writable layer on tmpfs.~~
 - Client: Linux first. Haiku later, as a UX demo (native BFS, Tracker and packagefs). Infrastructure: Alpine (pinning, transport and gateway nodes).

@@ -11,7 +11,6 @@
 - **Compression before encryption:** which algorithm (zstd?), and the default per content type; CRIME-style size leaks for mixed-content chunks ([ADR-0013](adr/0013-slow-links.md)).
 - **Spread defaults:** generation ranges and the probabilistic decrement rule, and default radius per class ([ADR-0011](adr/0011-redundancy-by-default.md)).
 - **Default replication target:** e.g. "all my storage nodes, at least 2 copies, one offsite"; how to express it simply.
-- **Store generation in announces:** size and privacy of the counter that tells peers a node has new chunks ([ADR-0010](adr/0010-continuous-seeking.md)).
 - **Spam:** LXMF stamps on announces, pinning requests, attributes.
 - **App identity on Linux:** how to bind a per-app capability to a process reliably without a sandbox. Partly answered: tokens are pinned to the executable path on first use ([ADR-0004](adr/0004-native-record-api.md)). Open: a program replaced at the same path, interpreters (every Python app is `/usr/bin/python3`), Flatpak/portal identity, a user prompt.
 - **Removal race** (also keeps tombstones: a revoked writer whose chain stops before its revoke holds back pruning, [ADR-0018](adr/0018-state-trees.md)): which of a member's writes count when they were made offline, concurrently with that member's removal? Causal rule needed.

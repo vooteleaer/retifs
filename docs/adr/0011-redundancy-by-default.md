@@ -119,3 +119,8 @@ Not built yet:
 - the spread budget (the lease's `generations` field is there and always 0) and a network radius;
 - the spare tier ([ADR-0012](0012-disk-budget.md));
 - erasure coding (decided for later, its own ADR).
+
+## Decided (2026-11-11, owner)
+- **Volunteer offers (`retifs.store`): replaced.** Every node holds for others by default (ADR-0014), its offer is `room` in its `retifs.node` announce, and `--hold-for-others` caps it. No separate destination.
+- **Own-node pool: not done.** Placement doesn't prefer the user's own devices; the nearest reliable node holds, whoever's it is, since copies are ciphertext ([holders vs readers](../05-prototype-plan.md)).
+- **Diffuse mode: not done.** The spare tier ([ADR-0012](0012-disk-budget.md)) gives unrequested holdings; personal data stays on leases.

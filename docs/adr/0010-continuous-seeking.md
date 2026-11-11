@@ -36,7 +36,7 @@ Option 3.
 - **Triggers:** an announce from a candidate peer, a new want, or a slow periodic tick as a fallback.
 - **Links:** one or a few links per reachable peer, kept open while useful.
 - **Before fetching, ask what the peer has:** `/retifs/have` sends 8-byte CID prefixes (about 50 per packet, below the MDU, so they pipeline; see [first-transfer](../recon/first-transfer.md)) and returns a bitmap. Then `/retifs/get` fetches what's held. Multi-source fills different gaps from different peers.
-- **Change detection:** nodes include a small **store generation** counter in their `retifs.node` announce. A peer is asked again only if its generation changed since the last ask, or after a long back-off.
+- **Change detection:** ~~nodes include a small **store generation** counter in their `retifs.node` announce~~ (decided against, 2026-11-11): a peer is asked again after a back-off, or when it announces.
 - **Candidates:**
   - by default, read-cap holder hints, configured peers and our own nodes;
   - every `retifs.node` heard, as an opt-in, because asking reveals interest in CIDs.

@@ -134,7 +134,6 @@ See the [vision](docs/00-vision.md).
 | Windows | Explorer folder (Cloud Files: placeholders fetched on open), installer | prototype works |
 | Haiku | Libraries as volumes with native attributes and live queries in Tracker, packages | prototype works |
 | Android | `retifsd` inside an app, on Prns's shared instance | prototype works |
-| Thin client | Bootable USB stick plus YubiKey, the system loaded from your library | not started |
 
 See the [prototype plan](docs/05-prototype-plan.md).
 

@@ -195,10 +195,7 @@ struct Attr {
 
 - Each attribute write is a signed record `(record_id, identity, key, value, seq)`. The serialization is **⚠ irreversible** (decision 2).
 - **CRDT:** last-writer-wins per `(identity, key)`. Different authors' values coexist. `attr()` returns the newest by default, and `attr_all()` returns all of them.
-- **Record vs content binding** (**⚠ irreversible**, decision 7):
-  - Mutable, user-given attributes (`name`, `album`, `tags`, `path`) bind to the **record** and survive content changes.
-  - Content-derived attributes (`width`, `duration`, `exif.*`, `mime`) bind to the **block's CID** and are recomputed for new content.
-  - The daemon decides the binding from the key's convention (§6.3). Apps can't override it.
+- **Record vs content binding** (**⚠ irreversible**, decision 7; decided 2026-11-11): every attribute binds to the **record** and survives content changes. Content-derived attributes (`width`, `duration`, `exif.*`, `mime`) are recomputed for new content by the attribute producer, which keeps a marker of the content it described (`extracted`, [ADR-0023](adr/0023-attribute-extraction.md)) and unsets what the new content lacks. The format has no content-bound attributes.
 
 ### 6.3 Key conventions
 

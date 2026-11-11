@@ -1,6 +1,6 @@
 # ADR-0033: Recovery: a key kept offline, and a keyring
 
-- **Status:** proposed (draft, 2026-11-09; nothing built)
+- **Status:** accepted as the direction (owner, 2026-11-11; nothing built). The words and derivation are irreversible: vectors and the external review before the first kit.
 - **Date:** 2026-11-09
 - **Irreversible:** yes. The derivation of the recovery identity from its words, the words themselves (printed on paper), and the keyring's records and address derivation. Needs test vectors verified with RNS before anyone writes a recovery kit down.
 
@@ -32,7 +32,7 @@ The [threat model](../04-threat-model.md) already speaks of a device key "revoke
 ### The recovery identity
 - 32 random bytes, the seed, shown once as **24 words** from the same BIP-39 English list as the fingerprint words (decision 13). The words carry a checksum (BIP-39's), so a mistyped word is caught.
 - The identity is derived: `x25519_private = HKDF-SHA256(ikm = seed, salt = "retifs/v1/recovery", info = "x25519")[0..32]`, `ed25519_seed = HKDF-SHA256(ikm = seed, salt = "retifs/v1/recovery", info = "ed25519")[0..32]`, the same `X25519 ‖ Ed25519` identity as every writer (ADR-0017).
-- Or kept on a YubiKey instead of paper, once the YubiKey signer exists ([prototype plan](../05-prototype-plan.md)).
+- **Decided (2026-11-11):** the 24 words are always there; the same identity may also be put on a YubiKey (the two keys derived from the words, imported into the card's OpenPGP slots: signature Ed25519, decryption X25519; [recon](../recon/yubikey.md)). Not a YubiKey alone: a lost key would lose the recovery.
 
 ### A member of every library
 - When the user makes a recovery kit, each of the user's devices that holds `grant` grants the recovery identity `write` and `grant` in each library it may (an ordinary grant, ADR-0017). A new library made afterwards grants it at once. Libraries where no device of the user's holds `grant` are listed as not recoverable.
@@ -45,7 +45,7 @@ The [threat model](../04-threat-model.md) already speaks of a device key "revoke
 
 ### Recovering
 1. Install retifs on a new device and choose **Recover from a recovery kit**; type the 24 words (or scan them, or use the YubiKey).
-2. The device derives the identity and the keyring's `ns_id` and asks the nodes it can reach for the keyring's heads. Which nodes: those a fresh node can find for a namespace (members' node addresses in its commits, ADR-0022; announced libraries, ADR-0029). **Open:** a keyring whose every node is gone can't be found; the kit may need to list a node or two, or the keyring its own announce.
+2. The device derives the identity and the keyring's `ns_id` and asks the nodes it can reach for the keyring's heads. Which nodes: those a fresh node can find for a namespace (members' node addresses in its commits, ADR-0022; announced libraries, ADR-0029). **Decided (2026-11-11): the keyring announces itself.** The user's nodes announce a destination derived from the words (the keyring's own, as for an announced library but carrying nothing readable), so a fresh device finds a node holding it over Reticulum. On the network it's an address nobody can place. The kit names no nodes.
 3. With the keyring read, the device joins every library listed (as itself: a new writer key, granted by the recovery identity), then seeks the content (ADR-0010).
 4. The lost devices are revoked, with the recovery identity, in every library. Each revoke rotates the read key.
 
@@ -64,6 +64,5 @@ Every library should have a second grant holder on another device: `retifs ns gr
 - The words and the derivation can't change once printed: vectors (seed → words → identity, keyring `ns_id`, the first read key), verified with RNS and a BIP-39 implementation, are needed before the first kit.
 
 ## Open
-- How a fresh device finds the keyring when it knows only its `ns_id` (step 2).
 - k-of-n recovery with friends (split the seed among people the user trusts); Shamir's scheme is new crypto here and needs its own ADR.
 - Whether the recovery identity should also be the "root" the threat model mentions (one key that can revoke a device from every library at once).

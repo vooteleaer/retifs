@@ -93,3 +93,8 @@ invitation = { "ns": namespace address, "node": creator's node, "secret": 32 ran
 - ~~The word list for fingerprints~~: BIP-39 English over SHA-256 of the key (decision 13, `verify_words.py`).
 - One-record sharing: `cap` links, share namespaces, or both.
 - Whether a profile is per node or per person (a person has several nodes; a profile record in their namespace could list them).
+
+## Decided (2026-11-11, owner)
+- **Profiles are a person's, not a node's:** one profile record in the person's `me` (display name, the nodes that are theirs), which their nodes give to their contacts. Every device of a person then shows as one person. Not `/retifs/profile` per node, and not a name in node announces. Apps still show a name with a short fingerprint and never decide anything by it.
+- **Links and invitations over LXMF:** retifs sends them as LXMF messages to the recipient's `lxmf.delivery` destination, directly when the recipient is reachable and through LXMF propagation nodes otherwise, so they arrive in Sideband or NomadNet even while the recipient is away. Not built yet; LXMF's message format and stamps are LXMF's own (the stamp construction is already verified with LXMF, ADR-0014).
+- **Capability chains beyond grants** and **session capabilities for apps:** not done. Grants and app tokens cover them.
