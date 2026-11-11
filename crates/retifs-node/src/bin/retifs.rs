@@ -1068,6 +1068,9 @@ fn print_status(s: &libretifs::Status) {
     if let Some(secs) = s.slow_link_wait_secs {
         println!("  rest waits for a faster path (about {} over the slow link)", duration(secs));
     }
+    if s.holders_seen > 0 {
+        println!("  seen held by {} other node(s) in the last hour", s.holders_seen);
+    }
     if s.leased_to > 0 {
         println!("  leased to {} node(s), {} confirmed by receipt", s.leased_to, s.replicas);
     }

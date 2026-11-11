@@ -155,5 +155,13 @@ Built: wants and tree expansion, partial availability, seeking on announces and 
 Not built yet:
 - the store generation counter in announces (peers are asked again on a timer);
 - slicing `have` per peer and decoy prefixes;
-- the holder map as described (sources ranked, load spread, failover): hints and placement records stand in for it;
+- per-chunk holders, and holders learned from others (gossip between own nodes);
 - per-file serving destinations.
+
+## Holder map, first slice (2026-11-11)
+- **In memory, local, bounded:** `retifs_store::HolderMap` keeps, per file, up to 8 holders with their last `have` answer (asked, held, when) and their last failure; others seen are only counted. At most 4096 files, the least recently touched forgotten first. Nothing is persisted or sent anywhere: after a restart the map fills again from the first answers.
+- **Grouped per file**, not per chunk: holders usually have whole files (leases, members, readers keeping a library), and a holder holding only part ranks after those holding all.
+- **Ranking** (`Daemon::rank_sources`): a holder confirmed by a receipt or whose last answer held everything asked; then one that held some; then peers not asked in the last hour; then one that held nothing; a peer that failed in the last two minutes last. Within a rank, by the estimated time to move the bytes over its link (measured RTT and throughput). Reads (`ensure_local`) and the seeker order their candidates this way.
+- **Load spreading:** a read missing 32 chunks or more, with two or more holders known to hold it over fast links, fetches a part from each of up to three at once. What a part's holder didn't bring stays missing and goes to the next source.
+- **Failover:** a failed holder drops to the end at once, so the next read asks the next holder first.
+- **Measured copies:** `retifs status` says how many other nodes were seen holding the file in the last hour, besides the leased and confirmed ones.

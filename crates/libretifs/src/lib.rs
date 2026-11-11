@@ -738,6 +738,10 @@ pub struct Status {
     /// Peers known to ask for it.
     #[serde(default)]
     pub holders_known: usize,
+    /// Other nodes seen holding some or all of it in the last hour (the
+    /// holder map: `have` answers), whether or not it was leased to them.
+    #[serde(default)]
+    pub holders_seen: usize,
     /// Nodes this daemon leased the file to.
     #[serde(default)]
     pub leased_to: usize,

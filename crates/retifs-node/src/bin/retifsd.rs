@@ -1086,6 +1086,8 @@ struct Daemon {
     /// Libraries deleted by a member holding `grant` (`deleted` in the
     /// store): hidden, and left once their grace is over (ADR-0034).
     deleted: Mutex<std::collections::BTreeMap<String, u64>>,
+    /// Who has been seen holding which file (ADR-0010): ranks sources.
+    holder_map: Mutex<retifs_store::HolderMap>,
 }
 
 /// A storage-less node's RAM folder for its slabs: in /dev/shm where there is
@@ -1925,6 +1927,26 @@ impl Daemon {
         self.links.lock().unwrap().remove(peer);
     }
 
+    /// `candidates` in the order to ask them for `root` (ADR-0010, holder
+    /// map): holders confirmed by a receipt or seen holding it first, peers
+    /// that failed just now last; within each, by the estimated time to move
+    /// `bytes` over their link.
+    fn rank_sources(&self, root: &Cid, candidates: &[PeerId], bytes: u64) -> Vec<(PeerId, retifs_store::SourceRank)> {
+        let confirmed = self.store.confirmed_holders(root, now_s()).unwrap_or_default();
+        let cost: HashMap<PeerId, f64> = candidates.iter().map(|p| (*p, self.quality(p).transfer_secs(bytes))).collect();
+        self.holder_map.lock().unwrap().rank(root, candidates, &confirmed, now_ms(), |p| cost.get(p).copied().unwrap_or(f64::MAX))
+    }
+
+    /// `peer` said it holds `held` of the `asked` chunks of `root`.
+    fn saw_holding(&self, root: &Cid, peer: &PeerId, asked: usize, held: usize) {
+        self.holder_map.lock().unwrap().saw(root, peer, asked, held, now_ms());
+    }
+
+    /// `peer` couldn't be reached for `root`, or its answer failed.
+    fn source_failed(&self, root: &Cid, peer: &PeerId) {
+        self.holder_map.lock().unwrap().failed(root, peer, now_ms());
+    }
+
     async fn ask(&self, link: LinkId, endpoint: &'static str, body: Vec<u8>) -> Result<Vec<u8>, String> {
         tokio::time::timeout(Duration::from_secs(60), self.transport.request(link, endpoint, body))
             .await
@@ -2047,6 +2069,7 @@ async fn serve(store: Arc<SlabStore>, identity: node::IdentitySecret, endpoint: 
         ns_seeking: Mutex::new(if args.no_storage { store.ns_names().unwrap_or_default().into_iter().collect() } else { std::collections::HashSet::new() }),
         announced: Mutex::new(std::collections::HashSet::new()),
         announced_wake: Notify::new(),
+        holder_map: Mutex::new(retifs_store::HolderMap::new()),
         device: args.device.clone(),
         changes: Mutex::new(HashMap::new()),
         changed: Notify::new(),
@@ -3589,6 +3612,8 @@ fn full_status(d: &Daemon, cap: &FileRef) -> Status {
     s.slow_link_wait_secs = d.deferred.lock().unwrap().get(&cap.root).copied();
     s.seeking = store.is_wanted(&cap.root).unwrap_or(false);
     s.holders_known = store.hints(&cap.root).map(|h| h.len()).unwrap_or(0);
+    let (seen, others) = d.holder_map.lock().unwrap().seen_holding(&cap.root, now_ms());
+    s.holders_seen = seen.len() + others as usize;
     let own = store.own_leases().unwrap_or_default();
     let holders: std::collections::BTreeSet<PeerId> = own.iter().filter(|o| o.roots.contains(&cap.root)).map(|o| o.holder).collect();
     let confirmed = store.confirmed_holders(&cap.root, now_s()).unwrap_or_default();
@@ -4810,39 +4835,56 @@ async fn ensure_local(d: &Daemon, file: &FileRef, range: std::ops::Range<u64>, n
         if peers.is_empty() {
             return Err(format!("{}: not here, and no peer known to ask", file.root));
         }
+        // Chunks are at most 256 KiB; most are far smaller. A rough upper bound.
+        let bytes_needed = missing.len() as u64 * 64 * 1024;
+        let ranked = d.rank_sources(&file.root, &peers, bytes_needed);
         let mut progressed = false;
         let mut too_slow = false;
-        for peer in &peers {
+        // Several holders known and much to fetch: a part from each at once.
+        let holders: Vec<PeerId> = ranked
+            .iter()
+            .filter(|(p, r)| *r <= retifs_store::SourceRank::HoldsSome && !d.quality(p).slow())
+            .map(|(p, _)| *p)
+            .take(SPREAD_MAX_HOLDERS)
+            .collect();
+        if holders.len() >= 2 && missing.len() >= SPREAD_MIN_CHUNKS {
+            progressed = fetch_spread(d, &file.root, &missing, &holders, deadline).await?;
+        }
+        for (peer, _) in &ranked {
+            if progressed {
+                break; // look again: fetched nodes may reveal more chunks
+            }
             let left = deadline.saturating_duration_since(Instant::now());
             if left.is_zero() {
                 break;
             }
             let q = d.quality(peer);
-            // Chunks are at most 256 KiB; most are far smaller. A rough upper bound.
-            if q.slow() && q.transfer_secs(missing.len() as u64 * 64 * 1024) > d.slow_budget as f64 {
+            if q.slow() && q.transfer_secs(bytes_needed) > d.slow_budget as f64 {
                 too_slow = true;
                 continue;
             }
             let link = match tokio::time::timeout(left, d.link_to(peer)).await {
                 Ok(Ok(l)) => l,
-                _ => continue,
+                _ => {
+                    d.source_failed(&file.root, peer);
+                    continue;
+                }
             };
             let t0 = Instant::now();
             let round = match seek_round(&d.transport, link, &missing, d.private_requests, left).await {
                 Ok(r) => r,
                 Err(_) => {
                     d.drop_link(peer);
+                    d.source_failed(&file.root, peer);
                     continue;
                 }
             };
+            d.saw_holding(&file.root, peer, missing.len(), round.held);
             let bytes: u64 = round.got.iter().map(|(_, ct, _)| ct.len() as u64).sum();
             let _ = d.store.record_transfer(peer, bytes, t0.elapsed().as_millis() as u64);
             for (i, ct, _) in round.got {
                 d.store.insert(&missing[i].0, &ct, tier::CACHE).map_err(|e| e.to_string())?;
                 progressed = true;
-            }
-            if progressed {
-                break; // look again: fetched nodes may reveal more chunks
             }
         }
         // Nobody has it yet (a member may still be pulling it from its
@@ -4861,6 +4903,58 @@ async fn ensure_local(d: &Daemon, file: &FileRef, range: std::ops::Range<u64>, n
             });
         }
     }
+}
+
+/// A read spreads over several known holders when it needs at least this many chunks.
+const SPREAD_MIN_CHUNKS: usize = 32;
+/// Holders a read spreads over at most.
+const SPREAD_MAX_HOLDERS: usize = 3;
+
+/// Fetches `missing` from several `holders` at once, a part from each (the
+/// holder map's load spreading, ADR-0010). What a holder failed to bring
+/// stays missing and is asked of the next source. True if anything arrived.
+async fn fetch_spread(d: &Daemon, root: &Cid, missing: &[(Cid, retifs_core::Seed)], holders: &[PeerId], deadline: Instant) -> Result<bool, String> {
+    let mut links = Vec::new();
+    for peer in holders {
+        let left = deadline.saturating_duration_since(Instant::now());
+        if left.is_zero() {
+            break;
+        }
+        match tokio::time::timeout(left, d.link_to(peer)).await {
+            Ok(Ok(l)) => links.push((*peer, l)),
+            _ => d.source_failed(root, peer),
+        }
+    }
+    if links.len() < 2 {
+        return Ok(false);
+    }
+    let per = missing.len().div_ceil(links.len());
+    let left = deadline.saturating_duration_since(Instant::now());
+    let rounds = futures_util::future::join_all(links.iter().zip(missing.chunks(per)).map(|((peer, link), part)| async move {
+        let t0 = Instant::now();
+        let round = seek_round(&d.transport, *link, part, d.private_requests, left).await;
+        (peer, part, round, t0.elapsed())
+    }))
+    .await;
+    let mut progressed = false;
+    for (peer, part, round, took) in rounds {
+        match round {
+            Ok(round) => {
+                d.saw_holding(root, peer, part.len(), round.held);
+                let bytes: u64 = round.got.iter().map(|(_, ct, _)| ct.len() as u64).sum();
+                let _ = d.store.record_transfer(peer, bytes, took.as_millis() as u64);
+                for (i, ct, _) in round.got {
+                    d.store.insert(&part[i].0, &ct, tier::CACHE).map_err(|e| e.to_string())?;
+                    progressed = true;
+                }
+            }
+            Err(_) => {
+                d.drop_link(peer);
+                d.source_failed(root, peer);
+            }
+        }
+    }
+    Ok(progressed)
 }
 
 /// Followed channels' namespaces belong to their writer.
@@ -7090,7 +7184,11 @@ async fn seek_pass(d: &Daemon) -> Result<(), String> {
             println!("seeker: {root} complete");
             continue;
         }
-        for hint in store.hints(&root).map_err(|e| e.to_string())? {
+        // Known holders first (the holder map), then the rest by link.
+        let hints = store.hints(&root).map_err(|e| e.to_string())?;
+        let order = d.rank_sources(&root, &hints.iter().map(|h| h.peer).collect::<Vec<_>>(), file.size);
+        let hints: Vec<_> = order.iter().filter_map(|(p, _)| hints.iter().find(|h| h.peer == *p).copied()).collect();
+        for hint in hints {
             if hint.next_try_ms > now_ms() {
                 continue;
             }
@@ -7102,6 +7200,7 @@ async fn seek_pass(d: &Daemon) -> Result<(), String> {
                 Ok(l) => l,
                 Err(e) => {
                     eprintln!("seeker: {peer_hex} unreachable: {e}");
+                    d.source_failed(&root, &hint.peer);
                     store.hint_result(&root, &hint.peer, false, now_ms()).map_err(|e| e.to_string())?;
                     continue;
                 }
@@ -7137,9 +7236,11 @@ async fn seek_pass(d: &Daemon) -> Result<(), String> {
                     Err(e) => {
                         eprintln!("seeker: {peer_hex}: {e}");
                         d.drop_link(&hint.peer);
+                        d.source_failed(&root, &hint.peer);
                         break;
                     }
                 };
+                d.saw_holding(&root, &hint.peer, pairs.len(), round.held);
                 let bytes: u64 = round.got.iter().map(|(_, ct, _)| ct.len() as u64).sum();
                 let _ = store.record_transfer(&hint.peer, bytes, t0.elapsed().as_millis() as u64);
                 if round.got.is_empty() {
