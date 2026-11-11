@@ -100,7 +100,8 @@ Prototypes are throwaway. They're for learning, not for locking in the format. T
 - [x] Readers as members: invitations to read (`invite create NS --read`), readers listed in `ns info`, rekeys wrapped to every member ([ADR-0017](adr/0017-multi-writer-namespaces.md), [ADR-0020](adr/0020-sharing-names-invitations.md)).
 - [ ] Sharing, continued (decided 2026-11-11): a person's profile as one record in their `me` (name, their nodes), given to their contacts; links and invitations sent over LXMF, directly and through propagation nodes ([ADR-0020](adr/0020-sharing-names-invitations.md)).
 - [ ] YubiKey-backed Prns `IdentitySigner` (upstream: fallible `sign()`, X25519 exchange through a trait).
-- [ ] Recovery kit: 24 words (optionally also on a YubiKey) for a recovery identity in every library; the keyring announces itself (direction decided, nothing built; [ADR-0033](adr/0033-recovery.md)).
+- [x] Recovery kit: `retifs recovery create` (24 words, the identity granted in every library, the keyring kept current and announced) and `retifs recovery restore` on a fresh device; derivation with vectors checked by Python RNS and BIP-39's own ([ADR-0033](adr/0033-recovery.md)).
+- [ ] Recovery kit, continued: revoking lost devices from the kit, the identity on a YubiKey, other devices joining the keyring, screens in the apps; the external review before real kits.
 - [x] Per-app capabilities on the local socket: an app socket with tokens scoped to namespaces and read/write, pinned to the executable on Linux ([ADR-0004](adr/0004-native-record-api.md)).
 - [x] ~~Session capabilities; app scopes as capability chains~~: decided against (owner, 2026-11-11): the app tokens (libraries, read/write, key limits) are enough.
 

@@ -393,6 +393,9 @@ pub enum Request {
     /// once and kept nowhere, for an identity granted in every library this
     /// node may grant in, and the keyring that lists them.
     RecoveryCreate,
+    /// Owner only: recovers the user's libraries on this (fresh) node from the
+    /// recovery words (ADR-0033). Answers when done, which may take minutes.
+    RecoveryRestore { words: Vec<String> },
     /// Owner only: a page or file from a NomadNet node over Reticulum, for
     /// browsing NomadNet through the gateway. `node`: its `nomadnetwork.node`
     /// address (32 hex digits); `path`: `/page/index.mu`, `/file/…`;
@@ -607,6 +610,8 @@ pub struct RecordView {
 pub enum Response {
     /// A new recovery kit: its words (shown once), and the libraries it covers and doesn't.
     RecoveryKit { words: Vec<String>, covered: Vec<String>, not_covered: Vec<String> },
+    /// The libraries a recovery brought back.
+    RecoveryRestored { libraries: Vec<String> },
     /// A live query's answer: `records` when it changed, else none.
     LiveRecords { digest: String, records: Option<Vec<RecordView>> },
     /// A NomadNet page or file (NomadNetPage).

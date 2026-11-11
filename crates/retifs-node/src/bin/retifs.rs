@@ -1,6 +1,6 @@
 //! retifs CLI (prototype): a thin client of the local retifsd (libretifs).
 //!
-//!     retifs [--store DIR] ping | nodes | stop | nomadnet NODE [PATH] [--var K=V]... | recovery create
+//!     retifs [--store DIR] ping | nodes | stop | nomadnet NODE [PATH] [--var K=V]... | recovery create | recovery restore
 //!     retifs [--store DIR] put FILE [--public] [--compress] [--publish] [--record NAME | --one-off] [--hint]
 //!
 //! `put` treats the file's absolute path as its record by default, so putting
@@ -60,7 +60,7 @@ use libretifs::{default_store_dir, Client};
 
 fn usage() -> ! {
     eprintln!(
-        "retifs [--store DIR] ping | nodes | stop | nomadnet NODE [PATH] [--var K=V]... | recovery create\n\
+        "retifs [--store DIR] ping | nodes | stop | nomadnet NODE [PATH] [--var K=V]... | recovery create | recovery restore\n\
          retifs [--store DIR] put FILE [--public] [--compress] [--publish] [--record NAME | --one-off] [--hint]\n\
          retifs [--store DIR] get READ-CAP [--from NODE]... [-o OUT] [--links N] [--batch N]\n\
          retifs [--store DIR] status READ-CAP\n\
@@ -186,6 +186,29 @@ Covered ({}): {}", covered.len(), if covered.is_empty() { "none".into() } else {
                 libretifs::Response::Error { message } => fail(message),
                 _ => fail("unexpected response"),
             },
+            // The words come on standard input, not as arguments (shells keep arguments).
+            Some("restore") => {
+                eprintln!("Type or paste your 24 recovery words, then press Enter (Ctrl-D/Ctrl-Z if on several lines):");
+                let mut text = String::new();
+                let mut line = String::new();
+                while std::io::stdin().read_line(&mut line).unwrap_or(0) > 0 {
+                    text.push_str(&line);
+                    line.clear();
+                    if text.split_whitespace().count() >= 24 {
+                        break;
+                    }
+                }
+                let words: Vec<String> = text.split_whitespace().map(String::from).collect();
+                eprintln!("Recovering: looking for a node of yours that keeps your keyring; this can take several minutes.");
+                match client.call(libretifs::Request::RecoveryRestore { words }).await.unwrap_or_else(|e| fail(e)) {
+                    libretifs::Response::RecoveryRestored { libraries } => {
+                        println!("Back on this node ({}): {}", libraries.len(), libraries.join(", "));
+                        println!("Their content arrives in the background. Revoke the devices you lost in each library: retifs ns info NS, then retifs ns revoke NS WRITER.");
+                    }
+                    libretifs::Response::Error { message } => fail(message),
+                    _ => fail("unexpected response"),
+                }
+            }
             _ => usage(),
         },
         // A NomadNet node's page (micron) or file, fetched by retifsd over Reticulum.

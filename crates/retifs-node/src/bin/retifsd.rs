@@ -264,6 +264,15 @@ impl RequestEndpoint<Arc<Shared>> for ReaderEndpoint {
             Some(node) if proven => note_reader(store.root(), &ns_id, &node).is_ok(),
             _ => false,
         };
+        // A node that proved it knows the library's commits is worth syncing
+        // with at once (a reader keeping it, a device just recovered).
+        if noted && let Some(node) = who {
+            for name in store.ns_names().unwrap_or_default() {
+                if store.ns_info(&name).ok().flatten().is_some_and(|(creator, _)| retifs_core::channel::ns_id(&creator) == ns_id) {
+                    let _ = store.add_ns_peers(&name, &[node]);
+                }
+            }
+        }
         context.respond(vec![if noted { 0 } else { 1 }])
     }
 }
@@ -1095,6 +1104,9 @@ struct Daemon {
     deleted: Mutex<std::collections::BTreeMap<String, u64>>,
     /// Who has been seen holding which file (ADR-0010): ranks sources.
     holder_map: Mutex<retifs_store::HolderMap>,
+    /// Announces with a 16-byte tag heard lately (by destination): perhaps
+    /// nodes keeping someone's keyring, checked when recovering (ADR-0033).
+    keyring_heard: Mutex<HashMap<PeerId, [u8; 16]>>,
     /// Each storage node's offer from its last announce: the bytes of
     /// others' copies it can still take (ADR-0014).
     offers: Mutex<HashMap<PeerId, u64>>,
@@ -2011,6 +2023,7 @@ async fn serve(store: Arc<SlabStore>, identity: node::IdentitySecret, endpoint: 
     let nn_hash = nomadnet.as_ref().map(|d| d.destination_hash().expect("valid destination"));
     let (nn_tx, nn_rx) = mpsc::unbounded_channel::<(RequestPathHash, RespondToken)>();
     let mut destinations = vec![dest, lib_dest, keyring_dest];
+    let (keyring_tx, mut keyring_rx) = mpsc::channel::<(PeerId, [u8; 16])>(1024);
     destinations.extend(nomadnet);
     let node = PrnsNode::new(PrnsNodeRecipe {
         transport_identity: None,
@@ -2021,6 +2034,10 @@ async fn serve(store: Arc<SlabStore>, identity: node::IdentitySecret, endpoint: 
         on_event: move |event, _state| {
             match event {
                 PrnsEvent::Diagnostic(Diagnostic::AnnounceHeard { destination, hops, app_data, .. }) => {
+                    // Perhaps a node keeping someone's keyring (ADR-0033): a 16-byte tag.
+                    if let Ok(tag) = <[u8; 16]>::try_from(&app_data[..]) {
+                        let _ = keyring_tx.try_send((*destination.as_bytes(), tag));
+                    }
                     match retifs_core::announce::library_announce(app_data) {
                         Some((v, lib)) => {
                             let _ = lib_tx.try_send((*destination.as_bytes(), hops, v, lib));
@@ -2083,6 +2100,7 @@ async fn serve(store: Arc<SlabStore>, identity: node::IdentitySecret, endpoint: 
         announced_wake: Notify::new(),
         holder_map: Mutex::new(retifs_store::HolderMap::new()),
         offers: Mutex::new(HashMap::new()),
+        keyring_heard: Mutex::new(HashMap::new()),
         device: args.device.clone(),
         changes: Mutex::new(HashMap::new()),
         changed: Notify::new(),
@@ -2333,6 +2351,8 @@ async fn serve(store: Arc<SlabStore>, identity: node::IdentitySecret, endpoint: 
     worker("keyring announces", async move {
         // A node keeping the user's keyring says so, in a tag only the
         // recovery words can check (ADR-0033); one that doesn't keep it is silent.
+        // First half a minute in (the keyring read by then), then every interval.
+        tokio::time::sleep(Duration::from_secs(30)).await;
         let mut tick = tokio::time::interval(Duration::from_secs(keyring_every as u64));
         loop {
             tick.tick().await;
@@ -2346,6 +2366,16 @@ async fn serve(store: Arc<SlabStore>, identity: node::IdentitySecret, endpoint: 
         }
     });
     worker("keyring", keyring_keeper(daemon.clone()));
+    let keyring_listener = daemon.clone();
+    worker("keyring announces heard", async move {
+        while let Some((dest, tag)) = keyring_rx.recv().await {
+            let mut heard = keyring_listener.keyring_heard.lock().unwrap();
+            if heard.len() > 4096 {
+                heard.clear();
+            }
+            heard.insert(dest, tag);
+        }
+    });
 
     let announcer = handle.clone();
     let announce_every = args.announce_s;
@@ -3625,6 +3655,7 @@ async fn handle(d: &Daemon, req: Request) -> Result<Response, String> {
         }
 
         Request::RecoveryCreate => recovery_create(d).await,
+        Request::RecoveryRestore { words } => recovery_restore(d, words).await,
 
         Request::NomadNetPage { node, path, fields } => {
             if !path.starts_with('/') || path.len() > 512 || path.contains("..") {
@@ -5149,6 +5180,17 @@ async fn commit_as(d: &Daemon, ns: &str, seed: [u8; 32], ops: Vec<Op>) -> Result
     if key.writer() != addr.writer {
         d.store.set_member_channel(&name, &addr.ns_id()).map_err(|e| e.to_string())?;
     }
+    // A writer with a chain already (the keyring's creator, a second
+    // recovery) goes on from its head: a second chain would fork it.
+    if let Some(h) = d.store.writer_heads(&addr.ns_id()).map_err(|e| e.to_string())?.into_iter().find(|h| h.writer == key.writer())
+        && let Ok(head) = Head::decode(&h.head)
+        && let Ok(Some(mut c)) = d.store.own_channel(&name)
+    {
+        c.seq = head.seq;
+        c.last = Some(h.commit);
+        c.head = h.head.clone();
+        d.store.update_own_channel(&c).map_err(|e| e.to_string())?;
+    }
     let not_before = ns_entry_get(d, ns).and_then(|e| e.lock().unwrap().applied.values().map(|(_, t, _)| t + 1).max()).unwrap_or(0);
     let published = publish_channel(d, &name, OpsFile { ops }.encode(), false, not_before).await;
     if published.is_ok()
@@ -5210,6 +5252,137 @@ async fn recovery_create(d: &Daemon) -> Result<Response, String> {
     let (covered, not_covered) = keep_keyring(d).await?;
     println!("recovery kit made: {} librar(ies) covered, {} not", covered.len(), not_covered.len());
     Ok(Response::RecoveryKit { words: seed.words().into_iter().map(String::from).collect(), covered, not_covered })
+}
+
+/// The `retifs.keyring` destination of the identity with this hash.
+fn keyring_destination_of(identity_hash: &[u8; 16]) -> PeerId {
+    use sha2::Digest;
+    let name_hash = &sha2::Sha256::digest(b"retifs.keyring")[..10];
+    sha2::Sha256::digest([name_hash, identity_hash.as_slice()].concat())[..16].try_into().expect("16 bytes")
+}
+
+/// Recovers the user's libraries on this node from the recovery words
+/// (ADR-0033): waits for a node keeping the keyring to announce itself (its
+/// tag checks out with the words), joins the keyring through it, grants this
+/// node `write` and `grant` there as the recovery identity, then joins every
+/// library the keyring lists and grants itself the same in each. Lost
+/// devices are revoked afterwards, by the user (`retifs ns revoke`).
+async fn recovery_restore(d: &Daemon, words: Vec<String>) -> Result<Response, String> {
+    let refs: Vec<&str> = words.iter().map(String::as_str).collect();
+    let seed = retifs_core::recovery::RecoverySeed::from_words(&refs).map_err(|e| e.to_string())?;
+    if d.store.ns_info(KEYRING).map_err(|e| e.to_string())?.is_some() {
+        return Err("this node keeps a keyring already: recover on a fresh device".into());
+    }
+    let locator = seed.locator();
+    let deadline = Instant::now() + Duration::from_secs(20 * 60);
+    let mut said = Instant::now() - Duration::from_secs(60);
+    let node = loop {
+        let heard: Vec<(PeerId, [u8; 16])> = d.keyring_heard.lock().unwrap().iter().map(|(k, v)| (*k, *v)).collect();
+        let mut found = None;
+        for (dest, tag) in heard {
+            let Some(hash) = parse_destination(&hex(&dest)) else { continue };
+            let Some(id) = d.transport.handle.destination_identity(DestinationIdentityQuery::Destination(hash)).await else { continue };
+            let public: [u8; 64] = id.public.as_bytes()[..].try_into().map_err(|_| "an RNS public key is 64 bytes")?;
+            let identity_hash: [u8; 16] = <sha2::Sha256 as sha2::Digest>::digest(public)[..16].try_into().expect("16 bytes");
+            if keyring_destination_of(&identity_hash) != dest {
+                continue;
+            }
+            let node = node_destination(&public);
+            if locator.is_tag(&node, &tag) {
+                found = Some(node);
+                break;
+            }
+        }
+        if let Some(n) = found {
+            break n;
+        }
+        if Instant::now() > deadline {
+            return Err("no node keeping your keyring announced itself in 20 minutes: is one of your devices with retifs running and on the network?".into());
+        }
+        if said.elapsed() > Duration::from_secs(60) {
+            println!("recovery: waiting for a node keeping your keyring to announce itself (every few minutes)");
+            said = Instant::now();
+        }
+        tokio::time::sleep(Duration::from_secs(3)).await;
+    };
+    println!("recovery: your keyring is kept by <{}>; joining it", hex(&node));
+    let secret = seed.identity_secret();
+    let recovery_seed: [u8; 32] = secret[32..].try_into().expect("32 bytes");
+    let address = ChannelAddr { writer: seed.writer(), read_key: seed.keyring_read_key() }.to_string();
+    Box::pin(handle(d, Request::NsJoin { ns: KEYRING.into(), address, from: vec![hex(&node)], lazy: false })).await?;
+    let synced = |d: &Daemon| d.store.writer_heads(&retifs_core::channel::ns_id(&seed.writer())).is_ok_and(|h| h.iter().any(|h| h.writer == seed.writer()));
+    let wait_until = Instant::now() + Duration::from_secs(300);
+    while !synced(d) {
+        if Instant::now() > wait_until {
+            return Err("the keyring didn't arrive within 5 minutes; try again".into());
+        }
+        d.ns_wake.notify_one();
+        tokio::time::sleep(Duration::from_secs(2)).await;
+    }
+    let own = own_writer(d, KEYRING)?;
+    commit_as(d, KEYRING, recovery_seed, vec![Op::Grant(own, vec![Right::Write, Right::Grant])]).await?;
+    // The node keeping it learns of this one now, and syncs with it.
+    if let Ok(merged) = materialize(d, KEYRING) {
+        let _ = say_reader(d, KEYRING, &merged).await;
+    }
+    // Its records, once merged.
+    let term = retifs_store::Term::parse(&format!("type={KEYRING_LIBRARY_TYPE}")).map_err(|e| e.to_string())?;
+    let mut listed = Vec::new();
+    let wait_until = Instant::now() + Duration::from_secs(120);
+    while listed.is_empty() && Instant::now() < wait_until {
+        let _ = materialize(d, KEYRING);
+        listed = d.store.query(KEYRING, std::slice::from_ref(&term)).map_err(|e| e.to_string())?;
+        if listed.is_empty() {
+            d.ns_wake.notify_one();
+            tokio::time::sleep(Duration::from_secs(2)).await;
+        }
+    }
+    let mut libraries = Vec::new();
+    for r in listed {
+        let (Some(Value::Str(name)), Some(Value::Str(address))) = (r.attrs.get("name"), r.attrs.get("address")) else { continue };
+        if d.store.ns_info(name).map_err(|e| e.to_string())?.is_some() {
+            continue;
+        }
+        if let Err(e) = Box::pin(handle(d, Request::NsJoin { ns: name.clone(), address: address.clone(), from: vec![hex(&node)], lazy: false })).await {
+            eprintln!("recovery: joining {name}: {e}");
+            continue;
+        }
+        // Its writers' chains first: the grant is stamped after theirs, and
+        // the notice below is proven by commits the other nodes know.
+        if !wait_for_others(d, name, Duration::from_secs(120)).await {
+            eprintln!("recovery: {name}: no other writer's chain arrived yet; granting anyway");
+        }
+        let me = own_writer(d, name)?;
+        match commit_as(d, name, recovery_seed, vec![Op::Grant(me, vec![Right::Write, Right::Grant])]).await {
+            Ok(()) => libraries.push(name.clone()),
+            Err(e) => eprintln!("recovery: granting this node in {name}: {e}"),
+        }
+        if let Ok(merged) = materialize(d, name) {
+            let _ = say_reader(d, name, &merged).await;
+        }
+    }
+    d.ns_wake.notify_one();
+    println!("recovery: {} librar(ies) back on this node", libraries.len());
+    Ok(Response::RecoveryRestored { libraries })
+}
+
+/// Waits until library `ns` has another writer's chain here (synced), for at most `wait`.
+async fn wait_for_others(d: &Daemon, ns: &str, wait: Duration) -> bool {
+    let until = Instant::now() + wait;
+    loop {
+        let own = own_writer(d, ns).ok();
+        if let Ok(addr) = current_addr(d, ns)
+            && d.store.writer_heads(&addr.ns_id()).is_ok_and(|h| h.iter().any(|h| Some(h.writer) != own))
+        {
+            let _ = materialize(d, ns);
+            return true;
+        }
+        if Instant::now() > until {
+            return false;
+        }
+        d.ns_wake.notify_one();
+        tokio::time::sleep(Duration::from_secs(2)).await;
+    }
 }
 
 /// A new random record ID.
