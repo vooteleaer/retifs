@@ -81,7 +81,7 @@ What a holder holds reveals little: chunks are equal-sized blobs with no visible
 - **Residual:** requests on one link are visibly one session, and bursts are visible in timing. Private requests are spaced by a random pause of up to 300 ms (2026-11-11); spreading them over several links would reduce it further; a global passive observer is out of scope, as for RNS.
 
 ### Holder hints
-A read-cap may carry hints: `retifs:1:<root>:<seed>:<size>@<node>,<node>`. Hints say where to ask; integrity always comes from the CID. ~~The read-cap also carries the file's serve token~~: no serve token since per-chunk proofs (above); proofs come from the seeds the manifest holds.
+A read-cap may carry hints: `retifs:1:<root>:<seed>:<size>@<node>,<node>` (at most 8). Hints say where to ask; integrity always comes from the CID. Built (2026-11-11): every place a read-cap is read accepts hints (a plain parse drops them), `get` and `want` ask the hinted nodes like `--from`, and `retifs put FILE --hint` prints the read-cap with this node as a hint. ~~The read-cap also carries the file's serve token~~: no serve token since per-chunk proofs (above); proofs come from the seeds the manifest holds.
 
 ### Replication: push the want, pull the data
 - **Lease:** a signed "keep these CIDs until T" from an owner (or a key the owner delegated). It lists chunks, never manifests ([irreversible decision 6](../02-irreversible-decisions.md)). A node that accepts a lease adds blind wants, and its seeker pulls the chunks from the owner or from anyone who has them.

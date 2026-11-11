@@ -222,3 +222,23 @@ fn stable_padding_keeps_versions_cheap() {
     assert!(padme(76) > 76);
 }
 
+
+#[test]
+fn read_caps_carry_holder_hints() {
+    use retifs_core::manifest::FileRef;
+    let bare = "retifs:1:01aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa:0101010101010101010101010101010101010101010101010101010101010101:42";
+    let f: FileRef = bare.parse().unwrap();
+    assert_eq!(f.to_string(), bare);
+    assert!(FileRef::parse_with_hints(bare).unwrap().1.is_empty());
+    let hinted = f.with_hints(&[[0x11; 16], [0x22; 16]]);
+    assert_eq!(hinted, format!("{bare}@{},{}", "11".repeat(16), "22".repeat(16)));
+    let (g, hints) = FileRef::parse_with_hints(&hinted).unwrap();
+    assert_eq!((g, hints), (f, vec![[0x11; 16], [0x22; 16]]));
+    // Parsing as a plain read-cap accepts hints and drops them.
+    assert_eq!(hinted.parse::<FileRef>().unwrap(), f);
+    // Angle brackets as nodes are written elsewhere are fine; bad hints aren't.
+    assert_eq!(FileRef::parse_with_hints(&format!("{bare}@<{}>", "33".repeat(16))).unwrap().1, vec![[0x33; 16]]);
+    assert!(FileRef::parse_with_hints(&format!("{bare}@")).is_err());
+    assert!(FileRef::parse_with_hints(&format!("{bare}@1234")).is_err());
+    assert!(FileRef::parse_with_hints(&format!("{bare}@{}", vec!["44".repeat(16); 9].join(","))).is_err());
+}

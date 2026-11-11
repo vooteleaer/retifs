@@ -2885,8 +2885,10 @@ async fn handle(d: &Daemon, req: Request) -> Result<Response, String> {
             Ok(Response::Put { cap: file.to_string() })
         }
 
-        Request::Get { cap, from, links_per_node, batch } => {
-            let cap: FileRef = cap.parse().map_err(|e: retifs_core::ManifestError| e.to_string())?;
+        Request::Get { cap, mut from, links_per_node, batch } => {
+            // Holder hints in the read-cap are nodes to ask, like --from.
+            let (cap, hints) = FileRef::parse_with_hints(&cap).map_err(|e| e.to_string())?;
+            from.extend(hints.iter().map(|h| hex(h)).filter(|h| !from.contains(h)).collect::<Vec<_>>());
             let t0 = Instant::now();
             let mut links = Vec::new();
             for hex in &from {
@@ -3546,11 +3548,12 @@ async fn handle(d: &Daemon, req: Request) -> Result<Response, String> {
         }
 
         Request::Want { cap, from } => {
-            let cap: FileRef = cap.parse().map_err(|e: retifs_core::ManifestError| e.to_string())?;
-            let peers: Vec<PeerId> = from
+            let (cap, hints) = FileRef::parse_with_hints(&cap).map_err(|e| e.to_string())?;
+            let mut peers: Vec<PeerId> = from
                 .iter()
                 .map(|h| parse_destination(h).map(|d| *d.as_bytes()).ok_or_else(|| format!("bad node hash {h}")))
                 .collect::<Result<_, _>>()?;
+            peers.extend(hints.into_iter().filter(|h| !peers.contains(h)).collect::<Vec<_>>());
             d.store.want_file(&cap, &peers).map_err(|e| e.to_string())?;
             d.wake.notify_one();
             Ok(Response::Status(full_status(d, &cap)))

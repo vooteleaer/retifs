@@ -38,7 +38,8 @@ Prototypes are throwaway. They're for learning, not for locking in the format. T
 - [x] Where a library's copies are, said in the library: a `retifs.holders` record per writing node, so every member reads files placed by a node that's away; readers keeping content are peers too (`/retifs/reader`) ([ADR-0035](adr/0035-holders-in-the-library.md)).
 - [x] Holder map, first slice: per-file holders from receipts and `have` answers, in memory and bounded; sources ranked (holds, holds some, unknown, holds none, just failed; then by link), reads spread over up to three holders, instant failover, copies seen in `retifs status` ([ADR-0010](adr/0010-continuous-seeking.md)).
 - [ ] Holder map, continued: per-chunk holders, holders learned from own nodes (gossip, opt-in).
-- [ ] Holder hints in read-caps; store generation counter in announces.
+- [x] Holder hints in read-caps (`…@<node>,<node>`): `get` and `want` ask them, `put --hint` adds this node ([ADR-0010](adr/0010-continuous-seeking.md)).
+- [ ] Store generation counter, to proven or own peers only (not in public announces; size and privacy open, [open questions](06-open-questions.md)).
 - [x] Leases, renewals, receipts, storage proofs; `retifsd --hold-for-others`, `retifs replicate`; vectors verified against RNS (decision 6, [ADR-0010](adr/0010-continuous-seeking.md)).
 - [x] Placement follows need, first slice ([ADR-0014](adr/0014-placement-follows-need.md)): every node holds for others by default; storage nodes recognised from announces (hops); push after lease with `have` first; automatic leases to the nearest nodes by writers and readers until a loss target is met; holder reliability record; lazy repair.
 - [x] Link cost: measured RTT and throughput per peer; placement ranks by estimated transfer time and never uses slow links; seeking over a slow link fetches only the manifest unless the rest fits a budget ([ADR-0014](adr/0014-placement-follows-need.md)).

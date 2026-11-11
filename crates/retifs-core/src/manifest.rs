@@ -90,7 +90,11 @@ pub struct FileRef {
 }
 
 /// Text form of a read capability (draft, not yet an accepted format):
-/// `retifs:1:<root cid hex>:<root seed hex>:<size>`.
+/// `retifs:1:<root cid hex>:<root seed hex>:<size>`, optionally followed by
+/// holder hints, `@<node>,<node>` (`retifs.node` addresses, 32 hex digits
+/// each; ADR-0010): where to ask, never what to trust (every chunk is checked
+/// against its CID). Parsing a read-cap accepts hints and drops them;
+/// [`FileRef::parse_with_hints`] keeps them.
 impl fmt::Display for FileRef {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         write!(f, "retifs:1:{}:{}:{}", self.root, hex::encode(self.seed.0), self.size)
@@ -101,7 +105,44 @@ impl FromStr for FileRef {
     type Err = ManifestError;
 
     fn from_str(s: &str) -> Result<Self, Self::Err> {
-        let bad = ManifestError::Malformed("read-cap must be retifs:1:<cid>:<seed>:<size>");
+        Self::parse_with_hints(s).map(|(f, _)| f)
+    }
+}
+
+/// Most holder hints a read-cap carries.
+pub const MAX_HINTS: usize = 8;
+
+impl FileRef {
+    /// The read-cap with holder hints (`@<node>,<node>`, at most [`MAX_HINTS`]).
+    pub fn with_hints(&self, hints: &[[u8; 16]]) -> String {
+        let mut s = self.to_string();
+        if !hints.is_empty() {
+            s.push('@');
+            s.push_str(&hints.iter().take(MAX_HINTS).map(hex::encode).collect::<Vec<_>>().join(","));
+        }
+        s
+    }
+
+    /// Parses a read-cap and its holder hints, if any.
+    pub fn parse_with_hints(s: &str) -> Result<(Self, Vec<[u8; 16]>), ManifestError> {
+        let bad = ManifestError::Malformed("read-cap must be retifs:1:<cid>:<seed>:<size>[@<node>,...]");
+        let (cap, hints) = match s.trim().split_once('@') {
+            Some((cap, hints)) => (cap, Some(hints)),
+            None => (s.trim(), None),
+        };
+        let hints: Vec<[u8; 16]> = match hints {
+            Some(h) => h
+                .split(',')
+                .map(|n| hex::decode(n.trim().trim_start_matches('<').trim_end_matches('>')).ok().and_then(|b| b.try_into().ok()))
+                .collect::<Option<Vec<_>>>()
+                .filter(|v| !v.is_empty() && v.len() <= MAX_HINTS)
+                .ok_or(bad.clone())?,
+            None => Vec::new(),
+        };
+        Ok((Self::parse_bare(cap, bad)?, hints))
+    }
+
+    fn parse_bare(s: &str, bad: ManifestError) -> Result<Self, ManifestError> {
         let parts: Vec<&str> = s.trim().split(':').collect();
         let ["retifs", "1", root, seed, size] = parts.as_slice() else { return Err(bad) };
         let root: [u8; CID_LEN] = hex::decode(root).ok().and_then(|b| b.try_into().ok()).ok_or(bad.clone())?;

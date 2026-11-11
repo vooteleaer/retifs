@@ -1,7 +1,7 @@
 //! retifs CLI (prototype): a thin client of the local retifsd (libretifs).
 //!
 //!     retifs [--store DIR] ping | nodes | stop
-//!     retifs [--store DIR] put FILE [--public] [--compress] [--publish] [--record NAME | --one-off]
+//!     retifs [--store DIR] put FILE [--public] [--compress] [--publish] [--record NAME | --one-off] [--hint]
 //!
 //! `put` treats the file's absolute path as its record by default, so putting
 //! an edited file again stores only the changed chunks (ADR-0008).
@@ -60,7 +60,7 @@ use libretifs::{default_store_dir, Client};
 fn usage() -> ! {
     eprintln!(
         "retifs [--store DIR] ping | nodes | stop\n\
-         retifs [--store DIR] put FILE [--public] [--compress] [--publish] [--record NAME | --one-off]\n\
+         retifs [--store DIR] put FILE [--public] [--compress] [--publish] [--record NAME | --one-off] [--hint]\n\
          retifs [--store DIR] get READ-CAP [--from NODE]... [-o OUT] [--links N] [--batch N]\n\
          retifs [--store DIR] status READ-CAP\n\
          retifs [--store DIR] read READ-CAP [--offset N] [--len N] [--ns NS] [--wait SECONDS]\n\
@@ -210,7 +210,16 @@ async fn main() {
                 let data = std::fs::read(&path).unwrap_or_else(|e| fail(format!("{}: {e}", path.display())));
                 client.put(data, public, compress, publish, record).await.unwrap_or_else(|e| fail(e))
             };
-            println!("{cap}");
+            // --hint: with this node as a holder hint, so whoever gets the
+            // read-cap knows where to ask (ADR-0010).
+            if flags.iter().any(|a| a == "--hint") {
+                let (node, _, _) = client.ping().await.unwrap_or_else(|e| fail(e));
+                let parsed: retifs_core::manifest::FileRef = cap.parse().unwrap_or_else(|e| fail(format!("{e}")));
+                let node: [u8; 16] = retifs_net::node::parse_destination(&node).map(|d| *d.as_bytes()).unwrap_or_else(|| fail("bad node address"));
+                println!("{}", parsed.with_hints(&[node]));
+            } else {
+                println!("{cap}");
+            }
         }
         "get" => {
             let cap = it.next().unwrap_or_else(|| usage());
