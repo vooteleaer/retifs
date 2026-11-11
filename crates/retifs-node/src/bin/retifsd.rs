@@ -786,7 +786,24 @@ fn namespace_key(store: &SlabStore) -> [u8; 32] {
     k
 }
 
+/// Raises the soft limit on open descriptors toward the hard one (Unix): a
+/// store, its index, Reticulum and the local API share them, and some systems
+/// start low (Haiku: 256).
+#[cfg(unix)]
+fn raise_descriptor_limit() {
+    // SAFETY: getrlimit/setrlimit on a local struct.
+    unsafe {
+        let mut l: libc::rlimit = std::mem::zeroed();
+        if libc::getrlimit(libc::RLIMIT_NOFILE, &mut l) == 0 && l.rlim_cur < l.rlim_max {
+            l.rlim_cur = l.rlim_max.min(8192);
+            libc::setrlimit(libc::RLIMIT_NOFILE, &l);
+        }
+    }
+}
+
 fn main() {
+    #[cfg(unix)]
+    raise_descriptor_limit();
     let mut args = args();
     if args.no_storage {
         // Holds nothing for others, and only a cache of what it reads.

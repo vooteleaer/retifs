@@ -239,8 +239,14 @@ pub struct SlabStore {
 
 const DISK_SAMPLE: Duration = Duration::from_secs(1);
 
-/// Segment files kept open at most; past this the set is emptied and refilled.
-const OPEN_SEGMENTS: usize = 256;
+/// Segment files kept open at most; past this the set is emptied and
+/// refilled. Small: a process may have few descriptors (Haiku's default is
+/// far below Linux's 1024), and the store shares them with sockets, the
+/// index, and the OS's own (getrandom opens /dev/urandom on some systems).
+#[cfg(target_os = "haiku")]
+const OPEN_SEGMENTS: usize = 16;
+#[cfg(not(target_os = "haiku"))]
+const OPEN_SEGMENTS: usize = 64;
 
 /// Reads `buf.len()` bytes at `offset`, without moving any cursor.
 fn read_at(f: &File, buf: &mut [u8], offset: u64) -> io::Result<()> {
@@ -364,7 +370,16 @@ impl SlabStore {
         }
         let path = self.segment_path(class, seg);
         fs::create_dir_all(path.parent().expect("segment has a parent dir"))?;
-        let f = std::sync::Arc::new(OpenOptions::new().create(true).truncate(false).read(true).write(true).open(path)?);
+        let open = || OpenOptions::new().create(true).truncate(false).read(true).write(true).open(&path);
+        // Out of descriptors (or anything else): let the kept ones go, try once more.
+        let f = match open() {
+            Ok(f) => f,
+            Err(_) => {
+                self.segments.lock().unwrap().clear();
+                open()?
+            }
+        };
+        let f = std::sync::Arc::new(f);
         let mut open = self.segments.lock().unwrap();
         if open.len() >= OPEN_SEGMENTS {
             open.clear();
