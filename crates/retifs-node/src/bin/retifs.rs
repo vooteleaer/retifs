@@ -220,16 +220,20 @@ async fn main() {
             // passing): nothing is copied through the socket. `--copy` sends the bytes.
             #[cfg(unix)]
             let by_fd = !flags.iter().any(|a| a == "--copy") && !via_set;
-            #[cfg(not(unix))]
-            let by_fd = !via_set && false;
+            // On Windows the daemon takes the open file's handle the same way.
+            #[cfg(windows)]
+            let by_fd = !flags.iter().any(|a| a == "--copy") && !via_set;
+            #[cfg(not(any(unix, windows)))]
+            let by_fd = false;
             let cap = if by_fd {
+                let f = std::fs::File::open(&path).unwrap_or_else(|e| fail(format!("{}: {e}", path.display())));
                 #[cfg(unix)]
-                {
-                    let f = std::fs::File::open(&path).unwrap_or_else(|e| fail(format!("{}: {e}", path.display())));
-                    client.put_fd(&f, public, compress, publish, record).await.unwrap_or_else(|e| fail(e))
-                }
-                #[cfg(not(unix))]
-                unreachable!()
+                let cap = client.put_fd(&f, public, compress, publish, record).await;
+                #[cfg(windows)]
+                let cap = client.put_handle(&f, public, compress, publish, record).await;
+                #[cfg(not(any(unix, windows)))]
+                let cap: Result<String, libretifs::ClientError> = unreachable!();
+                cap.unwrap_or_else(|e| fail(e))
             } else {
                 let data = std::fs::read(&path).unwrap_or_else(|e| fail(format!("{}: {e}", path.display())));
                 client.put(data, public, compress, publish, record).await.unwrap_or_else(|e| fail(e))

@@ -2377,7 +2377,7 @@ async fn local_api(endpoint: String, daemon: Arc<Daemon>, apps: bool, started: O
                 // Read with recvmsg, so descriptors sent with PutFd arrive.
                 let stream = libretifs::fdpass::FdStream::new(stream);
                 let fds = Some(stream.fds.clone());
-                worker("local API request", connection(stream, daemon.clone(), exe, fds));
+                worker("local API request", connection(stream, daemon.clone(), exe, fds, None));
             }
             Err(e) => eprintln!("local API accept: {e}"),
         }
@@ -2403,7 +2403,16 @@ async fn local_api(endpoint: String, daemon: Arc<Daemon>, apps: bool, started: O
         }
         let connected = server;
         server = ServerOptions::new().create(&endpoint).expect("next pipe instance");
-        worker("local API request", connection(connected, daemon.clone(), apps.then_some(None), None));
+        // Who is on the other end: the process a PutHandle's handle is taken from.
+        let client_pid = {
+            use std::os::windows::io::AsRawHandle;
+            let mut pid = 0u32;
+            // SAFETY: a connected pipe instance's handle and an out-parameter.
+            let ok = unsafe { windows_sys::Win32::System::Pipes::GetNamedPipeClientProcessId(connected.as_raw_handle(), &mut pid) };
+            (ok != 0 && pid != 0).then_some(pid)
+        };
+        let handles = (!apps).then_some(client_pid).flatten();
+        worker("local API request", connection(connected, daemon.clone(), apps.then_some(None), None, handles));
     }
 }
 
@@ -2422,7 +2431,8 @@ struct AppScope {
 /// Descriptors received on a connection (Unix sockets; none on Windows pipes).
 type FdQueue = std::sync::Arc<std::sync::Mutex<std::collections::VecDeque<std::fs::File>>>;
 
-async fn connection(mut stream: impl AsyncRead + AsyncWrite + Unpin, daemon: Arc<Daemon>, app: Option<Option<String>>, fds: Option<FdQueue>) {
+async fn connection(mut stream: impl AsyncRead + AsyncWrite + Unpin, daemon: Arc<Daemon>, app: Option<Option<String>>, fds: Option<FdQueue>, client_pid: Option<u32>) {
+    let _ = client_pid; // Windows: where PutHandle's handle comes from
     let mut scope: Option<AppScope> = None;
     loop {
         let req: Envelope<Request> = match read_frame(&mut stream).await {
@@ -2443,6 +2453,11 @@ async fn connection(mut stream: impl AsyncRead + AsyncWrite + Unpin, daemon: Arc
                     }
                     .unwrap_or_else(|message| Response::Error { message })
                 }
+                Request::PutHandle { handle, public, compress, publish, record } => match client_handle(client_pid, handle) {
+                    Ok(f) => put_file(&daemon, f, public, compress, publish, record).await,
+                    Err(e) => Err(e),
+                }
+                .unwrap_or_else(|message| Response::Error { message }),
                 other => handle(&daemon, other).await.unwrap_or_else(|message| Response::Error { message }),
             },
             (Some(exe), None) => match hello(&daemon, req.msg, exe.as_deref()) {
@@ -2870,6 +2885,7 @@ async fn handle(d: &Daemon, req: Request) -> Result<Response, String> {
         }
 
         Request::PutFd { .. } => Err("PutFd needs the owner's Unix socket (the descriptor travels with the frame)".into()),
+        Request::PutHandle { .. } => Err("PutHandle needs the owner's pipe on Windows".into()),
 
         Request::Put { data, public, compress, publish, record } => {
             let store = d.store.clone();
@@ -3592,6 +3608,43 @@ async fn handle(d: &Daemon, req: Request) -> Result<Response, String> {
 
 /// Writes `data` as pinned own data and registers it for serving: to holders
 /// of its read-cap (serve token), and to anyone if `publish`.
+/// `PutHandle` (Windows): the client's open file, duplicated from the client
+/// process into this one. The client is the process on the other end of the
+/// pipe (Windows says which), so the handle is always one of its own: a
+/// number that names nothing there fails, and none of this process's own
+/// handles can be named. Only regular files are taken.
+#[cfg(windows)]
+fn client_handle(client_pid: Option<u32>, handle: u64) -> Result<std::fs::File, String> {
+    use std::os::windows::io::FromRawHandle;
+    use windows_sys::Win32::Foundation::{CloseHandle, DuplicateHandle, DUPLICATE_SAME_ACCESS};
+    use windows_sys::Win32::System::Threading::{GetCurrentProcess, OpenProcess, PROCESS_DUP_HANDLE};
+    let pid = client_pid.ok_or("PutHandle needs the owner's pipe")?;
+    // SAFETY: plain Win32 calls; every handle opened here is closed or owned below.
+    let file = unsafe {
+        let process = OpenProcess(PROCESS_DUP_HANDLE, 0, pid);
+        if process.is_null() {
+            return Err(format!("PutHandle: can't open the client process: {}", std::io::Error::last_os_error()));
+        }
+        let mut ours = std::ptr::null_mut();
+        let ok = DuplicateHandle(process, handle as usize as _, GetCurrentProcess(), &mut ours, 0, 0, DUPLICATE_SAME_ACCESS);
+        let err = std::io::Error::last_os_error();
+        CloseHandle(process);
+        if ok == 0 {
+            return Err(format!("PutHandle: not a handle of the client's: {err}"));
+        }
+        std::fs::File::from_raw_handle(ours as _)
+    };
+    if !file.metadata().map(|m| m.is_file()).unwrap_or(false) {
+        return Err("PutHandle: not a regular file".into());
+    }
+    Ok(file)
+}
+
+#[cfg(not(windows))]
+fn client_handle(_client_pid: Option<u32>, _handle: u64) -> Result<std::fs::File, String> {
+    Err("PutHandle is for Windows; use PutFd".into())
+}
+
 /// `PutFd`: stores a file the client handed over as a descriptor, read and
 /// chunked as a stream (the same file, and read-cap, as `Put` with its bytes).
 async fn put_file(d: &Daemon, file: std::fs::File, public: bool, compress: bool, publish: bool, record: Option<String>) -> Result<Response, String> {

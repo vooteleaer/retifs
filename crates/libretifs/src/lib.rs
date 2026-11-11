@@ -117,6 +117,19 @@ pub enum Request {
         #[serde(default)]
         record: Option<String>,
     },
+    /// Like `PutFd`, on Windows: `handle` is the client's open handle to the
+    /// file (its value in the client process), which the daemon duplicates
+    /// from the process on the other end of the owner's pipe and reads itself.
+    PutHandle {
+        handle: u64,
+        public: bool,
+        #[serde(default)]
+        compress: bool,
+        #[serde(default)]
+        publish: bool,
+        #[serde(default)]
+        record: Option<String>,
+    },
     /// Chunk, encrypt and pin `data`; returns its read-cap.
     Put {
         #[serde(with = "serde_bytes")]
@@ -1098,6 +1111,31 @@ impl Client {
         self.stream.write_all(&frame[sent..]).await.map_err(ClientError::Io)?;
         match self.reply(id).await? {
             Response::Put { cap } => Ok(cap),
+            _ => Err(ClientError::Unexpected),
+        }
+    }
+
+    /// Stores an open file by handing the daemon its handle (Windows): the
+    /// daemon duplicates it from this process and reads the file itself, so
+    /// the bytes never pass through the pipe. `file` stays open until the
+    /// answer. Returns the read-cap.
+    #[cfg(windows)]
+    pub async fn put_handle(
+        &mut self,
+        file: &std::fs::File,
+        public: bool,
+        compress: bool,
+        publish: bool,
+        record: Option<String>,
+    ) -> Result<String, ClientError> {
+        use std::os::windows::io::AsRawHandle;
+        if self.via.is_some() {
+            return Err(ClientError::Daemon("a handle can't travel over a Link: put without --via".into()));
+        }
+        let handle = file.as_raw_handle() as usize as u64;
+        match self.call(Request::PutHandle { handle, public, compress, publish, record }).await? {
+            Response::Put { cap } => Ok(cap),
+            Response::Error { message } => Err(ClientError::Daemon(message)),
             _ => Err(ClientError::Unexpected),
         }
     }
