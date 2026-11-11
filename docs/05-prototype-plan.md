@@ -79,7 +79,7 @@ Prototypes are throwaway. They're for learning, not for locking in the format. T
 - [x] Blind index for search nodes without the read key: declared keys, exact match, index channel derived from the read key, `/retifs/query` with proof, `query --search NODE`; vectors verified against RNS ([ADR-0019](adr/0019-remote-query-and-blind-index.md)).
 - [x] Lazy members: `ns join --lazy` holds the checkpoint, the chains since and only the state paths it needs (changed records on sync, others on demand) ([ADR-0018](adr/0018-state-trees.md)).
 - [x] Search, continued: one builder per index channel (the lowest-addressed writer's node that's around) ([ADR-0019](adr/0019-remote-query-and-blind-index.md)).
-- [ ] Search: remote live queries beyond `Watch`.
+- [x] Live queries: `LiveQuery` answers only when a query's answer changes, locally or `--via` an own node ([ADR-0019](adr/0019-remote-query-and-blind-index.md)).
 - [x] Maps, places and addresses as public libraries: vector tiles, places by cell, a gazetteer searched through the blind index, no internet service ([ADR-0027](adr/0027-places.md), [ADR-0028](adr/0028-maps-over-retifs.md)).
 - [x] Per-writer commit chains (one commit per modification), merge, history queries, per-record `versions` ([ADR-0017](adr/0017-multi-writer-namespaces.md)).
 - [x] Leaving a library: hidden at once, its data goes in the background; one made here only with `--mine`. Deleting a library on every member's node: `ns delete NS --yes`, a `retifs.deleted` record counted only from a writer holding `grant`, 30 days' grace ([ADR-0034](adr/0034-deleting-a-library.md)).

@@ -2579,7 +2579,13 @@ fn authorize(d: &Daemon, s: &AppScope, req: &Request) -> Result<(), String> {
             Ok(())
         }
         Request::Ping | Request::Namespaces | Request::HeardLibraries => Ok(()),
-        Request::RecordGet { ns, .. } | Request::Query { ns, .. } | Request::SearchQuery { ns, .. } | Request::RecordHistory { ns, .. } | Request::NsInfo { ns } | Request::Watch { ns, .. } => read(ns),
+        Request::RecordGet { ns, .. }
+        | Request::Query { ns, .. }
+        | Request::SearchQuery { ns, .. }
+        | Request::RecordHistory { ns, .. }
+        | Request::NsInfo { ns }
+        | Request::Watch { ns, .. }
+        | Request::LiveQuery { ns, .. } => read(ns),
         Request::ReadRange { ns: Some(ns), .. } => read(ns),
         Request::WriteAt { session, .. }
         | Request::WriteRead { session, .. }
@@ -2727,6 +2733,7 @@ async fn remote_call(d: &Daemon, requester: Option<[u8; 16]>, body: &[u8]) -> Re
             return Err(format!("over a Link, read at most {REMOTE_MAX_RANGE} bytes at a time"));
         }
         Request::Watch { ns, since, timeout_ms } => Request::Watch { ns, since, timeout_ms: timeout_ms.min(REMOTE_MAX_WATCH_MS) },
+        Request::LiveQuery { ns, terms, since, timeout_ms } => Request::LiveQuery { ns, terms, since, timeout_ms: timeout_ms.min(REMOTE_MAX_WATCH_MS) },
         r => r,
     };
     let names_only = matches!(req, Request::Namespaces);
@@ -2742,7 +2749,9 @@ async fn remote_request(d: &Daemon, peer: &PeerId, req: &Request) -> Result<Resp
     // A watch is a long poll: the answer may come only when it ends, later
     // than the link's default response timeout.
     let watch = match req {
-        Request::Watch { timeout_ms, .. } => Some(Duration::from_millis((*timeout_ms).min(REMOTE_MAX_WATCH_MS)) + Duration::from_secs(15)),
+        Request::Watch { timeout_ms, .. } | Request::LiveQuery { timeout_ms, .. } => {
+            Some(Duration::from_millis((*timeout_ms).min(REMOTE_MAX_WATCH_MS)) + Duration::from_secs(15))
+        }
         _ => None,
     };
     for attempt in 0..2 {
@@ -3046,6 +3055,32 @@ async fn handle(d: &Daemon, req: Request) -> Result<Response, String> {
                 }
                 if tokio::time::timeout_at(deadline, notified).await.is_err() {
                     return Ok(Response::Changed { count });
+                }
+            }
+        }
+
+        Request::LiveQuery { ns, terms, since, timeout_ms } => {
+            // Waits for changes to the namespace, and answers once the
+            // query's answer differs from the one `since` names (or at the
+            // end of the wait, without records).
+            let deadline = Instant::now() + Duration::from_millis(timeout_ms.min(600_000));
+            let mut count = 0;
+            loop {
+                let left = deadline.saturating_duration_since(Instant::now()).as_millis() as u64;
+                count = match Box::pin(handle(d, Request::Watch { ns: ns.clone(), since: count, timeout_ms: left })).await? {
+                    Response::Changed { count } => count,
+                    _ => return Err("unexpected answer to a watch".into()),
+                };
+                let records = match Box::pin(handle(d, Request::Query { ns: ns.clone(), terms: terms.clone(), at: None })).await? {
+                    Response::Records { records } => records,
+                    _ => return Err("unexpected answer to a query".into()),
+                };
+                let digest = answer_digest(&records);
+                if digest != since {
+                    return Ok(Response::LiveRecords { digest, records: Some(records) });
+                }
+                if Instant::now() >= deadline {
+                    return Ok(Response::LiveRecords { digest, records: None });
                 }
             }
         }
@@ -5047,6 +5082,12 @@ async fn ensure_local(d: &Daemon, file: &FileRef, range: std::ops::Range<u64>, n
             });
         }
     }
+}
+
+/// A query answer's digest (LiveQuery): the same records, the same digest.
+fn answer_digest(records: &[libretifs::RecordView]) -> String {
+    let bytes = rmp_serde::to_vec(records).unwrap_or_default();
+    hex(&<sha2::Sha256 as sha2::Digest>::digest(&bytes)[..16])
 }
 
 /// A response's body: NomadNet answers with msgpack bytes or a string (or

@@ -1020,17 +1020,19 @@ async fn main() {
                     let terms = q.terms();
                     run_query(&mut client, &names, &terms, None).await;
                     if rest.iter().any(|a| a == "--watch") {
-                        // Live: run again whenever one of its namespaces changes.
-                        let mut since: HashMap<String, u64> = HashMap::new();
+                        // Live: run again whenever its answer in one of its
+                        // namespaces changes (LiveQuery: not on every write).
+                        let mut since: HashMap<String, String> = HashMap::new();
                         loop {
                             let mut changed = false;
                             for n in &names {
-                                let s = since.get(n).copied().unwrap_or(0);
-                                if let Ok(libretifs::Response::Changed { count }) = client.call(libretifs::Request::Watch { ns: n.clone(), since: s, timeout_ms: 2_000 }).await
-                                    && count != s
+                                let s = since.get(n).cloned().unwrap_or_default();
+                                let req = libretifs::Request::LiveQuery { ns: n.clone(), terms: terms.clone(), since: s.clone(), timeout_ms: 2_000 };
+                                if let Ok(libretifs::Response::LiveRecords { digest, .. }) = client.call(req).await
+                                    && digest != s
                                 {
-                                    changed |= s != 0;
-                                    since.insert(n.clone(), count);
+                                    changed |= !s.is_empty();
+                                    since.insert(n.clone(), digest);
                                 }
                             }
                             if changed {

@@ -95,9 +95,11 @@ A search node, beyond what a holder sees:
 
 - A lazy member (ADR-0018) fetches the state paths of matches it doesn't hold, then checks them like any other.
 
+**Live queries (2026-11-11):** `LiveQuery { ns, terms, since, timeout_ms }` waits until the answer to a query differs from the one whose digest the client has (`since`; the digest is 16 bytes of SHA-256 over the answer), then answers with the records and the new digest; an unchanged answer at the end of the wait is only the digest. Over a Link (`--via`) the wait is capped like `Watch`'s, and a write elsewhere in the namespace that doesn't change the answer sends nothing. `retifs saved run NAME --watch` uses it. Live (one daemon): a non-matching write printed nothing, a matching one printed the new answer.
+
 **One builder per index channel (2026-11-11):** every member could sign the index channel (its key comes from the read key), and two publishing took the same sequence numbers. Now, of the writers' nodes that are around (heard within their last five announces), the one with the lowest address builds and publishes; the others don't. When it goes quiet, the next one takes over; a node that isn't a writer builds only when no writer's node is around. `retifs ns search NS` publishes anyway, as asked.
 
-**Not yet:** a live test of search with a lazy member; releasing index nodes of replaced versions on the search node; remote live queries beyond `Watch`; a cross-machine measurement over slow links.
+**Not yet:** a live test of search with a lazy member; releasing index nodes of replaced versions on the search node; a cross-machine measurement over slow links.
 
 ## Consequences
 - Easier: a phone or LoRa node can query a namespace it doesn't hold; search can be delegated to always-on nodes without giving them the read key.

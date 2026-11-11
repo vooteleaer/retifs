@@ -232,6 +232,12 @@ pub enum Request {
     /// count from the previous answer (0 at first: answers at once). The
     /// answer is the current count; equal to `since` means nothing changed.
     Watch { ns: String, since: u64, timeout_ms: u64 },
+    /// A live query (ADR-0019): waits, for at most `timeout_ms`, until the
+    /// answer to `terms` on `ns` differs from the one whose digest is `since`
+    /// ("" at first: answers at once), then answers with the records and
+    /// their digest. Unchanged at the end of the wait: the digest without
+    /// records. Over a Link (`--via`) only a changed answer travels.
+    LiveQuery { ns: String, terms: Vec<String>, since: String, timeout_ms: u64 },
     /// Starts writing record `id`'s content in place, without sending it whole:
     /// a write session (`WriteAt`, `WriteRead`, `WriteTruncate`, then
     /// `WriteCommit` or `WriteAbort`). The daemon spools written ranges to
@@ -595,6 +601,8 @@ pub struct RecordView {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(tag = "result", rename_all = "snake_case")]
 pub enum Response {
+    /// A live query's answer: `records` when it changed, else none.
+    LiveRecords { digest: String, records: Option<Vec<RecordView>> },
     /// A NomadNet page or file (NomadNetPage).
     Page {
         #[serde(with = "serde_bytes")]
