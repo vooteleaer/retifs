@@ -1,6 +1,6 @@
 [package]
 name = "retifs-card"
-version = "0.2.0"
+version = "0.3.0"
 description = "A node's RNS identity on an OpenPGP card (a YubiKey): Ed25519 signatures and X25519 agreement on the card (prototype)"
 edition.workspace = true
 license.workspace = true

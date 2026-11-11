@@ -1,6 +1,6 @@
 [package]
 name = "retifs-node"
-version = "0.2.0"
+version = "0.3.0"
 description = "retifsd and the retifs CLI (prototype, unstable)"
 edition.workspace = true
 license.workspace = true
