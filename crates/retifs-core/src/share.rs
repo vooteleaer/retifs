@@ -32,6 +32,20 @@ pub fn record_id(source: &RecordId, share: &NsId) -> RecordId {
     out
 }
 
+/// Attributes a share leaves out unless asked to keep them: where a photo
+/// was taken says where someone lives (ADR-0021, default filters).
+pub const DEFAULT_OMIT: &[&str] = &["geo"];
+
+/// What a new share leaves out: `omit`, and the defaults not in `keep`.
+pub fn with_default_omit(mut omit: Vec<String>, keep: &[String]) -> Vec<String> {
+    for d in DEFAULT_OMIT {
+        if !keep.iter().any(|k| k == d) && !omit.iter().any(|o| o == d) {
+            omit.push(d.to_string());
+        }
+    }
+    omit
+}
+
 /// Whether attribute `key` is left out by `omit`: an exact key, or a prefix
 /// ending in `*` (`exif:gps*`).
 pub fn omitted(key: &str, omit: &[String]) -> bool {
@@ -77,5 +91,18 @@ mod tests {
         .collect();
         let copy = copy_attrs(&attrs, &["geo".into(), "exif:gps*".into()]);
         assert_eq!(copy.keys().map(String::as_str).collect::<Vec<_>>(), ["exif:model", "keeper", "path"]);
+    }
+}
+
+#[cfg(test)]
+mod default_omit_tests {
+    use super::*;
+
+    #[test]
+    fn location_left_out_unless_kept() {
+        assert_eq!(with_default_omit(vec![], &[]), vec!["geo".to_string()]);
+        assert_eq!(with_default_omit(vec!["exif.*".into()], &[]), vec!["exif.*".to_string(), "geo".into()]);
+        assert!(with_default_omit(vec![], &["geo".into()]).is_empty());
+        assert_eq!(with_default_omit(vec!["geo".into()], &[]), vec!["geo".to_string()]);
     }
 }

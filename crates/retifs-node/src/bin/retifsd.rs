@@ -3336,7 +3336,8 @@ async fn handle(d: &Daemon, req: Request) -> Result<Response, String> {
             Ok(Response::Namespace(ns_view(d, &ns)?))
         }
 
-        Request::ShareCreate { source, name, terms, ids, omit } => {
+        Request::ShareCreate { source, name, terms, ids, omit, keep } => {
+            let omit = share::with_default_omit(omit, &keep);
             writable(&source)?;
             writable(&name)?;
             if source == name {

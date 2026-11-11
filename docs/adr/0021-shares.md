@@ -54,4 +54,4 @@ A namespace has one read key: whoever has its address reads all of it. People ra
 ## Open
 - Write-back: whether members' additions to a share flow into the source namespace, and how (an import rule on the owner's node).
 - Shares of shares (resharing) and how the original owner sees them.
-- Default attribute filters per content type (location in photos).
+- ~~Default attribute filters per content type (location in photos).~~ Built (2026-11-11) as one default for every share: `geo` is left out unless the share keeps it (`--keep geo`, `ShareCreate { keep }`); Explorer's menu and the apps get the default too. Other keys only on request (`--omit exif.*`).

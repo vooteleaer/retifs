@@ -28,7 +28,7 @@
 //!     retifs [--store DIR] ns address NS | ns info NS
 //!     retifs [--store DIR] ns join NAME ADDRESS [--from NODE]... [--lazy]
 //!     retifs [--store DIR] ns grant NS WRITER [--grant] [--keys K1,K2,@content,@delete] [--until YYYY-MM-DD|+30d] [--from NODE]... | ns revoke NS WRITER
-//!     retifs [--store DIR] share create NAME --from NS [TERM]... [--id ID]... [--omit KEY]... [--qr] | share list NS | share rm NS ID
+//!     retifs [--store DIR] share create NAME --from NS [TERM]... [--id ID]... [--omit KEY]... [--keep KEY]... [--qr] | share list NS | share rm NS ID
 //!     retifs [--store DIR] ns link NS [--name LABEL] [--q TERMS] [--qr] | open LINK [--as NAME]
 //!     retifs [--store DIR] query NS[,NS]|'*' TERM... --save NAME | saved [list] | saved run NAME [--watch] | saved rm NAME
 //!     retifs [--store DIR] mount [NS [DIR] [--foreground] [--via NODE] | --all] | unmount NS [--forget]
@@ -77,7 +77,7 @@ fn usage() -> ! {
          retifs [--store DIR] ns address NS | ns info NS | ns checkpoint NS | ns search NS | ns verify NS | ns keep NS all|rules | ns copies NS [N] | ns join NAME ADDRESS [--from NODE]... [--lazy]\n\
          retifs [--store DIR] ns announce NS [off] [--name LABEL] [--about TEXT] | heard | ns leave NS [--mine] | ns delete NS --yes\n\
          retifs [--store DIR] ns grant NS WRITER [--grant] [--from NODE]... | ns revoke NS WRITER\n\
-         retifs [--store DIR] share create NAME --from NS [TERM]... [--id ID]... [--omit KEY]... [--qr] | share list NS | share rm NS ID\n\
+         retifs [--store DIR] share create NAME --from NS [TERM]... [--id ID]... [--omit KEY]... [--keep KEY]... [--qr] | share list NS | share rm NS ID\n\
          retifs [--store DIR] ns link NS [--name LABEL] [--q TERMS] [--qr] | open LINK [--as NAME] | ns join NAME LINK\n\
          retifs [--store DIR] query NS[,NS]|'*' TERM... --save NAME | saved [list] | saved run NAME [--watch] | saved rm NAME\n\
          retifs [--store DIR] mount [NS [DIR] [--foreground] [--via NODE] | --all] | unmount NS [--forget]\n\
@@ -678,7 +678,7 @@ async fn main() {
                             i += 1;
                         }
                     }
-                    let req = libretifs::Request::ShareCreate { source, name, terms, ids: opt("--id"), omit: opt("--omit") };
+                    let req = libretifs::Request::ShareCreate { source, name, terms, ids: opt("--id"), omit: opt("--omit"), keep: opt("--keep") };
                     match client.call(req).await.unwrap_or_else(|e| fail(e)) {
                         libretifs::Response::Namespace(v) => {
                             let (node, _, _) = client.ping().await.unwrap_or_else(|e| fail(e));

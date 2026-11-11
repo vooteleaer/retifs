@@ -79,7 +79,7 @@ One of your nodes running it is enough ([ADR-0023](adr/0023-attribute-extraction
 2. On their side, `retifs open <link>` joins it.
 3. To let them write too, give them an invitation instead: `retifs invite create photos` prints a one-use `retifs:invite/…` link; `retifs open <link>` joins and gets the grant in one step (or as soon as your node is reachable).
 
-**Part of a library** (an album, a folder): `retifs share create prangli --from photos 'album=Prangli 2026' --omit geo` makes a library `prangli` holding just those records (without `geo`), kept up to date by your nodes, and prints its link. `retifs share list photos` and `share rm` list and end shares.
+**Part of a library** (an album, a folder): `retifs share create prangli --from photos 'album=Prangli 2026' --omit geo` makes a library `prangli` holding just those records (without `geo`; shares leave location out by default anyway, `--keep geo` keeps it), kept up to date by your nodes, and prints its link. `retifs share list photos` and `share rm` list and end shares.
 
 **One file**, outside any library: `retifs put FILE --hint` stores it and prints its read-cap with your node as a hint (`retifs:1:…@<node>`); `retifs get <read-cap>` on another device fetches it from the hinted node, or any it knows holds it.
 

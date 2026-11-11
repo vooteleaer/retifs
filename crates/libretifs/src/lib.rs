@@ -330,6 +330,9 @@ pub enum Request {
         ids: Vec<String>,
         #[serde(default)]
         omit: Vec<String>,
+        /// Attributes a share leaves out by default (`geo`) but should keep.
+        #[serde(default)]
+        keep: Vec<String>,
     },
     /// Ends a share: deletes its definition `id` from `source`, so updates
     /// stop. What members already have stays theirs.

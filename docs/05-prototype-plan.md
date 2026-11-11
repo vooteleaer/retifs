@@ -90,7 +90,8 @@ Prototypes are throwaway. They're for learning, not for locking in the format. T
 - [x] Compatibility rules for every app: versioned network and library formats, must-ignore and must-keep, unknown shown ([ADR-0030](adr/0030-data-outlives-apps.md)).
 - [x] Every node size-limited; storage-less nodes with only a keyring on disk, their own libraries fetched back from their holders after a restart ([ADR-0031](adr/0031-storage-less-nodes.md)).
 - [x] Shares: a selection (records, a folder, a query) as its own namespace kept up to date by the owner's nodes, content by reference, attributes optionally left out; started from Explorer's context menu ([ADR-0021](adr/0021-shares.md)).
-- [ ] Shares, continued: write-back from members, resharing, default attribute filters (location in photos); Nautilus and Dolphin menus.
+- [x] Shares: location (`geo`) left out by default, `--keep geo` to share it ([ADR-0021](adr/0021-shares.md)).
+- [ ] Shares, continued: write-back from members, resharing; Nautilus and Dolphin menus.
 - [x] Sharing: `retifs:` links and QR codes, one-use invitations (`/retifs/invite`), contacts as petnames in `me`, fingerprint words ([ADR-0020](adr/0020-sharing-names-invitations.md)).
 - [x] Readers as members: invitations to read (`invite create NS --read`), readers listed in `ns info`, rekeys wrapped to every member ([ADR-0017](adr/0017-multi-writer-namespaces.md), [ADR-0020](adr/0020-sharing-names-invitations.md)).
 - [ ] Sharing, continued: profiles (`/retifs/profile`), sending links over LXMF.
