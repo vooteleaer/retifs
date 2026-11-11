@@ -273,7 +273,7 @@ fn leaves(f: &FileRef, store: &MemStore) -> Vec<(Cid, retifs_core::Seed)> {
     node.entries.iter().map(|e| (e.cid, e.seed)).collect()
 }
 
-#[tokio::test]
+#[tokio::test(start_paused = true)]
 async fn seeking_rounds_fill_gaps_from_whichever_peer_has_them() {
     let (data, f, store) = file(400_000);
     let want = leaves(&f, &store);
@@ -291,18 +291,30 @@ async fn seeking_rounds_fill_gaps_from_whichever_peer_has_them() {
 
     let r0 = seek_round(&net, 0, &want, false, t).await.unwrap();
     assert_eq!((r0.held, r0.got.len()), (n / 2, n / 2));
-    let still: Vec<_> = want.iter().enumerate().filter(|(i, _)| !r0.got.iter().any(|g| g.0 == *i)).map(|(_, w)| *w).collect();
-    let r1 = seek_round(&net, 1, &still, true, t).await.unwrap(); // one item per request
-    assert_eq!(r1.got.len(), n - n / 2, "the second peer fills the rest");
-
-    // Reassemble from both rounds and compare.
     let mut by_cid: HashMap<Cid, Vec<u8>> = HashMap::new();
     for (i, _, pt) in &r0.got {
         by_cid.insert(want[*i].0, pt.clone());
     }
-    for (i, _, pt) in &r1.got {
-        by_cid.insert(still[*i].0, pt.clone());
+    // Private rounds: one item per request, a slice of the wants each time,
+    // decoys mixed in. The second peer fills the rest over a few rounds.
+    let mut rounds = 0;
+    loop {
+        let still: Vec<_> = want.iter().filter(|(c, _)| !by_cid.contains_key(c)).copied().collect();
+        if still.is_empty() {
+            break;
+        }
+        let r = seek_round(&net, 1, &still, true, t).await.unwrap();
+        assert!(r.asked <= retifs_net::seek::PRIVATE_SLICE && r.asked == still.len().min(retifs_net::seek::PRIVATE_SLICE));
+        let decoys = r.asked.div_ceil(retifs_net::seek::DECOY_EVERY);
+        assert_eq!(r.requests, r.asked + decoys + r.held, "one have per item and decoy, one get per held item");
+        assert_eq!(r.held, r.got.len());
+        for (i, _, pt) in &r.got {
+            by_cid.insert(still[*i].0, pt.clone());
+        }
+        rounds += 1;
+        assert!(rounds < 100);
     }
+    assert_eq!(rounds, (n - n / 2).div_ceil(retifs_net::seek::PRIVATE_SLICE));
     let joined: Vec<u8> = want.iter().flat_map(|(c, _)| by_cid[c].clone()).collect();
     assert_eq!(&joined[..data.len()], &data[..], "data, then padding");
 }

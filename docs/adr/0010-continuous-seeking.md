@@ -76,9 +76,9 @@ As in RNS, where a NomadNet page or LXMF delivery doesn't learn who's asking unl
 What a holder holds reveals little: chunks are equal-sized blobs with no visible grouping. What it is **asked** reveals more:
 - **Grouping by token:** removed by per-chunk proofs (above).
 - **Grouping by request:** a batched request shows that its items belong together. Requests can carry a single item (one packet each: `get` 49 B, `have` 24 B), so a peer can't group by request either. `retifsd --private-requests` seeks one item per request; the fetcher's `batch: 1` does the same. On own nodes and LANs, batching stays the default for speed.
-- **Telling a peer the size:** a `have` over all wanted chunks tells even a one-chunk holder the file's chunk count. Mitigations, not yet implemented: ask each peer about a slice; add decoy prefixes.
+- **Telling a peer the size:** a `have` over all wanted chunks tells even a one-chunk holder the file's chunk count. With private requests (2026-11-11), a round asks a peer about a random slice of at most 16 wanted chunks, with about one decoy prefix (random prefix, random proof, answered "don't have" like any chunk the peer lacks) for every four real ones, in random order.
 - **Padding:** readers fetch padding chunks like real ones, so the number of requests matches the padded size (ADR-0008/0009).
-- **Residual:** requests on one link are visibly one session, and bursts are visible in timing. Spreading requests over several links with jitter reduces this; a global passive observer is out of scope, as for RNS.
+- **Residual:** requests on one link are visibly one session, and bursts are visible in timing. Private requests are spaced by a random pause of up to 300 ms (2026-11-11); spreading them over several links would reduce it further; a global passive observer is out of scope, as for RNS.
 
 ### Holder hints
 A read-cap may carry hints: `retifs:1:<root>:<seed>:<size>@<node>,<node>`. Hints say where to ask; integrity always comes from the CID. ~~The read-cap also carries the file's serve token~~: no serve token since per-chunk proofs (above); proofs come from the seeds the manifest holds.
@@ -154,7 +154,7 @@ Built: wants and tree expansion, partial availability, seeking on announces and 
 
 Not built yet:
 - the store generation counter in announces (peers are asked again on a timer);
-- slicing `have` per peer and decoy prefixes;
+- requests spread over several links per peer;
 - per-chunk holders, and holders learned from others (gossip between own nodes);
 - per-file serving destinations.
 

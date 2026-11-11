@@ -4900,7 +4900,7 @@ async fn ensure_local(d: &Daemon, file: &FileRef, range: std::ops::Range<u64>, n
                     continue;
                 }
             };
-            d.saw_holding(&file.root, peer, missing.len(), round.held);
+            d.saw_holding(&file.root, peer, round.asked, round.held);
             let bytes: u64 = round.got.iter().map(|(_, ct, _)| ct.len() as u64).sum();
             let _ = d.store.record_transfer(peer, bytes, t0.elapsed().as_millis() as u64);
             for (i, ct, _) in round.got {
@@ -4961,7 +4961,7 @@ async fn fetch_spread(d: &Daemon, root: &Cid, missing: &[(Cid, retifs_core::Seed
     for (peer, part, round, took) in rounds {
         match round {
             Ok(round) => {
-                d.saw_holding(root, peer, part.len(), round.held);
+                d.saw_holding(root, peer, round.asked, round.held);
                 let bytes: u64 = round.got.iter().map(|(_, ct, _)| ct.len() as u64).sum();
                 let _ = d.store.record_transfer(peer, bytes, took.as_millis() as u64);
                 for (i, ct, _) in round.got {
@@ -7300,7 +7300,7 @@ async fn seek_pass(d: &Daemon) -> Result<(), String> {
                         break;
                     }
                 };
-                d.saw_holding(&root, &hint.peer, pairs.len(), round.held);
+                d.saw_holding(&root, &hint.peer, round.asked, round.held);
                 let bytes: u64 = round.got.iter().map(|(_, ct, _)| ct.len() as u64).sum();
                 let _ = store.record_transfer(&hint.peer, bytes, t0.elapsed().as_millis() as u64);
                 if round.got.is_empty() {

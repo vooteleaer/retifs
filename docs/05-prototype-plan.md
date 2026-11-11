@@ -33,7 +33,8 @@ Prototypes are throwaway. They're for learning, not for locking in the format. T
 - [x] Blind wants for leases (CID + access token, pulled by the holder).
 - [x] Range reads of partially available files: only the chunks a range needs, fetched on demand ([ADR-0002](adr/0002-os-integration.md)).
 - [x] Request privacy: per-chunk access proofs (no file token on the wire), one-item requests (`--private-requests`, `batch: 1`), PADMÉ padding with padding fetched like data, per-record personal secrets (versions dedup) ([ADR-0008](adr/0008-chunk-encryption-and-cid.md), [ADR-0010](adr/0010-continuous-seeking.md)).
-- [ ] Request privacy, continued: sliced `have` per peer, decoy prefixes, several links with jitter.
+- [x] Request privacy, continued: private rounds ask each peer about a random slice (≤ 16) with decoy prefixes, requests spaced by random pauses ([ADR-0010](adr/0010-continuous-seeking.md)).
+- [ ] Request privacy: private requests spread over several links per peer.
 - [x] Where a library's copies are, said in the library: a `retifs.holders` record per writing node, so every member reads files placed by a node that's away; readers keeping content are peers too (`/retifs/reader`) ([ADR-0035](adr/0035-holders-in-the-library.md)).
 - [x] Holder map, first slice: per-file holders from receipts and `have` answers, in memory and bounded; sources ranked (holds, holds some, unknown, holds none, just failed; then by link), reads spread over up to three holders, instant failover, copies seen in `retifs status` ([ADR-0010](adr/0010-continuous-seeking.md)).
 - [ ] Holder map, continued: per-chunk holders, holders learned from own nodes (gossip, opt-in).
