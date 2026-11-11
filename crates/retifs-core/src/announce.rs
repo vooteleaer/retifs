@@ -2,14 +2,20 @@
 //! often the node announces, so others can tell a node that went quiet from
 //! one that announces rarely, and, if its owner said, which site it's at, so
 //! copies can be kept in more than one place. Canonical msgpack, a map so it
-//! can grow (keys in order; `hold` only when false, `site` only when set):
+//! can grow (keys in order; `hold` only when false, `room` and `site` only
+//! when set):
 //!
 //! ```text
-//! { "announce_s": uint, "hold": false, "site": bin 8, "v": 1 }
+//! { "announce_s": uint, "hold": false, "room": uint, "site": bin 8, "v": 1 }
 //! ```
 //!
 //! `hold: false`: the node holds nothing for others (`--hold-for-others 0`,
 //! a phone, a test node), so offering it copies is pointless.
+//!
+//! `room`: the node's offer (ADR-0014), coarse on purpose: it can take about
+//! 2^room more bytes of others' copies (rounded down to a power of two; 0:
+//! less than 2 bytes, in effect full). An offerer leaves out a node whose
+//! room is below what it would lease there, without a link or a lease.
 //!
 //! The site is a tag, not the name: the first 8 bytes of
 //! SHA-256("retifs.site" ‖ 0x00 ‖ the name, trimmed and lowercased). Nodes
@@ -41,6 +47,20 @@ pub struct NodeAnnounce {
     pub site: Option<SiteTag>,
     /// It said it holds nothing for others.
     pub holds_nothing: bool,
+    /// Its offer: room for about 2^room more bytes of others' copies.
+    pub room: Option<u8>,
+}
+
+impl NodeAnnounce {
+    /// The bytes of others' copies it said it can still take, if it said.
+    pub fn room_bytes(&self) -> Option<u64> {
+        self.room.map(|r| if r >= 64 { u64::MAX } else { 1u64 << r })
+    }
+}
+
+/// The `room` an offer of `bytes` free is announced as: floor(log2), 0 for none.
+pub fn room_exponent(bytes: u64) -> u8 {
+    if bytes == 0 { 0 } else { 63 - bytes.leading_zeros() as u8 }
 }
 
 /// The interval assumed for a node that doesn't say (and the default).
@@ -49,13 +69,24 @@ pub const DEFAULT_ANNOUNCE_S: u32 = 600;
 /// A node's announce app data, announcing every `announce_s` seconds, at
 /// `site` if its owner named one; `holds`: whether it holds others' copies.
 pub fn node_app_data(announce_s: u32, site: Option<SiteTag>, holds: bool) -> Vec<u8> {
+    node_app_data_with_room(announce_s, site, holds, None)
+}
+
+/// [`node_app_data`] with the node's offer: room for `room` more bytes of
+/// others' copies (announced as a power of two; only when it holds).
+pub fn node_app_data_with_room(announce_s: u32, site: Option<SiteTag>, holds: bool, room: Option<u64>) -> Vec<u8> {
+    let room = room.filter(|_| holds).map(room_exponent);
     let mut out = Vec::new();
-    write_map_len(&mut out, 2 + site.is_some() as usize + !holds as usize);
+    write_map_len(&mut out, 2 + site.is_some() as usize + !holds as usize + room.is_some() as usize);
     write_str(&mut out, "announce_s");
     write_int(&mut out, announce_s as i64);
     if !holds {
         write_str(&mut out, "hold");
         out.push(0xc2);
+    }
+    if let Some(r) = room {
+        write_str(&mut out, "room");
+        write_int(&mut out, r as i64);
     }
     if let Some(site) = site {
         write_str(&mut out, "site");
@@ -78,6 +109,7 @@ pub fn node_announce(app_data: &[u8]) -> NodeAnnounce {
             ("announce_s", Value::Int(i)) => out.announce_s = u32::try_from(i).ok().filter(|s| *s > 0),
             ("site", Value::Bytes(b)) => out.site = b.try_into().ok(),
             ("hold", Value::Bool(false)) => out.holds_nothing = true,
+            ("room", Value::Int(i)) => out.room = u8::try_from(i).ok().filter(|r| *r <= 64),
             _ => {}
         }
     }
@@ -287,12 +319,30 @@ mod tests {
     }
 
     #[test]
+    fn room() {
+        assert_eq!(room_exponent(0), 0);
+        assert_eq!(room_exponent(1), 0);
+        assert_eq!(room_exponent(1 << 30), 30);
+        assert_eq!(room_exponent((1 << 31) - 1), 30);
+        let a = node_announce(&node_app_data_with_room(600, Some([7; 8]), true, Some(5 << 30)));
+        assert_eq!((a.announce_s, a.room, a.site), (Some(600), Some(32), Some([7; 8])));
+        assert_eq!(a.room_bytes(), Some(1 << 32));
+        // Without room it's the same bytes as before; a node holding nothing never offers.
+        assert_eq!(node_app_data_with_room(600, None, true, None), node_app_data(600, None, true));
+        let none = node_announce(&node_app_data_with_room(600, None, false, Some(1 << 30)));
+        assert!(none.holds_nothing && none.room.is_none());
+        // Keys in order: announce_s, hold, room, site, v.
+        let d = node_app_data_with_room(60, None, true, Some(1024));
+        assert_eq!(d, [0x83, 0xaa, b'a', b'n', b'n', b'o', b'u', b'n', b'c', b'e', b'_', b's', 0x3c, 0xa4, b'r', b'o', b'o', b'm', 0x0a, 0xa1, b'v', 0x01]);
+    }
+
+    #[test]
     fn sites() {
         let home = site_tag("Prangli-Home");
         assert_eq!(home, site_tag("  prangli-home "), "trimmed, any case");
         assert_ne!(home, site_tag("prangli-cabin"));
         let a = node_announce(&node_app_data(600, Some(home), true));
-        assert_eq!(a, NodeAnnounce { announce_s: Some(600), site: Some(home), holds_nothing: false });
+        assert_eq!(a, NodeAnnounce { announce_s: Some(600), site: Some(home), holds_nothing: false, room: None });
         let data = node_app_data(600, Some([7; 8]), true);
         assert_eq!(&data[..1], &[0x83]);
         assert_eq!(&data[15..27], &[0xa4, b's', b'i', b't', b'e', 0xc4, 0x08, 7, 7, 7, 7, 7]);

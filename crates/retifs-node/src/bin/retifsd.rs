@@ -564,6 +564,13 @@ impl Shared {
         let fits = u.leased + l.room().min(l.hard_max.saturating_sub(u.hard()));
         self.hold_limit.map_or(fits, |cap| cap.min(fits))
     }
+
+    /// How many more bytes of others' copies this node can take now: what
+    /// its announces offer.
+    fn room_for_others(&self) -> u64 {
+        let leased = self.store.usage().map(|u| u.leased).unwrap_or(0);
+        self.hold_limit().saturating_sub(leased)
+    }
 }
 
 struct Args {
@@ -1088,6 +1095,9 @@ struct Daemon {
     deleted: Mutex<std::collections::BTreeMap<String, u64>>,
     /// Who has been seen holding which file (ADR-0010): ranks sources.
     holder_map: Mutex<retifs_store::HolderMap>,
+    /// Each storage node's offer from its last announce: the bytes of
+    /// others' copies it can still take (ADR-0014).
+    offers: Mutex<HashMap<PeerId, u64>>,
 }
 
 /// A storage-less node's RAM folder for its slabs: in /dev/shm where there is
@@ -2070,6 +2080,7 @@ async fn serve(store: Arc<SlabStore>, identity: node::IdentitySecret, endpoint: 
         announced: Mutex::new(std::collections::HashSet::new()),
         announced_wake: Notify::new(),
         holder_map: Mutex::new(retifs_store::HolderMap::new()),
+        offers: Mutex::new(HashMap::new()),
         device: args.device.clone(),
         changes: Mutex::new(HashMap::new()),
         changed: Notify::new(),
@@ -2259,6 +2270,10 @@ async fn serve(store: Arc<SlabStore>, identity: node::IdentitySecret, endpoint: 
             if peer == watcher.node_id || not_retifs.contains(&peer) {
                 continue;
             }
+            match said.room_bytes() {
+                Some(room) => watcher.offers.lock().unwrap().insert(peer, room),
+                None => watcher.offers.lock().unwrap().remove(&peer),
+            };
             if not_retifs.len() > 100_000 {
                 not_retifs.clear(); // a very large network: forget and re-learn
             }
@@ -2309,17 +2324,23 @@ async fn serve(store: Arc<SlabStore>, identity: node::IdentitySecret, endpoint: 
 
     let announcer = handle.clone();
     let announce_every = args.announce_s;
+    let announce_site = args.site.as_deref().map(retifs_core::announce::site_tag);
+    let holds = args.hold_limit != Some(0);
+    let offering = shared.clone();
     worker("node announces", async move {
         // Once at start (the first tick is immediate), then every ten minutes:
-        // announces travel the whole network, LoRa links included.
+        // announces travel the whole network, LoRa links included. Each says
+        // how much more this node can hold for others now (its offer, ADR-0014).
         let mut tick = tokio::time::interval(Duration::from_secs(announce_every as u64));
         loop {
             tick.tick().await;
-            let cmd = PrnsCommand::AnnounceNow(AnnounceNow {
-                destination: dest_hash,
-                target: AnnounceTarget::AllInterfaces,
-                app_data: AnnounceAppData::Registered,
-            });
+            let room = holds.then(|| offering.room_for_others());
+            let data = retifs_core::announce::node_app_data_with_room(announce_every, announce_site, holds, room);
+            let app_data = match personal_rns::routing::announce::emit::AnnounceAppDataBytes::from_slice(&data) {
+                Ok(bytes) => AnnounceAppData::Data(bytes),
+                Err(_) => AnnounceAppData::Registered,
+            };
+            let cmd = PrnsCommand::AnnounceNow(AnnounceNow { destination: dest_hash, target: AnnounceTarget::AllInterfaces, app_data });
             if announcer.issue(cmd).is_none() {
                 return;
             }
@@ -6575,6 +6596,13 @@ async fn place_all(d: &Daemon) -> Result<(), String> {
             }
         }
         let hops = d.store.storage_nodes().unwrap_or_default().iter().find(|n| n.peer == peer).map_or(0, |n| n.hops);
+        // Its announce says it can't take this much: no link, no lease.
+        let need = chunks.len() as u64 * retifs_store::LEASE_CHUNK_ESTIMATE;
+        if let Some(room) = d.offers.lock().unwrap().get(&peer).copied().filter(|room| *room < need) {
+            println!("placement: <{}> offers room for about {room} B, {need} B needed: not offering there", hex(&peer));
+            d.store.avoid_storage_node(&peer, now_ms() + 3_600_000).map_err(|e| e.to_string())?;
+            continue;
+        }
         match lease_to(d, &peer, &sorted(&chunks), &roots, &[]).await {
             Ok(true) => println!(
                 "placement: {} file(s), {} chunk(s) kept at <{}> ({hops} hop(s)) in mixed lease(s)",
@@ -6824,6 +6852,10 @@ async fn rank_candidates(d: &Daemon) -> Result<Vec<(f64, retifs_store::StorageNo
         if n.last_heard_ms + MISSED_ANNOUNCES * n.announce_s as u64 * 1000 < now_ms() {
             continue;
         }
+        // Its last announce said it's full: not worth a link.
+        if d.offers.lock().unwrap().get(&n.peer).is_some_and(|room| *room < MIN_OFFER) {
+            continue;
+        }
         attempts += 1;
         if let Err(e) = d.link_to(&n.peer).await {
             eprintln!("placement: <{}>: {e}", hex(&n.peer));
@@ -6841,6 +6873,9 @@ async fn rank_candidates(d: &Daemon) -> Result<Vec<(f64, retifs_store::StorageNo
     candidates.sort_by(|a, b| a.0.total_cmp(&b.0).then(a.1.hops.cmp(&b.1.hops)));
     Ok(candidates)
 }
+
+/// A storage node whose announced room is below this is full: not a candidate.
+const MIN_OFFER: u64 = 1 << 20;
 
 /// Offers a lease, with a stamp if the holder asks for one (or asked before).
 /// A holder asking more than `--max-stamp-cost` is treated as having no room.
@@ -6981,10 +7016,26 @@ async fn upkeep_holder(
     let mut gone = std::collections::HashSet::new();
     let (stale, renew): (Vec<usize>, Vec<usize>) = renew.into_iter().partition(|&i| leases[i].stale);
     for i in stale {
-        if repack(d, holder, &leases[i]).await? {
+        if repack(d, holder, &[&leases[i]]).await? {
             gone.insert(i);
         }
     }
+    // Small leases due together are merged into as few as hold their chunks
+    // (one renewal, one receipt and one proof instead of many), the same way.
+    let (small, renew): (Vec<usize>, Vec<usize>) = renew.into_iter().partition(|&i| leases[i].lease.entries.len() < SMALL_LEASE);
+    let small_chunks: usize = small.iter().map(|&i| leases[i].lease.entries.len()).sum();
+    let renew = if small.len() >= 2 && small_chunks.div_ceil(lease::MAX_CHUNKS) < small.len() {
+        let group: Vec<&OwnLease> = small.iter().map(|&i| &leases[i]).collect();
+        if repack(d, holder, &group).await? {
+            println!("upkeep <{}>: {} small lease(s) merged", hex(holder), small.len());
+            gone.extend(small.iter().copied());
+            renew
+        } else {
+            renew.into_iter().chain(small).collect()
+        }
+    } else {
+        renew.into_iter().chain(small).collect::<Vec<usize>>()
+    };
 
     // Renewals, up to 64 per request.
     for batch in renew.chunks(MAX_BUNDLE) {
@@ -7084,16 +7135,23 @@ async fn upkeep_holder(
     Ok(Some(behaved))
 }
 
-/// Replaces a stale lease with one over only the chunks its remaining files
-/// still need (the holder has them: nothing is pushed). The old lease isn't
-/// renewed and runs out. Ok(true): the old lease is no longer tracked.
-async fn repack(d: &Daemon, holder: &PeerId, o: &OwnLease) -> Result<bool, String> {
+/// A lease with fewer chunks than this is merged with others due at the same time.
+const SMALL_LEASE: usize = 256;
+
+/// Replaces leases at one holder (a stale one, or several small ones) with
+/// as few as hold only the chunks their files still need (the holder has
+/// them: nothing is pushed). The old leases aren't renewed and run out.
+/// Ok(true): the old leases are no longer tracked.
+async fn repack(d: &Daemon, holder: &PeerId, old: &[&OwnLease]) -> Result<bool, String> {
     let needed: HashMap<Cid, FileRef> =
         d.store.needed_files().map_err(|e| e.to_string())?.into_iter().map(|f| (f.root, f)).collect();
-    let in_lease: std::collections::HashSet<Cid> = o.lease.entries.iter().map(|(c, _)| *c).collect();
+    let in_lease: std::collections::HashSet<Cid> = old.iter().flat_map(|o| o.lease.entries.iter().map(|(c, _)| *c)).collect();
+    let mut file_roots: Vec<Cid> = old.iter().flat_map(|o| o.roots.iter().copied()).collect();
+    file_roots.sort_by(|a, b| a.as_bytes().cmp(b.as_bytes()));
+    file_roots.dedup();
     let mut roots: HashMap<Cid, Vec<Cid>> = HashMap::new();
     let mut keep = Vec::new();
-    for root in &o.roots {
+    for root in &file_roots {
         let Some(f) = needed.get(root) else { continue };
         for (cid, token) in file_chunks(&d.store, f)? {
             if in_lease.contains(&cid) {
@@ -7106,14 +7164,16 @@ async fn repack(d: &Daemon, holder: &PeerId, o: &OwnLease) -> Result<bool, Strin
         }
     }
     if keep.is_empty() || lease_to(d, holder, &sorted(&keep), &roots, &[]).await? {
+        for o in old {
+            d.store.remove_own_lease(&o.lease.id).map_err(|e| e.to_string())?;
+        }
         println!(
-            "lease {}: repacked at <{}>: {} of {} chunk(s) still needed",
-            hex(&o.lease.id),
+            "lease(s) {}: repacked at <{}>: {} of {} chunk(s) still needed",
+            old.iter().map(|o| hex(&o.lease.id)).collect::<Vec<_>>().join(", "),
             hex(holder),
             keep.len(),
-            o.lease.entries.len()
+            in_lease.len()
         );
-        d.store.remove_own_lease(&o.lease.id).map_err(|e| e.to_string())?;
         return Ok(true);
     }
     Ok(false)

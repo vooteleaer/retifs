@@ -50,7 +50,7 @@ Prototypes are throwaway. They're for learning, not for locking in the format. T
 - [x] Signed channels: commits, heads, `/retifs/head`, follow with automatic updates, followers mirror ([ADR-0015](adr/0015-signed-channels.md)).
 - [x] Copies by policy: at least three of every needed file, a library's own number (`retifs ns copies NS N`), one copy at another site, trimming never takes the last copy at another site; `retifs nodes` lists the storage nodes placement knows ([ADR-0011](adr/0011-redundancy-by-default.md), [ADR-0014](adr/0014-placement-follows-need.md)).
 - [x] Announce app data (Prns 0.3.8): a `retifs.node` announce states its interval (a node missing 5 gets no new leases) and whether it holds for others ([ADR-0014](adr/0014-placement-follows-need.md)).
-- [ ] Placement, continued: the capacity offer (free capacity, term) in announce app data, merging small leases per holder at renewal.
+- [x] Placement, continued: the offer in announces (`room`, a power of two; placement skips nodes without room for a lease), small leases per holder merged at renewal ([ADR-0014](adr/0014-placement-follows-need.md)).
 - [ ] Own-node pool on a LAN, replication target, repair, storage proofs ([ADR-0011](adr/0011-redundancy-by-default.md)).
 - [ ] Volunteer storage offers (`retifs.store`).
 - [ ] Diffuse mode: anonymous push seeding, epidemic re-replication with jitter, cover holdings ([ADR-0011](adr/0011-redundancy-by-default.md)).
