@@ -31,7 +31,7 @@ Made by the attribute producer (`retifs-extractd`, ADR-0023) for images:
 | `block:thumb` | longest side 320 px, JPEG | grids, lists |
 | `block:preview` | longest side 1600 px, JPEG | the viewer, before (or instead of) the original |
 
-Turned the way the EXIF orientation says, so every app can show them as they are. Each is an encrypted block like any other, synced and placed with the record, so a phone shows a grid without fetching originals. Video frames come later.
+Turned the way the EXIF orientation says, so every app can show them as they are. Each is an encrypted block like any other, synced and placed with the record, so a phone shows a grid without fetching originals. Videos get the same two blocks from a frame (2026-11-11): where `ffmpeg` is installed, `retifs-extractd` copies a video (up to 4 GiB) to a temporary file and takes the frame one second in (the first, for a shorter one), turned as the video says. ffmpeg is told to read that file only (`-protocol_whitelist file`, so a crafted file can't make it fetch from the network) and runs inside the extractor's sandbox. Without ffmpeg nothing changes; a video described before ffmpeg was installed gets its thumbnails on the next look.
 
 ### Albums are attributes on photos (2026-11-05; at first they were records)
 - A photo is in an album by its `album` attribute: a name, or a list of names. An album exists while some photo is in it; one name, in any case and in any library, is one album. There are no album records.

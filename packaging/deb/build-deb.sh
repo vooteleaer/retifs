@@ -88,6 +88,7 @@ Architecture: $ARCH
 Maintainer: retifs <https://github.com/vooteleaer/retifs>
 Installed-Size: $SIZE
 Depends: libc6 (>= $GLIBC), fuse3
+Suggests: ffmpeg
 Section: net
 Priority: optional
 Homepage: https://github.com/vooteleaer/retifs

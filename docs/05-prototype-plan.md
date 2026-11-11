@@ -123,7 +123,8 @@ Prototypes are throwaway. They're for learning, not for locking in the format. T
 - [x] Attributes from what's in files, for every file that enters: `retifs-extractd` (EXIF, audio tags, document properties, types; [ADR-0023](adr/0023-attribute-extraction.md)).
 - [x] Conventions, first: keys per media type from the extractor (time ISO 8601, `geo` as [lat, lon]; [ADR-0023](adr/0023-attribute-extraction.md)), a record's type is a MIME type ([ADR-0025](adr/0025-types-are-mime-types.md)), block roles and thumbnails, albums, favourites ([ADR-0026](adr/0026-photos-thumbnails-albums.md)), people and events ([ADR-0024](adr/0024-people-and-events.md)), places ([ADR-0027](adr/0027-places.md)).
 - [x] Haiku's media attributes (`Audio:Artist`, `Media:Width`, …) as views of the extractor's keys in `retifs-haikufs` ([ADR-0023](adr/0023-attribute-extraction.md)).
-- [ ] Conventions, continued: content-bound attributes (decision 7; the `extracted` marker stands in), video frames as thumbnails.
+- [x] Video thumbnails: a frame through `ffmpeg` where it's installed, as `block:thumb` and `block:preview` ([ADR-0026](adr/0026-photos-thumbnails-albums.md)).
+- [ ] Conventions, continued: content-bound attributes (decision 7; the `extracted` marker stands in).
 - [ ] Apps on those records, iterated one at a time (each in its own repository):
   - [x] photos, first: phone backup with thumbnails, favourites, albums (also moved between libraries), on Android, Linux and Haiku;
   - [x] map ([ADR-0028](adr/0028-maps-over-retifs.md)), contacts and calendars ([ADR-0024](adr/0024-people-and-events.md)): the map from public libraries, an address book in `me`, a calendar per library holding events;

@@ -443,6 +443,45 @@ fn packaged<R: Read + Seek>(r: &mut R, mime: &str, out: &mut Extracted) {
     }
 }
 
+/// Whether `ffmpeg` is on the PATH (asked once): video frames need it.
+pub fn ffmpeg_available() -> bool {
+    static FOUND: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    *FOUND.get_or_init(|| {
+        std::process::Command::new("ffmpeg")
+            .arg("-version")
+            .stdin(std::process::Stdio::null())
+            .stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::null())
+            .status()
+            .is_ok_and(|s| s.success())
+    })
+}
+
+/// A frame of the video in `path` as JPEG, for its thumbnails (ADR-0026):
+/// one second in (the first frame is often black), or the first frame of a
+/// shorter one, turned as the video says. ffmpeg reads the file only: no
+/// other protocols (a file can name a playlist on the network), no input
+/// from the terminal. None without ffmpeg, or if it can't decode the file.
+pub fn video_frame(path: &std::path::Path) -> Option<Vec<u8>> {
+    if !ffmpeg_available() {
+        return None;
+    }
+    for at in ["1", "0"] {
+        let out = std::process::Command::new("ffmpeg")
+            .args(["-nostdin", "-v", "error", "-protocol_whitelist", "file", "-ss", at, "-i"])
+            .arg(path)
+            .args(["-frames:v", "1", "-vf", "scale='min(1600,iw)':-2", "-f", "image2pipe", "-vcodec", "mjpeg", "pipe:1"])
+            .stdin(std::process::Stdio::null())
+            .stderr(std::process::Stdio::null())
+            .output()
+            .ok()?;
+        if out.status.success() && out.stdout.starts_with(&[0xFF, 0xD8]) {
+            return Some(out.stdout);
+        }
+    }
+    None
+}
+
 /// The thumbnail sizes (ADR-0026): the longest side in pixels.
 pub const THUMB_PX: u32 = 320;
 pub const PREVIEW_PX: u32 = 1600;
@@ -564,6 +603,32 @@ mod tests {
         assert_eq!(get(&e, "doc.title"), Some(&AttrValue::Str("Club rules".into())));
         assert_eq!(get(&e, "doc.author"), Some(&AttrValue::Str("Vootele".into())));
         assert_eq!(get(&e, "doc.pages"), Some(&AttrValue::Int(4)));
+    }
+
+    /// Needs ffmpeg (skipped without): a two-second test video, a frame of
+    /// it, and thumbnails from the frame.
+    #[test]
+    fn video_frames_with_ffmpeg() {
+        if !ffmpeg_available() {
+            eprintln!("no ffmpeg here: skipped");
+            return;
+        }
+        let dir = std::env::temp_dir().join(format!("retifs-video-test-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let mp4 = dir.join("test.mp4");
+        let made = std::process::Command::new("ffmpeg")
+            .args(["-nostdin", "-v", "error", "-y", "-f", "lavfi", "-i", "testsrc=duration=2:size=640x360:rate=10", "-pix_fmt", "yuv420p"])
+            .arg(&mp4)
+            .status()
+            .unwrap();
+        assert!(made.success());
+        let frame = video_frame(&mp4).expect("a frame");
+        let img = image::load_from_memory(&frame).unwrap();
+        assert_eq!((img.width(), img.height()), (640, 360));
+        let (thumb, _) = thumbnails(&frame, None).unwrap();
+        assert_eq!(image::load_from_memory(&thumb).unwrap().width(), 320);
+        assert!(video_frame(&dir.join("missing.mp4")).is_none());
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[test]

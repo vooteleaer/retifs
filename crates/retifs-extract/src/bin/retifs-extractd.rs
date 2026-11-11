@@ -61,6 +61,9 @@ impl Conn {
 /// Pictures larger than this get no thumbnails (they'd be read whole).
 const MAX_PICTURE: u64 = 64 << 20;
 
+/// Videos larger than this get no thumbnails (they're copied whole for ffmpeg).
+const MAX_VIDEO: u64 = 4 << 30;
+
 /// How much is read from the daemon at a time.
 const PIECE: u64 = 256 << 10;
 
@@ -122,7 +125,10 @@ fn attr<'a>(r: &'a RecordView, key: &str) -> Option<&'a AttrValue> {
 fn update(conn: &mut Conn, ns: &str, r: &RecordView) -> Result<bool, String> {
     let Some(cap) = r.blocks.first() else { return Ok(false) };
     let mark = marker(cap);
-    if matches!(attr(r, MARKER), Some(AttrValue::Str(m)) if *m == mark) {
+    // A video described before ffmpeg was here gets its thumbnails now.
+    let is_video = matches!(attr(r, "type"), Some(AttrValue::Str(t)) if t.starts_with("video/"));
+    let video_wants_thumbs = is_video && attr(r, "block:thumb").is_none() && retifs_extract::ffmpeg_available();
+    if matches!(attr(r, MARKER), Some(AttrValue::Str(m)) if *m == mark) && !video_wants_thumbs {
         return Ok(false);
     }
     let size = match attr(r, "size") {
@@ -142,6 +148,15 @@ fn update(conn: &mut Conn, ns: &str, r: &RecordView) -> Result<bool, String> {
         let mut picture = Vec::new();
         if found.kind == Some("image") && size <= MAX_PICTURE && content.seek(SeekFrom::Start(0)).is_ok() {
             content.read_to_end(&mut picture).map_err(|e| e.to_string())?;
+        }
+        // A video: copied to a temporary file for ffmpeg, a frame taken.
+        if found.kind == Some("video") && size <= MAX_VIDEO && retifs_extract::ffmpeg_available() && content.seek(SeekFrom::Start(0)).is_ok() {
+            let tmp = std::env::temp_dir().join(format!("retifs-extract-{}", &mark[..mark.len().min(16)]));
+            let copied = std::fs::File::create(&tmp).and_then(|mut f| std::io::copy(&mut content, &mut f));
+            if copied.is_ok() {
+                picture = retifs_extract::video_frame(&tmp).unwrap_or_default();
+            }
+            let _ = std::fs::remove_file(&tmp);
         }
         (found, picture)
     };
