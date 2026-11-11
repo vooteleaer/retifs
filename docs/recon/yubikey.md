@@ -33,5 +33,5 @@ So this YubiKey can be a retifs node's identity, with the secret never leaving t
 Timing (`card_timing`, release build, Windows, 20 runs, medians): sign 32 B 100 ms, sign 400 B 171 ms, agree 82 ms.
 
 ## Next
-1. Prns: device custody through the owed signing and decryption jobs, proposed upstream first ([issue draft](prns-issue-device-identity.md), not posted).
+1. Prns: device custody through the owed signing and decryption jobs, proposed upstream first ([Prns#330](https://github.com/KenAKAFrosty/Prns/issues/330), [as posted](prns-issue-device-identity.md)).
 2. retifs: `retifs-card` behind that trait, and retifsd started with the card's identity, the PIN asked by the desktop utility.

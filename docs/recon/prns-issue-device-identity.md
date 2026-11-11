@@ -1,6 +1,6 @@
-# Draft Prns issue: identities whose secret stays on a device (not posted)
+# Prns issue: identities whose secret stays on a device
 
-Draft for KenAKAFrosty/Prns, for the owner to review and post under their own name. Written against `main` at 04ecaef60 (0.3.8-hotfix.1 plus four commits; the parts named here are the same in both).
+Posted 2026-11-11 as [KenAKAFrosty/Prns#330](https://github.com/KenAKAFrosty/Prns/issues/330), as below. Written against `main` at 04ecaef60 (0.3.8-hotfix.1 plus four commits; the parts named here are the same in both).
 
 ---
 
