@@ -34,7 +34,8 @@ Prototypes are throwaway. They're for learning, not for locking in the format. T
 - [x] Range reads of partially available files: only the chunks a range needs, fetched on demand ([ADR-0002](adr/0002-os-integration.md)).
 - [x] Request privacy: per-chunk access proofs (no file token on the wire), one-item requests (`--private-requests`, `batch: 1`), PADMÉ padding with padding fetched like data, per-record personal secrets (versions dedup) ([ADR-0008](adr/0008-chunk-encryption-and-cid.md), [ADR-0010](adr/0010-continuous-seeking.md)).
 - [ ] Request privacy, continued: sliced `have` per peer, decoy prefixes, several links with jitter.
-- [ ] Holder map: per-chunk/per-group holders from receipts, `have` answers, hints and announces; source ranking, load spreading, failover, measured copy counts.
+- [x] Where a library's copies are, said in the library: a `retifs.holders` record per writing node, so every member reads files placed by a node that's away; readers keeping content are peers too (`/retifs/reader`) ([ADR-0035](adr/0035-holders-in-the-library.md)).
+- [ ] Holder map: per-chunk/per-group holders from receipts, `have` answers, hints and announces; source ranking, load spreading, failover, measured copy counts. Hints, placement records, `retifs.holders` and `retifs status` (holders, confirmed, same site) stand in for it so far.
 - [ ] Holder hints in read-caps; store generation counter in announces.
 - [x] Leases, renewals, receipts, storage proofs; `retifsd --hold-for-others`, `retifs replicate`; vectors verified against RNS (decision 6, [ADR-0010](adr/0010-continuous-seeking.md)).
 - [x] Placement follows need, first slice ([ADR-0014](adr/0014-placement-follows-need.md)): every node holds for others by default; storage nodes recognised from announces (hops); push after lease with `have` first; automatic leases to the nearest nodes by writers and readers until a loss target is met; holder reliability record; lazy repair.
@@ -46,7 +47,9 @@ Prototypes are throwaway. They're for learning, not for locking in the format. T
 - [x] Trimming surplus copies with hysteresis; holders whose lease ran out are forgotten, not re-offered ([ADR-0014](adr/0014-placement-follows-need.md)).
 - [x] Mixed leases: per-holder packing sorted by CID, stale leases repacked at renewal ([ADR-0014](adr/0014-placement-follows-need.md)).
 - [x] Signed channels: commits, heads, `/retifs/head`, follow with automatic updates, followers mirror ([ADR-0015](adr/0015-signed-channels.md)).
-- [ ] Placement, continued: offer in announces (needs announce app data from Prns), merging small leases per holder at renewal.
+- [x] Copies by policy: at least three of every needed file, a library's own number (`retifs ns copies NS N`), one copy at another site, trimming never takes the last copy at another site; `retifs nodes` lists the storage nodes placement knows ([ADR-0011](adr/0011-redundancy-by-default.md), [ADR-0014](adr/0014-placement-follows-need.md)).
+- [x] Announce app data (Prns 0.3.8): a `retifs.node` announce states its interval (a node missing 5 gets no new leases) and whether it holds for others ([ADR-0014](adr/0014-placement-follows-need.md)).
+- [ ] Placement, continued: the capacity offer (free capacity, term) in announce app data, merging small leases per holder at renewal.
 - [ ] Own-node pool on a LAN, replication target, repair, storage proofs ([ADR-0011](adr/0011-redundancy-by-default.md)).
 - [ ] Volunteer storage offers (`retifs.store`).
 - [ ] Diffuse mode: anonymous push seeding, epidemic re-replication with jitter, cover holdings ([ADR-0011](adr/0011-redundancy-by-default.md)).
@@ -99,16 +102,23 @@ Prototypes are throwaway. They're for learning, not for locking in the format. T
 - [x] Albums in the file views (`retifs-tree`): a file whose `album` names albums is also under `/Albums/<album>/`; deleting it there takes it out of the album ([ADR-0002](adr/0002-os-integration.md), [ADR-0026](adr/0026-photos-thumbnails-albums.md)).
 - [x] Packaging, first step: systemd user units for retifsd, retifs-mount@<namespace> and retifs-gateway (`packaging/systemd`), and "Try it" in the README.
 - [x] Debian packages (`packaging/deb`, amd64 and arm64): retifsd and the tools as user services; Reticulum (Prns or another shared instance) installed apart.
+- [x] retifsd mounts every library itself in `~/retifs` ([ADR-0035](adr/0035-holders-in-the-library.md)); a `.deb` for glibc 2.31 (Debian 11, Ubuntu 20.04 and 22.04, elementary OS 6 and 7); the apps also as Flatpaks; packages don't bring prnsd ([getting started](getting-started.md)).
+- [x] Every install joins the library `retifs-installers`, where new versions of retifs and the apps arrive.
 - [ ] Linux, continued: FUSE passthrough, several namespaces in one mount, an Alpine package (apk).
 - [ ] apkovl in the user namespace.
 
 ## Later: user clients (Android, Linux, Haiku, Windows)
-- [ ] An app in the spirit of the Nextcloud mobile and desktop clients, on `libretifs` (locally) or `--via` an own node (phones): browse namespaces and records, search (local, own node, blind index), import and export files, keep rules per device, sharing (addresses, grants, search capabilities). Native per platform: Android, a Linux desktop app, Haiku (Tracker already shows attributes), Windows.
+- [x] First clients: the desktop utility (`retifs-desktop`: libraries, invitations and links, members, leaving and deleting, announced public libraries) on Linux and Windows; the Android app (`retifs-android`: retifsd on the phone, apps asking it for libraries). Code in their own repositories ([getting started](getting-started.md)).
+- [ ] Clients, continued: an app in the spirit of the Nextcloud mobile and desktop clients: browse records, search (local, own node, blind index), import and export files, keep rules per device, search capabilities. Haiku (Tracker already shows attributes).
 - [x] Attributes from what's in files, for every file that enters: `retifs-extractd` (EXIF, audio tags, document properties, types; [ADR-0023](adr/0023-attribute-extraction.md)).
-- [ ] Conventions first: attribute keys and block roles per media type (image, audio, video, document), the mapping from EXIF and audio tags, time and location formats, thumbnail roles. One library, many apps (and Haiku's Tracker) reading the same records; also settles content-bound attributes (decision 7).
-- [ ] Apps on those records, iterated one at a time:
-  - photo suite in the spirit of Immich: albums as queries, thumbnail blocks, phone backup via the own node, timeline and map from range queries, faces and tags computed on own devices, shared albums as namespaces or grants;
-  - music player: library from audio tags, playback over range reads, offline by keep rules per device, playlists as records holding queries.
+- [x] Conventions, first: keys per media type from the extractor (time ISO 8601, `geo` as [lat, lon]; [ADR-0023](adr/0023-attribute-extraction.md)), a record's type is a MIME type ([ADR-0025](adr/0025-types-are-mime-types.md)), block roles and thumbnails, albums, favourites ([ADR-0026](adr/0026-photos-thumbnails-albums.md)), people and events ([ADR-0024](adr/0024-people-and-events.md)), places ([ADR-0027](adr/0027-places.md)).
+- [ ] Conventions, continued: content-bound attributes (decision 7; the `extracted` marker stands in), video frames as thumbnails, Haiku's media attributes (`Audio:Artist`, `Media:Width`) as views of retifs keys.
+- [ ] Apps on those records, iterated one at a time (each in its own repository):
+  - [x] photos, first: phone backup with thumbnails, favourites, albums (also moved between libraries), on Android, Linux and Haiku;
+  - [x] map ([ADR-0028](adr/0028-maps-over-retifs.md)), contacts and calendars ([ADR-0024](adr/0024-people-and-events.md)): the map from public libraries, an address book in `me`, a calendar per library holding events;
+  - [ ] photos, continued: timeline from range queries, shared albums as shares in the app, faces computed on own devices (`retifs-facesd`, [ADR-0026](adr/0026-photos-thumbnails-albums.md));
+  - [ ] contacts and calendars as Android system sync adapters;
+  - [ ] music player: library from audio tags, playback over range reads, offline by keep rules per device, playlists as records holding queries.
 
 ## Windows client
 - [x] Cloud Files provider (`retifs-cloudfiles`): a namespace as a sync root, placeholders hydrated on demand, remote changes followed, keep tags as "Always keep on this device" / "Free up space" ([ADR-0002](adr/0002-os-integration.md)).
@@ -116,6 +126,7 @@ Prototypes are throwaway. They're for learning, not for locking in the format. T
 - [x] Holding up in Explorer: `cloud-filter` vendored and patched (a failed read reports its range, no panic on failure), placeholders filled folders first, reads waiting for content that keeps arriving (up to 10 min), Explorer told when a folder's entries change.
 - [x] Installer: `retifs-setup.exe`, per user (`packaging/windows`).
 - [x] Share with retifs… in Explorer's context menu ([ADR-0021](adr/0021-shares.md)): a classic verb ("Show more options" on Windows 11), the recipient's command on the clipboard.
+- [x] Setup brings Photos and Map where their repositories have a Windows front end; `retifs:` links open the utility.
 - [ ] In Windows 11's top-level menu (a packaged `IExplorerCommand`), a share dialog (in the desktop utility); attributes as properties and columns.
 
 ## Phase 5: thin client
@@ -126,7 +137,8 @@ Prototypes are throwaway. They're for learning, not for locking in the format. T
 - [x] retifsd and the `retifs` CLI on Haiku (2026-10-30): built natively on a Haiku nightly with HaikuPorts' Rust, with one small Prns patch (TCP keepalive options); the node ran against a shared instance on another machine, heard and joined public libraries and held copies for others.
 - [x] prnsd on Haiku (2026-10-30), from a Haiku branch of Prns kept for upstream: mDNS LAN discovery left out (Haiku has no `IP_PKTINFO`), `if-addrs` and `mio` patched (on Haiku an accepted socket does not inherit non-blocking mode), lifecycle locks through `flock`. A Haiku node runs on its own: prnsd connected to another node, retifsd on it, a public library heard, joined and searched.
 - [ ] RNode over USB serial on Haiku; retifsd with the same `mio` fix (until mio has it).
-- [ ] userlandfs native frontend (attributes and live queries in Tracker). Started (2026-10-31): `retifs-haikufs`, a userlandfs module with Haiku's kernel file system interface. A namespace mounts as a volume; directories, contents and each record's attributes as Haiku typed attributes (`BEOS:TYPE` from the record's MIME `type`), so Tracker shows them as columns. Queries in Haiku's query language (`query`, Tracker's Find), live ones included: the exact string parts go to retifs as terms (its index, a search node for a library held in part), the whole expression filters; `lsindex` lists the namespace's attributes. Writing (2026-11-01): new files, contents (through the daemon's write sessions, one version per close, `O_APPEND` too), directories, moves, deletes, size and time, and attributes written and removed, each one commit as in the FUSE mount; node monitors are told, so Tracker windows follow. Contacts (`application/x-person`, ADR-0025) carry Haiku People's `META:` attributes as views of their keys (`META:company` is `org`, `META:wphone` `phone:work`), so People opens, edits and makes retifs contacts. Tracker's own attributes (`_trk/…`) and any on a directory without a record stay with the mount.
+- [x] Haiku packages (`prns`, `retifs`): retifsd mounts every library as a volume in `~/retifs` after Tracker and Deskbar are up; a left library's volume goes.
+- [x] userlandfs native frontend (attributes and live queries in Tracker), 2026-10-31: `retifs-haikufs`, a userlandfs module with Haiku's kernel file system interface. A namespace mounts as a volume; directories, contents and each record's attributes as Haiku typed attributes (`BEOS:TYPE` from the record's MIME `type`), so Tracker shows them as columns. Queries in Haiku's query language (`query`, Tracker's Find), live ones included: the exact string parts go to retifs as terms (its index, a search node for a library held in part), the whole expression filters; `lsindex` lists the namespace's attributes. Writing (2026-11-01): new files, contents (through the daemon's write sessions, one version per close, `O_APPEND` too), directories, moves, deletes, size and time, and attributes written and removed, each one commit as in the FUSE mount; node monitors are told, so Tracker windows follow. Contacts (`application/x-person`, ADR-0025) carry Haiku People's `META:` attributes as views of their keys (`META:company` is `org`, `META:wphone` `phone:work`), so People opens, edits and makes retifs contacts. Tracker's own attributes (`_trk/…`) and any on a directory without a record stay with the mount.
 - [ ] hpkg driver reading from retifs.
 
 After each phase there is a usable system.
