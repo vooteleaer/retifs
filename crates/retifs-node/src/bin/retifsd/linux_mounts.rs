@@ -101,7 +101,33 @@ fn unmount(store: &Path, ns: &str) {
     println!("mounts: {ns} unmounted from {}", dir.display());
 }
 
+/// "Share with retifs…" for the file managers that are here (ADR-0021):
+/// Nautilus's scripts folder and Dolphin's service menus, in the user's own
+/// folders. Written when missing or different; nothing for one not installed.
+fn file_manager_menus() {
+    let on_path = |exe: &str| std::env::var_os("PATH").is_some_and(|p| std::env::split_paths(&p).any(|d| d.join(exe).is_file()));
+    let share = home().join(".local/share");
+    let menus: [(&str, PathBuf, &str); 2] = [
+        ("nautilus", share.join("nautilus/scripts/Share with retifs"), include_str!("../../../../../packaging/linux/share-nautilus.sh")),
+        ("dolphin", share.join("kio/servicemenus/retifs-share.desktop"), include_str!("../../../../../packaging/linux/retifs-share.desktop")),
+    ];
+    for (exe, path, text) in menus {
+        if !on_path(exe) || std::fs::read_to_string(&path).is_ok_and(|t| t == text) {
+            continue;
+        }
+        let written = path.parent().map_or(Ok(()), std::fs::create_dir_all).and_then(|_| std::fs::write(&path, text)).and_then(|_| {
+            use std::os::unix::fs::PermissionsExt;
+            std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o755))
+        });
+        match written {
+            Ok(()) => println!("mounts: Share with retifs added to {exe} ({})", path.display()),
+            Err(e) => eprintln!("mounts: {}: {e}", path.display()),
+        }
+    }
+}
+
 pub async fn keeper(d: Arc<Daemon>, store: PathBuf) {
+    file_manager_menus();
     if !Path::new("/dev/fuse").exists() {
         eprintln!("mounts: no /dev/fuse here: libraries aren't mounted as folders");
         return;

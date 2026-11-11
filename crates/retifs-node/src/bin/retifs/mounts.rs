@@ -48,6 +48,24 @@ fn read(store: &Path, ns: &str) -> Option<Mounted> {
     Some(Mounted { ns: ns.to_string(), pid, dir, via })
 }
 
+/// The library a path is in, among those mounted from this store: its name,
+/// and the path inside it as the file tree names it (`/a/b.jpg`).
+pub fn library_of(store: &Path, path: &Path) -> Option<(String, String)> {
+    let path = std::fs::canonicalize(path).ok()?;
+    let mut best: Option<(String, String, usize)> = None;
+    for m in all(store) {
+        let dir = std::fs::canonicalize(&m.dir).unwrap_or(m.dir.clone());
+        if let Ok(rel) = path.strip_prefix(&dir) {
+            let depth = dir.components().count();
+            if best.as_ref().is_none_or(|b| depth > b.2) {
+                let parts: Vec<String> = rel.components().map(|c| c.as_os_str().to_string_lossy().into_owned()).collect();
+                best = Some((m.ns.clone(), format!("/{}", parts.join("/")), depth));
+            }
+        }
+    }
+    best.map(|(ns, p, _)| (ns, p))
+}
+
 fn all(store: &Path) -> Vec<Mounted> {
     let Ok(entries) = std::fs::read_dir(mounts_dir(store)) else { return Vec::new() };
     let mut out: Vec<Mounted> = entries

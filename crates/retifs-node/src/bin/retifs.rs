@@ -29,6 +29,7 @@
 //!     retifs [--store DIR] ns join NAME ADDRESS [--from NODE]... [--lazy]
 //!     retifs [--store DIR] ns grant NS WRITER [--grant] [--keys K1,K2,@content,@delete] [--until YYYY-MM-DD|+30d] [--from NODE]... | ns revoke NS WRITER
 //!     retifs [--store DIR] share create NAME --from NS [TERM]... [--id ID]... [--omit KEY]... [--keep KEY]... [--qr] | share list NS | share rm NS ID
+//!     retifs [--store DIR] share path PATH... [--omit KEY]... [--keep KEY]...
 //!     retifs [--store DIR] ns link NS [--name LABEL] [--q TERMS] [--qr] | open LINK [--as NAME]
 //!     retifs [--store DIR] query NS[,NS]|'*' TERM... --save NAME | saved [list] | saved run NAME [--watch] | saved rm NAME
 //!     retifs [--store DIR] mount [NS [DIR] [--foreground] [--via NODE] | --all] | unmount NS [--forget]
@@ -78,6 +79,7 @@ fn usage() -> ! {
          retifs [--store DIR] ns announce NS [off] [--name LABEL] [--about TEXT] | heard | ns leave NS [--mine] | ns delete NS --yes\n\
          retifs [--store DIR] ns grant NS WRITER [--grant] [--from NODE]... | ns revoke NS WRITER\n\
          retifs [--store DIR] share create NAME --from NS [TERM]... [--id ID]... [--omit KEY]... [--keep KEY]... [--qr] | share list NS | share rm NS ID\n\
+         retifs [--store DIR] share path PATH... [--omit KEY]... [--keep KEY]...\n\
          retifs [--store DIR] ns link NS [--name LABEL] [--q TERMS] [--qr] | open LINK [--as NAME] | ns join NAME LINK\n\
          retifs [--store DIR] query NS[,NS]|'*' TERM... --save NAME | saved [list] | saved run NAME [--watch] | saved rm NAME\n\
          retifs [--store DIR] mount [NS [DIR] [--foreground] [--via NODE] | --all] | unmount NS [--forget]\n\
@@ -666,6 +668,63 @@ async fn main() {
             let rest: Vec<String> = it.collect();
             let opt = |flag: &str| -> Vec<String> { rest.windows(2).filter(|w| w[0] == flag).map(|w| w[1].clone()).collect() };
             match sub.as_str() {
+                // Files, or one folder, in a mounted library (a file manager's
+                // "Share with retifs…"): a share of them, its link printed
+                // and put on the clipboard.
+                "path" => {
+                    let paths: Vec<PathBuf> = rest.iter().filter(|a| !a.starts_with("--")).map(PathBuf::from).collect();
+                    if paths.is_empty() {
+                        usage();
+                    }
+                    let mut source: Option<String> = None;
+                    let (mut terms, mut ids) = (Vec::new(), Vec::new());
+                    for p in &paths {
+                        let (ns, tree) = mounts::library_of(&store, p).unwrap_or_else(|| fail(format!("{} isn't in a retifs folder", p.display())));
+                        if source.as_ref().is_some_and(|s| *s != ns) {
+                            fail("these are in different libraries: share them one library at a time");
+                        }
+                        source = Some(ns.clone());
+                        if p.is_dir() {
+                            if paths.len() > 1 {
+                                fail("share one folder at a time, or files");
+                            }
+                            terms.push(format!("path^={}", if tree == "/" { "/".to_string() } else { format!("{tree}/") }));
+                        } else {
+                            let found = match client.call(libretifs::Request::Query { ns: ns.clone(), terms: vec![format!("path={tree}")], at: None }).await.unwrap_or_else(|e| fail(e)) {
+                                libretifs::Response::Records { records } => records,
+                                libretifs::Response::Error { message } => fail(message),
+                                _ => fail("unexpected response"),
+                            };
+                            let r = found.first().unwrap_or_else(|| fail(format!("{} isn't in retifs yet, or is shown in a folder of its own (an album): share it from where it is", p.display())));
+                            ids.push(r.id.clone());
+                        }
+                    }
+                    let source = source.unwrap_or_else(|| usage());
+                    let base = paths[0].file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_else(|| source.clone());
+                    let taken = match client.call(libretifs::Request::Namespaces).await.unwrap_or_else(|e| fail(e)) {
+                        libretifs::Response::Names { names } => names,
+                        _ => Vec::new(),
+                    };
+                    let wanted = libretifs::link::suggest_name(&base);
+                    let name = (1..).map(|i| if i == 1 { wanted.clone() } else { format!("{wanted}-{i}") }).find(|n| !taken.contains(n)).unwrap();
+                    let req = libretifs::Request::ShareCreate { source: source.clone(), name, terms, ids, omit: opt("--omit"), keep: opt("--keep") };
+                    match client.call(req).await.unwrap_or_else(|e| fail(e)) {
+                        libretifs::Response::Namespace(v) => {
+                            let (node, _, _) = client.ping().await.unwrap_or_else(|e| fail(e));
+                            let link = libretifs::link::Link::namespace(&v.address, &[node], Some(&base)).to_string();
+                            let copied = copy_to_clipboard(&link);
+                            println!(
+                                "\u{201c}{base}\u{201d} is shared as {} ({} record{}), kept up to date while it changes.\n\nTo give it to someone, send them this link{}:\n\n{link}\n\nThey open it with retifs. They can read it; nothing else of {source} is in it.",
+                                v.name,
+                                v.records,
+                                if v.records == 1 { "" } else { "s" },
+                                if copied { " (it's on the clipboard)" } else { "" },
+                            );
+                        }
+                        libretifs::Response::Error { message } => fail(message),
+                        _ => fail("unexpected response"),
+                    }
+                }
                 "create" => {
                     let name = rest.first().cloned().unwrap_or_else(|| usage());
                     let source = opt("--from").pop().unwrap_or_else(|| usage());
@@ -1418,4 +1477,25 @@ mod tests {
         assert!(super::parse_time("+3w").is_err());
         assert!(super::parse_time("tomorrow").is_err());
     }
+}
+
+/// Puts `text` on the clipboard with whatever the system has for it; false if nothing did.
+fn copy_to_clipboard(text: &str) -> bool {
+    use std::io::Write;
+    use std::process::{Command, Stdio};
+    let tools: &[(&str, &[&str])] = if cfg!(windows) {
+        &[("clip.exe", &[])]
+    } else if cfg!(target_os = "macos") {
+        &[("pbcopy", &[])]
+    } else {
+        &[("wl-copy", &[]), ("xclip", &["-selection", "clipboard"]), ("xsel", &["--clipboard", "--input"])]
+    };
+    for (tool, args) in tools {
+        let Ok(mut child) = Command::new(tool).args(*args).stdin(Stdio::piped()).stdout(Stdio::null()).stderr(Stdio::null()).spawn() else { continue };
+        let wrote = child.stdin.take().is_some_and(|mut s| s.write_all(text.as_bytes()).is_ok());
+        if wrote && child.wait().is_ok_and(|s| s.success()) {
+            return true;
+        }
+    }
+    false
 }
