@@ -129,6 +129,24 @@ pub fn library_destination(identity: IdentitySecret) -> PreConfiguredDestination
     }
 }
 
+/// The node's `retifs.keyring` destination (ADR-0033): a node keeping the
+/// user's keyring announces it, its app data a tag only the recovery words
+/// can check. It serves nothing.
+pub fn keyring_destination(identity: IdentitySecret) -> PreConfiguredDestination<'static> {
+    PreConfiguredDestination::Single {
+        request_endpoints: ServeMyRequestEndpoints::No,
+        resource_strategy: ResourceStrategy::Accept { max_uncompressed_bytes: 0, accept_compressed: false },
+        maximum_request_bytes: Default::default(),
+        app_name: APP_NAME,
+        aspects: &["keyring"],
+        identity,
+        announce_app_data: b"",
+        proof: ProofStrategy::ProveAll,
+        link_requests: LinkRequestPolicy::AcceptAll,
+        ratchet: RatchetPolicy::NoRatchets,
+    }
+}
+
 pub fn parse_destination(hex_str: &str) -> Option<DestinationHash> {
     let bytes = hex::decode(hex_str.trim().trim_start_matches('<').trim_end_matches('>')).ok()?;
     DestinationHash::from_slice(&bytes)

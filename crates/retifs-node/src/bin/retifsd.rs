@@ -1973,6 +1973,8 @@ async fn serve(store: Arc<SlabStore>, identity: node::IdentitySecret, endpoint: 
     let identity_bytes: [u8; 64] = identity[..].try_into().expect("RNS identity secrets are 64 bytes");
     let lib_dest = node::library_destination(identity.clone());
     let lib_hash = lib_dest.destination_hash().expect("valid destination");
+    let keyring_dest = node::keyring_destination(identity.clone());
+    let keyring_hash = keyring_dest.destination_hash().expect("valid destination");
     let dest = node::destination_announcing(identity, true, args.announce_s, args.site.as_deref().map(retifs_core::announce::site_tag), args.hold_limit != Some(0));
     if let Some(site) = &args.site {
         println!("site: {site} (one copy of this node's files is kept at another site)");
@@ -2008,7 +2010,7 @@ async fn serve(store: Arc<SlabStore>, identity: node::IdentitySecret, endpoint: 
     });
     let nn_hash = nomadnet.as_ref().map(|d| d.destination_hash().expect("valid destination"));
     let (nn_tx, nn_rx) = mpsc::unbounded_channel::<(RequestPathHash, RespondToken)>();
-    let mut destinations = vec![dest, lib_dest];
+    let mut destinations = vec![dest, lib_dest, keyring_dest];
     destinations.extend(nomadnet);
     let node = PrnsNode::new(PrnsNodeRecipe {
         transport_identity: None,
@@ -2303,7 +2305,7 @@ async fn serve(store: Arc<SlabStore>, identity: node::IdentitySecret, endpoint: 
     if args.spare {
         worker("spare", spare_filler(daemon.clone()));
     }
-    worker("seeker", seeker(daemon));
+    worker("seeker", seeker(daemon.clone()));
 
     // Keep within the disk budget even when other programs fill the volume (ADR-0012).
     let budget_store = store.clone();
@@ -2324,6 +2326,26 @@ async fn serve(store: Arc<SlabStore>, identity: node::IdentitySecret, endpoint: 
         println!("NomadNet node \"{}\" <{}> serving namespace {ns}", args.nomadnet_name, destination_hex(&nn));
         worker("nomadnet", nomadnet::serve(daemon_for_nn.clone(), handle.clone(), nn, ns, args.nomadnet_name.clone(), nn_rx));
     }
+
+    let keyring_announcer = handle.clone();
+    let keyring_daemon = daemon.clone();
+    let keyring_every = args.announce_s;
+    worker("keyring announces", async move {
+        // A node keeping the user's keyring says so, in a tag only the
+        // recovery words can check (ADR-0033); one that doesn't keep it is silent.
+        let mut tick = tokio::time::interval(Duration::from_secs(keyring_every as u64));
+        loop {
+            tick.tick().await;
+            let Some(locator) = keyring_locator(&keyring_daemon) else { continue };
+            let tag = locator.tag(&keyring_daemon.node_id);
+            let Ok(bytes) = personal_rns::routing::announce::emit::AnnounceAppDataBytes::from_slice(&tag) else { continue };
+            let cmd = PrnsCommand::AnnounceNow(AnnounceNow { destination: keyring_hash, target: AnnounceTarget::AllInterfaces, app_data: AnnounceAppData::Data(bytes) });
+            if keyring_announcer.issue(cmd).is_none() {
+                return;
+            }
+        }
+    });
+    worker("keyring", keyring_keeper(daemon.clone()));
 
     let announcer = handle.clone();
     let announce_every = args.announce_s;
@@ -3601,6 +3623,8 @@ async fn handle(d: &Daemon, req: Request) -> Result<Response, String> {
             entries.reverse(); // newest first
             Ok(Response::History { entries })
         }
+
+        Request::RecoveryCreate => recovery_create(d).await,
 
         Request::NomadNetPage { node, path, fields } => {
             if !path.starts_with('/') || path.len() > 512 || path.contains("..") {
@@ -5093,6 +5117,168 @@ async fn fetch_range(d: &Daemon, file: &FileRef, range: Option<std::ops::Range<u
             } else {
                 format!("{}: no reachable peer has the {} chunk(s) this read needs", file.root, missing.len())
             });
+        }
+    }
+}
+
+/// The local name of the user's keyring library (ADR-0033).
+const KEYRING: &str = "keyring";
+/// The keyring's record holding the locator, which tags its announces.
+const RECOVERY_TYPE: &str = "retifs.recovery";
+/// A keyring record naming one of the user's libraries.
+const KEYRING_LIBRARY_TYPE: &str = "retifs.library";
+
+/// The locator the keyring holds, if this node keeps one.
+fn keyring_locator(d: &Daemon) -> Option<retifs_core::recovery::Locator> {
+    let term = retifs_store::Term::parse(&format!("type={RECOVERY_TYPE}")).ok()?;
+    let r = d.store.query(KEYRING, &[term]).ok()?.into_iter().next()?;
+    let Some(Value::Str(h)) = r.attrs.get("locator") else { return None };
+    let bytes: [u8; 32] = (0..32).map(|i| u8::from_str_radix(h.get(2 * i..2 * i + 2)?, 16).ok()).collect::<Option<Vec<u8>>>()?.try_into().ok()?;
+    Some(retifs_core::recovery::Locator(bytes))
+}
+
+/// One commit in library `ns` as the writer whose signing seed is `seed`
+/// (the recovery identity, ADR-0033), whose key isn't kept: the commit's
+/// head is kept as that writer's, as another writer's would be, so the
+/// chain is served and merged; the seed is forgotten.
+async fn commit_as(d: &Daemon, ns: &str, seed: [u8; 32], ops: Vec<Op>) -> Result<(), String> {
+    let addr = current_addr(d, ns)?;
+    let name = format!("recovery:{ns}");
+    let key = ChannelKey::from_secrets(seed, addr.read_key);
+    d.store.create_channel(&name, seed, addr.read_key).map_err(|e| e.to_string())?;
+    if key.writer() != addr.writer {
+        d.store.set_member_channel(&name, &addr.ns_id()).map_err(|e| e.to_string())?;
+    }
+    let not_before = ns_entry_get(d, ns).and_then(|e| e.lock().unwrap().applied.values().map(|(_, t, _)| t + 1).max()).unwrap_or(0);
+    let published = publish_channel(d, &name, OpsFile { ops }.encode(), false, not_before).await;
+    if published.is_ok()
+        && let Ok(Some(c)) = d.store.own_channel(&name)
+        && let Some(commit) = c.last
+    {
+        d.store
+            .set_writer_head(&addr.ns_id(), &retifs_store::WriterHead { writer: key.writer(), head: c.head.clone(), commit })
+            .map_err(|e| e.to_string())?;
+    }
+    d.store.remove_own_channel(&name).map_err(|e| e.to_string())?;
+    published?;
+    materialize(d, ns)?;
+    Ok(())
+}
+
+/// Whether this node may grant in library `ns`: its creator, or a writer holding `grant`.
+fn may_grant(d: &Daemon, ns: &str) -> bool {
+    let (Ok(addr), Ok(own), Ok(merged)) = (current_addr(d, ns), own_writer(d, ns), materialize(d, ns)) else { return false };
+    own == addr.writer || merged.writers.get(&own).is_some_and(|r| r.contains(&Right::Grant))
+}
+
+/// Makes the recovery kit (ADR-0033): a new seed, the keyring created by its
+/// identity (one commit, granting this node `write` and `grant`, then the
+/// seed is forgotten), and the identity granted `write` and `grant` in every
+/// library this node may grant in. The words are returned once.
+async fn recovery_create(d: &Daemon) -> Result<Response, String> {
+    if d.store.ns_info(KEYRING).map_err(|e| e.to_string())?.is_some() {
+        return Err(format!("this node keeps a keyring already (a recovery kit was made); a new kit needs the old identity revoked first"));
+    }
+    let seed = retifs_core::recovery::RecoverySeed::generate();
+    let secret = seed.identity_secret();
+    let creator_seed: [u8; 32] = secret[32..].try_into().expect("32 bytes");
+    let read_key = seed.keyring_read_key();
+    d.store.set_ns_info(KEYRING, &seed.writer(), &read_key).map_err(|e| e.to_string())?;
+    // This node's own writer in the keyring, as in any library it joins.
+    let mut identity = [0u8; 64];
+    getrandom::fill(&mut identity).expect("OS entropy");
+    let member_seed: [u8; 32] = identity[32..].try_into().expect("32 bytes");
+    let ns_id = retifs_core::channel::ns_id(&seed.writer());
+    d.store.create_channel(&ns_channel(KEYRING), member_seed, read_key).map_err(|e| e.to_string())?;
+    d.store.set_member_channel(&ns_channel(KEYRING), &ns_id).map_err(|e| e.to_string())?;
+    d.store.set_ns_identity(KEYRING, &identity).map_err(|e| e.to_string())?;
+    let member_writer = ChannelKey::from_secrets(member_seed, read_key).writer();
+    commit_as(d, KEYRING, creator_seed, vec![Op::Identity(keywrap::public(&secret)), Op::Grant(member_writer, vec![Right::Write, Right::Grant])]).await?;
+    // This node's first commit: its identity and node, and the locator for the keyring's announces.
+    let rid = getrandom_id();
+    write_ops(
+        d,
+        KEYRING,
+        vec![
+            Op::Identity(keywrap::public(&identity)),
+            Op::Node(own_node(d)?),
+            Op::Set(rid, "type".into(), Value::Str(RECOVERY_TYPE.into())),
+            Op::Set(rid, "locator".into(), Value::Str(hex(&seed.locator().0))),
+        ],
+    )
+    .await?;
+    let (covered, not_covered) = keep_keyring(d).await?;
+    println!("recovery kit made: {} librar(ies) covered, {} not", covered.len(), not_covered.len());
+    Ok(Response::RecoveryKit { words: seed.words().into_iter().map(String::from).collect(), covered, not_covered })
+}
+
+/// A new random record ID.
+fn getrandom_id() -> RecordId {
+    let mut id = [0u8; 16];
+    getrandom::fill(&mut id).expect("OS entropy");
+    id
+}
+
+/// Keeps the keyring current (ADR-0033): a record per library this node
+/// has (its name and address, the read key with it), updated when the
+/// address changes (a rekey) and removed when the library is left; and the
+/// recovery identity granted in every library this node may grant in.
+/// Returns the libraries covered (the identity holds `grant` there) and not.
+async fn keep_keyring(d: &Daemon) -> Result<(Vec<String>, Vec<String>), String> {
+    let Some((recovery, _)) = d.store.ns_info(KEYRING).map_err(|e| e.to_string())? else { return Ok((Vec::new(), Vec::new())) };
+    let term = retifs_store::Term::parse(&format!("type={KEYRING_LIBRARY_TYPE}")).map_err(|e| e.to_string())?;
+    let mut listed: HashMap<String, (RecordId, String)> = HashMap::new();
+    for r in d.store.query(KEYRING, &[term]).map_err(|e| e.to_string())? {
+        if let (Some(Value::Str(name)), Some(Value::Str(address))) = (r.attrs.get("name"), r.attrs.get("address")) {
+            listed.insert(name.clone(), (r.id, address.clone()));
+        }
+    }
+    let mut ops = Vec::new();
+    let (mut covered, mut not_covered) = (Vec::new(), Vec::new());
+    let libraries: Vec<String> = visible_namespaces(d)?.into_iter().filter(|n| n != KEYRING && !n.starts_with("ch-")).collect();
+    for ns in &libraries {
+        let Ok(address) = current_addr(d, ns).map(|a| a.to_string()) else { continue };
+        match listed.get(ns) {
+            Some((_, a)) if *a == address => {}
+            Some((id, _)) => ops.push(Op::Set(*id, "address".into(), Value::Str(address))),
+            None => {
+                let id = getrandom_id();
+                ops.push(Op::Set(id, "type".into(), Value::Str(KEYRING_LIBRARY_TYPE.into())));
+                ops.push(Op::Set(id, "name".into(), Value::Str(ns.clone())));
+                ops.push(Op::Set(id, "address".into(), Value::Str(address)));
+            }
+        }
+        let holds = |d: &Daemon| materialize(d, ns).is_ok_and(|m| m.writers.get(&recovery).is_some_and(|r| r.contains(&Right::Grant)));
+        if !holds(d) && may_grant(d, ns) {
+            if let Err(e) = write_ops(d, ns, vec![Op::Grant(recovery, vec![Right::Write, Right::Grant])]).await {
+                eprintln!("keyring: granting the recovery identity in {ns}: {e}");
+            }
+        }
+        if holds(d) { covered.push(ns.clone()) } else { not_covered.push(ns.clone()) }
+    }
+    for (name, (id, _)) in &listed {
+        if !libraries.contains(name) {
+            ops.push(Op::Delete(*id));
+        }
+    }
+    if !ops.is_empty() {
+        write_ops(d, KEYRING, ops).await?;
+    }
+    Ok((covered, not_covered))
+}
+
+/// Keeps the keyring current once a minute, on a node that keeps one.
+async fn keyring_keeper(d: Arc<Daemon>) {
+    let mut tick = tokio::time::interval(Duration::from_secs(60));
+    loop {
+        tick.tick().await;
+        if stopping() {
+            return;
+        }
+        if d.store.ns_info(KEYRING).ok().flatten().is_some()
+            && let Err(e) = keep_keyring(&d).await
+        {
+            eprintln!("keyring: {e}");
         }
     }
 }

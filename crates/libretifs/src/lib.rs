@@ -389,6 +389,10 @@ pub enum Request {
     /// Owner only: stop the daemon cleanly (its store closed), as SIGTERM
     /// does; for Windows, where no signal reaches a console-less process.
     Stop,
+    /// Owner only: makes the user's recovery kit (ADR-0033): 24 words, shown
+    /// once and kept nowhere, for an identity granted in every library this
+    /// node may grant in, and the keyring that lists them.
+    RecoveryCreate,
     /// Owner only: a page or file from a NomadNet node over Reticulum, for
     /// browsing NomadNet through the gateway. `node`: its `nomadnetwork.node`
     /// address (32 hex digits); `path`: `/page/index.mu`, `/file/…`;
@@ -601,6 +605,8 @@ pub struct RecordView {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(tag = "result", rename_all = "snake_case")]
 pub enum Response {
+    /// A new recovery kit: its words (shown once), and the libraries it covers and doesn't.
+    RecoveryKit { words: Vec<String>, covered: Vec<String>, not_covered: Vec<String> },
     /// A live query's answer: `records` when it changed, else none.
     LiveRecords { digest: String, records: Option<Vec<RecordView>> },
     /// A NomadNet page or file (NomadNetPage).

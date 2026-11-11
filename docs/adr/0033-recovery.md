@@ -36,7 +36,7 @@ The [threat model](../04-threat-model.md) already speaks of a device key "revoke
 
 ### A member of every library
 - When the user makes a recovery kit, each of the user's devices that holds `grant` grants the recovery identity `write` and `grant` in each library it may (an ordinary grant, ADR-0017). A new library made afterwards grants it at once. Libraries where no device of the user's holds `grant` are listed as not recoverable.
-- Being a writer, it's sent every rekey (a revoke wraps the new read key to each remaining writer), so it keeps reading after revocations, without being online.
+- ~~Being a writer, it's sent every rekey~~ (2026-11-11): it reads current read keys from the keyring instead, which the user's devices keep up to date (see Implementation status).
 - It never writes in normal use. It's online only during a recovery.
 
 ### The keyring
@@ -70,4 +70,8 @@ Every library should have a second grant holder on another device: `retifs ns gr
 ## Implementation status (2026-11-11)
 - **Derivation, fixed:** `retifs_core::recovery`. The words are BIP-39 English over the 32-byte seed and its checksum byte (not BIP-39's PBKDF2 seed: the seed itself is the key material); `k(info) = HKDF-SHA256(ikm = seed, salt = "retifs/v1/recovery", info)`; identity secret `k("x25519") ‖ k("ed25519")`; keyring writer its Ed25519 public key, `ns_id` as for any library; first read key `k("keyring-read")`; locator `k("keyring-locator")`. Words are read case-insensitively; a wrong count, an unknown word (by position) and a failed checksum are told apart.
 - **Vectors:** `test-vectors/recovery-v1.json` (6 seeds; `--example gen_recovery_vectors`), verified by `verify_recovery_rns.py`: Python RNS makes the identity from the secret and gives the same public key and hash; the words are read the BIP-39 way apart from the Rust code; the all-zero and all-`ff` seeds give BIP-39's own test vectors ("abandon … art", "zoo … vote").
-- **Not built yet:** making a kit (granting the identity in every library, its `Identity` operation, the keyring library kept by the daemon), the keyring's announce, recovering on a fresh device, revoking lost devices, putting the identity on a YubiKey.
+- **Making a kit (built, 2026-11-11):** `retifs recovery create` (`RecoveryCreate`). The daemon makes a seed, creates the keyring as the recovery identity with one commit (its `Identity`, and `write` + `grant` for this node's own writer in it), keeps that commit's head as another writer's would be kept (served and merged as usual) and forgets the identity's key; then writes, as itself, its node and the locator. Every library this node may grant in grants the recovery identity `write` and `grant`; the words are printed once, with the libraries covered and not. Live (one daemon): the writer derived from the printed words in Python RNS was the one granted; no channel with the identity's key stayed in the store.
+- **Rekeys:** the recovery identity has no `Identity` operation in the libraries (writing one would need its key on the device). It doesn't need rekeys wrapped to it: the keyring holds each library's current address, read key included, and the daemon updates it after a rekey.
+- **Kept current:** once a minute the daemon lists every library in the keyring (name, address), updates addresses that changed, removes libraries left, and grants the recovery identity in libraries made or joined later where it may grant. Live: a library made after the kit was listed and granted within a minute.
+- **Announces:** a node keeping the keyring announces `retifs.keyring` with its tag every announce interval.
+- **Not built yet:** recovering on a fresh device, revoking lost devices, putting the identity on a YubiKey, the user's other devices joining the keyring.

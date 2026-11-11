@@ -1,6 +1,6 @@
 //! retifs CLI (prototype): a thin client of the local retifsd (libretifs).
 //!
-//!     retifs [--store DIR] ping | nodes | stop | nomadnet NODE [PATH] [--var K=V]...
+//!     retifs [--store DIR] ping | nodes | stop | nomadnet NODE [PATH] [--var K=V]... | recovery create
 //!     retifs [--store DIR] put FILE [--public] [--compress] [--publish] [--record NAME | --one-off] [--hint]
 //!
 //! `put` treats the file's absolute path as its record by default, so putting
@@ -60,7 +60,7 @@ use libretifs::{default_store_dir, Client};
 
 fn usage() -> ! {
     eprintln!(
-        "retifs [--store DIR] ping | nodes | stop | nomadnet NODE [PATH] [--var K=V]...\n\
+        "retifs [--store DIR] ping | nodes | stop | nomadnet NODE [PATH] [--var K=V]... | recovery create\n\
          retifs [--store DIR] put FILE [--public] [--compress] [--publish] [--record NAME | --one-off] [--hint]\n\
          retifs [--store DIR] get READ-CAP [--from NODE]... [-o OUT] [--links N] [--batch N]\n\
          retifs [--store DIR] status READ-CAP\n\
@@ -165,6 +165,29 @@ async fn main() {
             println!("{} storage node(s)", nodes.len());
         }
         // Stops retifsd cleanly (its store closed), as SIGTERM does.
+        // The recovery kit (ADR-0033): 24 words, shown once.
+        "recovery" => match it.next().as_deref() {
+            Some("create") => match client.call(libretifs::Request::RecoveryCreate).await.unwrap_or_else(|e| fail(e)) {
+                libretifs::Response::RecoveryKit { words, covered, not_covered } => {
+                    println!("Your recovery kit. Write these 24 words down on paper, in order, and keep them");
+                    println!("somewhere safe: whoever has them can open every library below. They are");
+                    println!("shown only this once and kept nowhere.
+");
+                    for (i, chunk) in words.chunks(6).enumerate() {
+                        println!("  {}", chunk.iter().enumerate().map(|(j, w)| format!("{:>2}. {w:<9}", i * 6 + j + 1)).collect::<Vec<_>>().join(" "));
+                    }
+                    println!("
+Covered ({}): {}", covered.len(), if covered.is_empty() { "none".into() } else { covered.join(", ") });
+                    if !not_covered.is_empty() {
+                        println!("Not covered ({}): {} (no device of yours holds grant there)", not_covered.len(), not_covered.join(", "));
+                    }
+                    println!("Libraries made or joined later are added to the kit by themselves.");
+                }
+                libretifs::Response::Error { message } => fail(message),
+                _ => fail("unexpected response"),
+            },
+            _ => usage(),
+        },
         // A NomadNet node's page (micron) or file, fetched by retifsd over Reticulum.
         "nomadnet" => {
             let node = it.next().unwrap_or_else(|| usage());
