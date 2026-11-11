@@ -2820,6 +2820,7 @@ async fn handle(d: &Daemon, req: Request) -> Result<Response, String> {
                         same_site: d.site.is_some() && n.site == d.site,
                         ok: s.ok,
                         fail: s.fail,
+                        room: d.offers.lock().unwrap().get(&n.peer).copied(),
                     }
                 })
                 .collect(),

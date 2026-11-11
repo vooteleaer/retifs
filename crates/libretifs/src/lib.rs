@@ -427,6 +427,10 @@ pub struct StorageNodeInfo {
     /// Its record as a holder: answers that were right and wrong.
     pub ok: u32,
     pub fail: u32,
+    /// What its last announce offers: about this many more bytes of others'
+    /// copies (ADR-0014; none from nodes that don't say).
+    #[serde(default)]
+    pub room: Option<u64>,
 }
 
 /// An application allowed on the app socket.
