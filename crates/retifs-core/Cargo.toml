@@ -13,6 +13,7 @@ cbc = { version = "0.1", features = ["alloc", "block-padding"] }
 curve25519-dalek = "4"
 ed25519-dalek = "2"
 fastcdc = "3"
+getrandom = "0.3"
 hex = "0.4"
 hkdf = "0.12"
 hmac = "0.12"

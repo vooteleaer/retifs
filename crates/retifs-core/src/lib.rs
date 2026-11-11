@@ -17,6 +17,7 @@ pub mod lease;
 pub mod ops;
 pub mod prolly;
 pub mod record;
+pub mod recovery;
 pub mod manifest;
 pub mod secret;
 pub mod share;

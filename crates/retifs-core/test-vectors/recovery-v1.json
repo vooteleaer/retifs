@@ -1,0 +1,77 @@
+{
+  "about": "ADR-0033: words = BIP-39 English over seed || SHA-256(seed)[0], 24 words; k(info) = HKDF-SHA256(ikm = seed, salt = \"retifs/v1/recovery\", info)[0..32]; identity secret = k(\"x25519\") || k(\"ed25519\") (RNS layout); keyring ns_id = SHA-256(\"retifs/v1/ns\" || Ed25519 public)[0..16]; keyring read key = k(\"keyring-read\"); locator = k(\"keyring-locator\"); node_tag = HMAC-SHA256(locator, node)[0..16]",
+  "cases": [
+    {
+      "identity_hash": "ef098c382540602782fd219730353cff",
+      "identity_public": "8adb120c09fe65f041415bae6470f454aab004a4bbdbe5efedd70e3b9f1d6371fe730e1bad14fdb077c39c6ea2ce9f7edffd748f5242e5f1495335758ce1ede7",
+      "identity_secret": "7896072f76c525967bd93c0492f40cb3b6ce6b7050efce6a19e6a308e88a716290f6a9e0448431cc3fcc906826d6cdda0c28d2105188bb82948d902a7d8211e5",
+      "keyring_ns_id": "69781f4199bf1c82a9255b7d0a52d8a3",
+      "keyring_read_key": "d92678b0c4b34193cf470348dcb3993c05d23d468c6ef5b1d739fea8c0335203",
+      "locator": "2950211ad37b0dfb4562f36e2123f05efacc8120b7d7efd161de0573ec389bdc",
+      "node": "1efbc2ed7dfb3ac89b7ca4e90cef164f",
+      "node_tag": "91e09152154dc21a3680a5893ce07337",
+      "seed": "0000000000000000000000000000000000000000000000000000000000000000",
+      "words": "abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon art"
+    },
+    {
+      "identity_hash": "15d32a48ee060290b3ef7a78df2d5a82",
+      "identity_public": "a8abf56e1c6c627ee0f00a1ba9dc789df6eac4bbbb952415a76e4456a6a3fe344425695566eda37158b6db3120a7c5459a476ec28ce2d5b7d1308465a5da2988",
+      "identity_secret": "f821f51be2bb62a54faffd3c6a4757b519bf8ec220a6fa80e826ac849811b44d300d5e9e0eca403ce07a33fcc82213abcddc7501102e319b5858caf3d7ad75a5",
+      "keyring_ns_id": "c4601c64ef89f8f760a59564365c6cb6",
+      "keyring_read_key": "3b3af7782e23e242f643fc2e346156e0a533f355e2742e7e2acca79dedaba006",
+      "locator": "f423de9097c1ef48bf75627c5b0122366352cf1069c4311f921e433102415562",
+      "node": "1efbc2ed7dfb3ac89b7ca4e90cef164f",
+      "node_tag": "cfccc8934a7a35779ee2c6edd9890b27",
+      "seed": "ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff",
+      "words": "zoo zoo zoo zoo zoo zoo zoo zoo zoo zoo zoo zoo zoo zoo zoo zoo zoo zoo zoo zoo zoo zoo zoo vote"
+    },
+    {
+      "identity_hash": "3fa80b77e83e8d2f9652a0fd938592ca",
+      "identity_public": "cc5002ea310f9160e0c376d6c7c0055f18d8efeff916d304fab36d162a968f1bf40bf66c30a36cd9b36dfa2793b34d212d2668e7923987cc7fc9bb99afa38907",
+      "identity_secret": "f6750f29cec46127fc2df8160559bac1ade805326247a16d3c55bc74aef3b5a9ecb8ead828b0ec708f40fa98659ad40f4169e19559bdea5be3c19642d61aa3d7",
+      "keyring_ns_id": "ab50bbaba33464f01c461af586811b46",
+      "keyring_read_key": "a7fae5d0ded43ba0ab93c0a881808a3af836053cdb42946639f0aeb4b8e2688e",
+      "locator": "66029ad8f0dfa0d29880dfa87e847705022e121af135a042009cc246fde8e5d9",
+      "node": "1efbc2ed7dfb3ac89b7ca4e90cef164f",
+      "node_tag": "831d1583b021681a274fd96af33a4137",
+      "seed": "bc009fb13780b59bba53d019930cd0e88d1405fd8f083babf55b9f07d5ab7e7c",
+      "words": "rose agent unable humor area soccer true key book observe crouch speed spend actual wage three desert garden finger dignity later stick wheat marble"
+    },
+    {
+      "identity_hash": "c412f63fb961338ddae5f9d7c3d17b5b",
+      "identity_public": "38234c2b0525741eb6359e79b9d019316936f4a1fed78faf75bd22298421415e40c0ca03b63ae416ecdecca9f1c7182919e4adbc4fed2a1fbab30c8cebb602fa",
+      "identity_secret": "4c2f8a7da5280f4b0e9f6f1646e321659078b3cdfd894b3589fe323e4a3c9905847006cef9f076bd834f1a9122f6f0c4374bf128f81429b2179eacf9424ef41e",
+      "keyring_ns_id": "daab15f3cb8ee603058fe89abf069b56",
+      "keyring_read_key": "d0d655666026d33dbb9b7667388f2d2828e0926521d2f13b448f6b34dc7f29a2",
+      "locator": "9a724517c5e3bb14e9a27739818b6a5c5f0fdae6accf80c8459569771d6d9ead",
+      "node": "1efbc2ed7dfb3ac89b7ca4e90cef164f",
+      "node_tag": "00a451a645149124553817f53ee7a761",
+      "seed": "8005478f4e1dabfcb578665f64c86aad74cdd9b7a576e7c75166b157ca277a7b",
+      "words": "length clay toilet order survey wrestle sting art garage chaos boy foot error under teach put treat dentist fluid glance lake beauty try kick"
+    },
+    {
+      "identity_hash": "4bcdc94641e0c73dc7c72e8a12b8ed7b",
+      "identity_public": "b070c9abcc7e07e1eba027f8cbe747931d4f5e6bf114b875cb985c1e84b6ab04d3fccc103bc2ad2d8a303211a260ef4254518550554c741c8f9c57655ddb2f24",
+      "identity_secret": "fc6a2ae372d4685f0ca527e76fb9f0b255c66806fba968a937c1a1a95bfb2c396e863dfff3c8abfc865dae66d51e037524bf6520820c3fd143ae40ceb3950aaa",
+      "keyring_ns_id": "6c67499a6a4ca5427e22ac4d6004d3a0",
+      "keyring_read_key": "34259adece0ec971fd822164e3313ab67e0d0a97af2732adc7a5afaaf95c423d",
+      "locator": "6e04933c6c301277205656972a464f8ff72dfdb4b31f9fd4b7f4f1cee3a42366",
+      "node": "1efbc2ed7dfb3ac89b7ca4e90cef164f",
+      "node_tag": "d7f6bdad480cf7bf90a1d2db7148dc7c",
+      "seed": "900a4cab7006cfa9ddee1e743517a6b3c241fe883cc9a4825104d397b7e066ca",
+      "words": "mosquito fame client theme hollow stay jeans sense injury post trust guide catch young can odor pig barely donkey poet kiwi usual open employ"
+    },
+    {
+      "identity_hash": "9b793bcc5755bf11a6883e13fe23a6df",
+      "identity_public": "7db09ba24e921514b0138c1916db7bfe9bed610f485a758bfe64d403066bb80fbecf748e2e3d167c8dceec93f5ba3a3925faf0c384553995090487e2c1a20cea",
+      "identity_secret": "1c7d43017adb2274f60d2398c25109d3f8eef811b73133ef059f7eba034441b4b89080a711291c4dc9797536189f2619ba1ae3d580ff7056c3a0ffa4c7cee593",
+      "keyring_ns_id": "95f35357b934e7675d17f4cc8367588e",
+      "keyring_read_key": "267da4a76661c5c750593a1b1be16d68b0c99c5af20cc0982839afac8e234c0d",
+      "locator": "5b3609d0db8e05588824c877274f6ceba78e48b911eb4b620f71ed66a3e009cb",
+      "node": "1efbc2ed7dfb3ac89b7ca4e90cef164f",
+      "node_tag": "abecccf0be269afbc0329bc9b698c8cb",
+      "seed": "a563c3f8e519305a83937daee594c0b1242da92c3c3f31d3a542ee3a92948265",
+      "words": "pistol bulk wreck sketch narrow coil atom hurry puzzle coach coral girl drift stand rail margin crack outdoor expose symbol powder engage another plunge"
+    }
+  ]
+}
