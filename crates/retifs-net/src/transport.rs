@@ -110,6 +110,19 @@ impl PrnsTransport {
         Ok(response.as_slice().to_vec())
     }
 
+    /// A request to any request path (`endpoint` need not be one of
+    /// retifs's own), with the response awaited up to `timeout`: NomadNet pages.
+    pub async fn request_any_path(&self, link: LinkId, path: &str, body: Vec<u8>, timeout: Duration) -> Result<Vec<u8>, String> {
+        use personal_rns::engine::RequestResponseTimeout;
+        let timeout = RequestResponseTimeout::Exact(personal_rns::units::DurationMillis(timeout.as_millis() as u64));
+        let (response, _rtt) = self
+            .handle
+            .request_with_response_timeout(link, RequestEndpointId::of(path), &body, timeout)
+            .await
+            .map_err(|e| format!("{e:?}"))?;
+        Ok(response.as_slice().to_vec())
+    }
+
     /// Reveals this node's identity (by hash; the node holds the secret) to
     /// the other end of `link`, so it can tell who is asking.
     pub async fn identify(&self, link: LinkId, identity_hash: [u8; 16]) -> Result<(), String> {

@@ -3547,6 +3547,34 @@ async fn handle(d: &Daemon, req: Request) -> Result<Response, String> {
             Ok(Response::History { entries })
         }
 
+        Request::NomadNetPage { node, path, fields } => {
+            if !path.starts_with('/') || path.len() > 512 || path.contains("..") {
+                return Err(format!("not a NomadNet path: {path}"));
+            }
+            let peer = *parse_destination(&node).ok_or_else(|| format!("bad node address {node}"))?.as_bytes();
+            let link = tokio::time::timeout(Duration::from_secs(60), d.link_to(&peer))
+                .await
+                .map_err(|_| format!("<{node}>: no link within a minute"))??;
+            // Variables and fields go as a msgpack map, as NomadNet's own
+            // browser sends them; none as nil (an empty body).
+            let mut body = Vec::new();
+            if !fields.is_empty() {
+                retifs_core::record::write_map_len(&mut body, fields.len());
+                for (k, v) in &fields {
+                    retifs_core::record::write_str(&mut body, k);
+                    retifs_core::record::write_str(&mut body, v);
+                }
+            }
+            let resp = match d.transport.request_any_path(link, &path, body, Duration::from_secs(120)).await {
+                Ok(r) => r,
+                Err(e) => {
+                    d.drop_link(&peer);
+                    return Err(format!("<{node}>{path}: {e}"));
+                }
+            };
+            Ok(Response::Page { data: msgpack_bytes(&resp) })
+        }
+
         Request::Want { cap, from } => {
             let (cap, hints) = FileRef::parse_with_hints(&cap).map_err(|e| e.to_string())?;
             let mut peers: Vec<PeerId> = from
@@ -4370,6 +4398,11 @@ async fn publish_index(d: &Daemon, ns: &str, force: bool) -> Result<Option<Strin
     if declared.is_empty() {
         return Ok(None);
     }
+    // One builder per index channel: every member could sign it, and two
+    // publishing would take the same sequence numbers (`ns search` publishes anyway).
+    if !force && !index_builder_here(d, ns)? {
+        return Ok(None);
+    }
     let read_key = current_addr(d, ns)?.read_key;
     let key = index::channel_key(&read_key);
     let capability = key.addr().to_string();
@@ -4407,6 +4440,38 @@ async fn publish_index(d: &Daemon, ns: &str, force: bool) -> Result<Option<Strin
     d.indexed.lock().unwrap().insert(ns.to_string(), checkpoint.root);
     println!("ns {ns}: blind index of {} key(s), {entries} entr(ies), published for search nodes", declared.len());
     Ok(Some(capability))
+}
+
+/// Whether this node builds library `ns`'s blind index: of the writers' nodes
+/// that are around (heard within their last few announces), the one with the
+/// lowest address does; when none of them is, this one does.
+fn index_builder_here(d: &Daemon, ns: &str) -> Result<bool, String> {
+    let merged = materialize(d, ns)?;
+    let mut nodes: Vec<PeerId> = merged
+        .nodes
+        .iter()
+        .filter(|(w, _)| merged.writers.get(*w).is_some_and(|r| r.contains(&Right::Write)))
+        .map(|(_, n)| *n)
+        .collect();
+    nodes.sort();
+    nodes.dedup();
+    let heard: HashMap<PeerId, (u64, u32)> =
+        d.store.storage_nodes().unwrap_or_default().into_iter().map(|n| (n.peer, (n.last_heard_ms, n.announce_s))).collect();
+    Ok(index_builder(&nodes, d.node_id, now_ms(), |p| heard.get(p).copied()))
+}
+
+/// The rule of [`index_builder_here`]: `heard` gives a node's last announce
+/// (ms) and interval (s), if it was heard.
+fn index_builder(writers: &[PeerId], me: PeerId, now: u64, heard: impl Fn(&PeerId) -> Option<(u64, u32)>) -> bool {
+    for n in writers {
+        if *n == me {
+            return true;
+        }
+        if heard(n).is_some_and(|(at, every)| at + MISSED_ANNOUNCES * every as u64 * 1000 >= now) {
+            return false;
+        }
+    }
+    true
 }
 
 /// Fetches the index tree a followed index channel's current version names,
@@ -4928,6 +4993,20 @@ async fn ensure_local(d: &Daemon, file: &FileRef, range: std::ops::Range<u64>, n
             });
         }
     }
+}
+
+/// A response's body: NomadNet answers with msgpack bytes or a string (or
+/// nil); anything else is taken as it is.
+fn msgpack_bytes(r: &[u8]) -> Vec<u8> {
+    let (start, len) = match r.first() {
+        Some(0xc0) => return Vec::new(),
+        Some(&b) if (0xa0..=0xbf).contains(&b) => (1, (b & 0x1f) as usize),
+        Some(0xc4) | Some(0xd9) if r.len() >= 2 => (2, r[1] as usize),
+        Some(0xc5) | Some(0xda) if r.len() >= 3 => (3, u16::from_be_bytes([r[1], r[2]]) as usize),
+        Some(0xc6) | Some(0xdb) if r.len() >= 5 => (5, u32::from_be_bytes([r[1], r[2], r[3], r[4]]) as usize),
+        _ => return r.to_vec(),
+    };
+    if r.len() == start + len { r[start..].to_vec() } else { r.to_vec() }
 }
 
 /// A read spreads over several known holders when it needs at least this many chunks.
@@ -7543,6 +7622,23 @@ mod nomadnet {
 
     #[cfg(test)]
     mod tests {
+        #[test]
+        fn one_index_builder() {
+            let (a, b, c) = ([1u8; 16], [2u8; 16], [3u8; 16]);
+            let all = [a, b, c];
+            let alive = |_: &[u8; 16]| Some((1_000_000, 600));
+            // The lowest address that's around builds.
+            assert!(super::super::index_builder(&all, a, 1_000_000, alive));
+            assert!(!super::super::index_builder(&all, b, 1_000_000, alive));
+            // a went quiet: b builds; c still doesn't.
+            let quiet_a = |p: &[u8; 16]| if *p == a { Some((0, 600)) } else { Some((5_000_000, 600)) };
+            assert!(super::super::index_builder(&all, b, 5_000_000, quiet_a));
+            assert!(!super::super::index_builder(&all, c, 5_000_000, quiet_a));
+            // Never heard (a phone holding nothing): passed over. Not a writer: builds only alone.
+            assert!(super::super::index_builder(&all, c, 0, |_| None));
+            let _ = alive(&a);
+        }
+
         #[test]
         fn record_paths_map_to_nomadnet_pages() {
             assert_eq!(super::page_path("/index.mu").as_deref(), Some("/page/index.mu"));

@@ -1,6 +1,6 @@
 //! retifs CLI (prototype): a thin client of the local retifsd (libretifs).
 //!
-//!     retifs [--store DIR] ping | nodes | stop
+//!     retifs [--store DIR] ping | nodes | stop | nomadnet NODE [PATH] [--var K=V]...
 //!     retifs [--store DIR] put FILE [--public] [--compress] [--publish] [--record NAME | --one-off] [--hint]
 //!
 //! `put` treats the file's absolute path as its record by default, so putting
@@ -59,7 +59,7 @@ use libretifs::{default_store_dir, Client};
 
 fn usage() -> ! {
     eprintln!(
-        "retifs [--store DIR] ping | nodes | stop\n\
+        "retifs [--store DIR] ping | nodes | stop | nomadnet NODE [PATH] [--var K=V]...\n\
          retifs [--store DIR] put FILE [--public] [--compress] [--publish] [--record NAME | --one-off] [--hint]\n\
          retifs [--store DIR] get READ-CAP [--from NODE]... [-o OUT] [--links N] [--batch N]\n\
          retifs [--store DIR] status READ-CAP\n\
@@ -163,6 +163,30 @@ async fn main() {
             println!("{} storage node(s)", nodes.len());
         }
         // Stops retifsd cleanly (its store closed), as SIGTERM does.
+        // A NomadNet node's page (micron) or file, fetched by retifsd over Reticulum.
+        "nomadnet" => {
+            let node = it.next().unwrap_or_else(|| usage());
+            let (mut path, mut fields) = ("/page/index.mu".to_string(), Vec::new());
+            while let Some(a) = it.next() {
+                match a.as_str() {
+                    // A link's variable, as NomadNet sends it (var_NAME).
+                    "--var" => {
+                        let kv = it.next().unwrap_or_else(|| usage());
+                        let (k, v) = kv.split_once('=').unwrap_or_else(|| usage());
+                        fields.push((format!("var_{k}"), v.to_string()));
+                    }
+                    p => path = p.to_string(),
+                }
+            }
+            match client.call(libretifs::Request::NomadNetPage { node, path, fields }).await.unwrap_or_else(|e| fail(e)) {
+                libretifs::Response::Page { data } => {
+                    use std::io::Write;
+                    let _ = std::io::stdout().write_all(&data);
+                }
+                libretifs::Response::Error { message } => fail(message),
+                _ => fail("unexpected response"),
+            }
+        }
         "stop" => {
             client.stop().await.unwrap_or_else(|e| fail(e));
             println!("retifsd is stopping");

@@ -21,7 +21,8 @@ Prototypes are throwaway. They're for learning, not for locking in the format. T
 - [x] fd passing on Unix: `put` hands the daemon the open file ([ADR-0004](adr/0004-native-record-api.md)).
 - [ ] Local API, open: descriptors on Windows, faster cache writes (batch per tree level, keep segment files open).
 - [x] Local HTTP gateway, `retifs-gateway` (a client of `libretifs`, the base for the browser extension): every namespace is a site at `http://<namespace>.localhost:8740/` with its own origin. It's read-only, has a content security policy that allows only its own origin, and refuses foreign `Host` headers (DNS rebinding). Range requests are answered from on-demand reads, so video seeks; bodies stream in 1 MiB pieces, so a large file is never held whole. It answers only its own user (connection owner from `/proc/net/tcp` on Linux, the owning process's user SID on Windows) and refuses cross-site background requests.
-- [ ] Gateway, continued: NomadNet pages fetched over RNS, so any NomadNet node can be browsed; micron rendered as HTML.
+- [x] Gateway, continued: any NomadNet node browsed at `http://nn-<address>.localhost:8740/`, its own origin: pages and files fetched by retifsd over Reticulum (`NomadNetPage`, also `retifs nomadnet NODE [PATH]`), micron rendered as HTML (headings, dividers, styles, colours, alignment, links within and across nodes with their variables; input fields shown read-only).
+- [ ] Gateway: NomadNet forms (fields sent with a link), identifying to nodes that ask for it.
 - [ ] Browser extension (later; Firefox first, Manifest V3): `web+retifs:` links and pasted addresses open through the gateway, micron rendered as HTML, a popup with node status and copies, "follow this site" and "save to retifs". Privileged actions go through a native-messaging host talking to the local API, never through the gateway.
 - [ ] Alpine: `/etc/apk/repositories` → gateway (apk knows nothing about RNS).
 
@@ -76,7 +77,8 @@ Prototypes are throwaway. They're for learning, not for locking in the format. T
 - [x] Remote queries to own nodes over a Link, full query language: `--via NODE`, devices admitted with app-style scopes ([ADR-0019](adr/0019-remote-query-and-blind-index.md)).
 - [x] Blind index for search nodes without the read key: declared keys, exact match, index channel derived from the read key, `/retifs/query` with proof, `query --search NODE`; vectors verified against RNS ([ADR-0019](adr/0019-remote-query-and-blind-index.md)).
 - [x] Lazy members: `ns join --lazy` holds the checkpoint, the chains since and only the state paths it needs (changed records on sync, others on demand) ([ADR-0018](adr/0018-state-trees.md)).
-- [ ] Search, continued: one builder per index channel, remote live query.
+- [x] Search, continued: one builder per index channel (the lowest-addressed writer's node that's around) ([ADR-0019](adr/0019-remote-query-and-blind-index.md)).
+- [ ] Search: remote live queries beyond `Watch`.
 - [x] Maps, places and addresses as public libraries: vector tiles, places by cell, a gazetteer searched through the blind index, no internet service ([ADR-0027](adr/0027-places.md), [ADR-0028](adr/0028-maps-over-retifs.md)).
 - [x] Per-writer commit chains (one commit per modification), merge, history queries, per-record `versions` ([ADR-0017](adr/0017-multi-writer-namespaces.md)).
 - [x] Leaving a library: hidden at once, its data goes in the background; one made here only with `--mine`. Deleting a library on every member's node: `ns delete NS --yes`, a `retifs.deleted` record counted only from a writer holding `grant`, 30 days' grace ([ADR-0034](adr/0034-deleting-a-library.md)).

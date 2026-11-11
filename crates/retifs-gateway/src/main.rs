@@ -3,6 +3,7 @@
 //! through `retifsd`'s local API. The base for the browser extension (plan,
 //! phase 1). Content not here yet is fetched as it's read (ADR-0002).
 
+mod micron;
 mod peer;
 mod site;
 
@@ -157,13 +158,86 @@ fn main() {
     });
     let port = listen.rsplit(':').next().unwrap_or("8740").to_string();
     eprintln!(
-        "retifs-gateway: http://localhost:{port}/ (sites at http://<namespace>.localhost:{port}/)"
+        "retifs-gateway: http://localhost:{port}/ (sites at http://<namespace>.localhost:{port}/, NomadNet nodes at http://nn-<address>.localhost:{port}/)"
     );
     let mut gw = Gateway { rt, client, store, via };
     for req in server.incoming_requests() {
         let _ = serve(&mut gw, req, &port);
     }
 }
+
+/// A NomadNet node's site: `nn-<32 hex digits>`, its own origin.
+fn nomadnet_node(site: &str) -> Option<String> {
+    let node = site.strip_prefix("nn-")?;
+    (node.len() == 32 && node.chars().all(|c| c.is_ascii_hexdigit())).then(|| node.to_ascii_lowercase())
+}
+
+/// Links in a NomadNet page: the same node's pages on this origin, another
+/// node's on its own.
+struct NnLinks<'a> {
+    port: &'a str,
+}
+
+impl micron::Links for NnLinks<'_> {
+    fn page(&self, node: Option<&str>, path: &str, vars: &[(String, String)]) -> String {
+        let query: Vec<String> = vars.iter().map(|(k, v)| format!("{}={}", site::percent_encode(k), site::percent_encode(v))).collect();
+        let query = if query.is_empty() { String::new() } else { format!("?{}", query.join("&")) };
+        match node {
+            Some(n) => format!("http://nn-{n}.localhost:{}{path}{query}", self.port),
+            None => format!("{path}{query}"),
+        }
+    }
+}
+
+/// A page (rendered from micron) or file from a NomadNet node, fetched over
+/// Reticulum by retifsd.
+fn serve_nomadnet(gw: &mut Gateway, req: tiny_http::Request, node: &str, port: &str) -> std::io::Result<()> {
+    let url = req.url().to_string();
+    let (path, query) = url.split_once('?').unwrap_or((url.as_str(), ""));
+    let path = site::percent_decode(path);
+    let path = if path == "/" || path.is_empty() { "/page/index.mu".to_string() } else { path };
+    let fields: Vec<(String, String)> = query
+        .split('&')
+        .filter_map(|kv| kv.split_once('='))
+        .map(|(k, v)| (site::percent_decode(k), site::percent_decode(v)))
+        .filter(|(k, _)| k.starts_with("var_") || k.starts_with("field_"))
+        .collect();
+    let data = match gw.call(Request::NomadNetPage { node: node.into(), path: path.clone(), fields }) {
+        Ok(Response::Page { data }) => data,
+        Ok(Response::Error { message }) | Err(message) => {
+            return req.respond(page(504, "Not reachable", &format!("<p>{}</p>", site::escape_html(&message))));
+        }
+        Ok(_) => return req.respond(page(502, "retifsd", "<p>unexpected response</p>")),
+    };
+    if !path.ends_with(".mu") {
+        let resp = HttpResponse::from_data(data).with_header(header("Content-Type", site::content_type(&path, None)));
+        let mut resp = resp;
+        for (k, v) in site::SECURITY_HEADERS {
+            resp.add_header(header(k, v));
+        }
+        return req.respond(resp);
+    }
+    let body = micron::to_html(&String::from_utf8_lossy(&data), &NnLinks { port });
+    let html = format!(
+        "<!doctype html><meta charset=utf-8><title>{t}</title><style>{css}</style><div class=bar>NomadNet &lt;{node}&gt;{p} · <a href=\"http://localhost:{port}/\">retifs</a></div><main>{body}</main>",
+        t = site::escape_html(&format!("{node}{path}")),
+        p = site::escape_html(&path),
+        css = NOMADNET_CSS,
+    );
+    let mut resp = HttpResponse::from_data(html.into_bytes()).with_header(header("Content-Type", "text/html; charset=utf-8"));
+    for (k, v) in site::SECURITY_HEADERS {
+        resp.add_header(header(k, v));
+    }
+    req.respond(resp)
+}
+
+/// NomadNet pages are made for a terminal: monospace, light on dark.
+const NOMADNET_CSS: &str = "body{margin:0;background:#1d1f21;color:#ddd;font:15px/1.4 ui-monospace,Menlo,Consolas,monospace}\
+.bar{padding:.4rem 1rem;background:#2b2e31;color:#999;font-size:13px}.bar a{color:#8ab4f8}\
+main{max-width:100ch;margin:1rem auto;padding:0 1rem}.l,.lit{white-space:pre-wrap;min-height:1.4em}\
+h1,h2,h3{font-size:1em;margin:.6em 0;padding:.1em .4em}.h1{background:#3b4252}.h2{background:#2f3540}.h3{background:#272b33}\
+.hr{overflow:hidden;white-space:nowrap;color:#555}a{color:#8ab4f8}.ext{text-decoration:underline dotted}\
+.field{background:#333;color:#ddd;border:1px solid #555;font:inherit}";
 
 fn serve(gw: &mut Gateway, req: tiny_http::Request, port: &str) -> std::io::Result<()> {
     let own = match (req.remote_addr(), port.parse::<u16>()) {
@@ -231,9 +305,12 @@ fn serve(gw: &mut Gateway, req: tiny_http::Request, port: &str) -> std::io::Resu
         return req.respond(page(
             200,
             "retifs",
-            &format!("<p>Namespaces on this node:</p><ul>{list}</ul>"),
+            &format!("<p>Namespaces on this node:</p><ul>{list}</ul><p>NomadNet nodes, over Reticulum: <code>http://nn-&lt;address&gt;.localhost:{port}/</code>, where the address is the node's 32 hex digits.</p>"),
         ));
     };
+    if let Some(node) = nomadnet_node(&ns) {
+        return serve_nomadnet(gw, req, &node, port);
+    }
     let url = req.url().to_string();
     let mut found = None;
     for path in site::candidates(&url) {

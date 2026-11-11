@@ -52,6 +52,13 @@ pub fn candidates(url_path: &str) -> Vec<String> {
     }
 }
 
+/// Percent-encodes everything but unreserved characters (RFC 3986).
+pub fn percent_encode(s: &str) -> String {
+    s.bytes()
+        .map(|b| if b.is_ascii_alphanumeric() || b"-._~".contains(&b) { (b as char).to_string() } else { format!("%{b:02X}") })
+        .collect()
+}
+
 pub fn percent_decode(s: &str) -> String {
     let b = s.as_bytes();
     let mut out = Vec::with_capacity(b.len());

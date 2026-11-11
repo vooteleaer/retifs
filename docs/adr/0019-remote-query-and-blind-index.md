@@ -95,7 +95,9 @@ A search node, beyond what a holder sees:
 
 - A lazy member (ADR-0018) fetches the state paths of matches it doesn't hold, then checks them like any other.
 
-**Not yet:** a live test of search with a lazy member; several builders publishing to one index channel (their sequence numbers can collide); releasing index nodes of replaced versions on the search node; remote live queries beyond `Watch`; a cross-machine measurement over slow links.
+**One builder per index channel (2026-11-11):** every member could sign the index channel (its key comes from the read key), and two publishing took the same sequence numbers. Now, of the writers' nodes that are around (heard within their last five announces), the one with the lowest address builds and publishes; the others don't. When it goes quiet, the next one takes over; a node that isn't a writer builds only when no writer's node is around. `retifs ns search NS` publishes anyway, as asked.
+
+**Not yet:** a live test of search with a lazy member; releasing index nodes of replaced versions on the search node; remote live queries beyond `Watch`; a cross-machine measurement over slow links.
 
 ## Consequences
 - Easier: a phone or LoRa node can query a namespace it doesn't hold; search can be delegated to always-on nodes without giving them the read key.

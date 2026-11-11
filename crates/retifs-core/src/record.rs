@@ -226,7 +226,7 @@ pub(crate) fn write_int(out: &mut Vec<u8>, i: i64) {
     }
 }
 
-pub(crate) fn write_str(out: &mut Vec<u8>, s: &str) {
+pub fn write_str(out: &mut Vec<u8>, s: &str) {
     let n = s.len();
     match n {
         0..=31 => out.push(0xa0 | n as u8),
@@ -273,7 +273,7 @@ pub(crate) fn write_array_len(out: &mut Vec<u8>, n: usize) {
     }
 }
 
-pub(crate) fn write_map_len(out: &mut Vec<u8>, n: usize) {
+pub fn write_map_len(out: &mut Vec<u8>, n: usize) {
     match n {
         0..=15 => out.push(0x80 | n as u8),
         16..=0xffff => {

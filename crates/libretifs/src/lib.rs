@@ -367,6 +367,16 @@ pub enum Request {
     /// Owner only: stop the daemon cleanly (its store closed), as SIGTERM
     /// does; for Windows, where no signal reaches a console-less process.
     Stop,
+    /// Owner only: a page or file from a NomadNet node over Reticulum, for
+    /// browsing NomadNet through the gateway. `node`: its `nomadnetwork.node`
+    /// address (32 hex digits); `path`: `/page/index.mu`, `/file/…`;
+    /// `fields`: the request's variables and fields (`var_*`, `field_*`).
+    NomadNetPage {
+        node: String,
+        path: String,
+        #[serde(default)]
+        fields: Vec<(String, String)>,
+    },
 }
 
 /// An attribute value (ADR-0016).
@@ -569,6 +579,11 @@ pub struct RecordView {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(tag = "result", rename_all = "snake_case")]
 pub enum Response {
+    /// A NomadNet page or file (NomadNetPage).
+    Page {
+        #[serde(with = "serde_bytes")]
+        data: Vec<u8>,
+    },
     Pong {
         node: String,
         chunks: u64,

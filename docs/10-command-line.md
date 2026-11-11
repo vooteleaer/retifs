@@ -57,7 +57,7 @@ retifs mount photos --via home # a library your home node holds, nothing of it k
 - **Haiku:** each library is a volume in `~/retifs`, with its attributes as Haiku attributes and live queries in Tracker.
 - Photos in albums also show under `Albums/<album>/`: the same files, and deleting one there only takes it out of the album.
 
-As websites, one origin per library, read-only: `systemctl --user enable --now retifs-gateway`, then open <http://localhost:8740/>.
+As websites, one origin per library, read-only: `systemctl --user enable --now retifs-gateway`, then open <http://localhost:8740/>. The same gateway opens NomadNet nodes over Reticulum: `http://nn-<address>.localhost:8740/` (the node's 32 hex digits), its pages rendered from micron; `retifs nomadnet <address> [/page/x.mu]` prints a page's micron.
 
 ## Attributes from what's in files
 
