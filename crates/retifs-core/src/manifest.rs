@@ -465,6 +465,15 @@ pub fn missing_for_range(store: &impl Store, file: &FileRef, range: Range<u64>) 
     Ok(out)
 }
 
+/// Every chunk of the whole file not in `store`, its padding chunks
+/// included (what a copy that serves the file must hold); nodes not held yet
+/// are listed themselves, as in [`missing_for_range`].
+pub fn missing_whole(store: &impl Store, file: &FileRef) -> Result<Vec<(Cid, Seed)>, ManifestError> {
+    let mut out = Vec::new();
+    missing_node(store, file.root, file.seed, file.size, true, 0, &(0..u64::MAX), &mut out)?;
+    Ok(out)
+}
+
 #[allow(clippy::too_many_arguments)]
 fn missing_node(
     store: &impl Store,

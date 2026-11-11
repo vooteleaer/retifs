@@ -31,7 +31,8 @@ Prototypes are throwaway. They're for learning, not for locking in the format. T
 ## Phase 1b: seeking, replication, redundancy, disk budget
 - [x] **Holder privacy first (RNS style):** anonymous requests with proof of access (serve token in the read-cap, `HMAC(token, link_id ‖ request)`); the cache tier is never served to others; explicit publish/seed for anonymous public serving ([ADR-0010](adr/0010-continuous-seeking.md), [threat model](04-threat-model.md#holder-privacy-tracking-and-honeypot-attacks)).
 - [x] Disk budget: store limit, free-space reserve, hard and elastic tiers, LRU eviction of the cache tier, hole punching, background enforcement, rollback of failed writes ([ADR-0012](adr/0012-disk-budget.md), implementation status).
-- [ ] Spare tier: fill free space with replicas by need score (rarest first), evicted first, idle bandwidth only.
+- [x] Spare tier, first slice: `--spare` fills free space with whole-file copies of libraries read here, rarest first, idle bandwidth and fast links only, served on, evicted first ([ADR-0012](adr/0012-disk-budget.md)).
+- [ ] Spare tier, continued: need score beyond rarity (demand, who asked, spread), the swap by score.
 - [x] Want-list in the store (readable wants); `/retifs/have`; event-driven seeker woken by announces; `retifs want`; partial `status` ([ADR-0010](adr/0010-continuous-seeking.md), implementation status).
 - [x] Blind wants for leases (CID + access token, pulled by the holder).
 - [x] Range reads of partially available files: only the chunks a range needs, fetched on demand ([ADR-0002](adr/0002-os-integration.md)).

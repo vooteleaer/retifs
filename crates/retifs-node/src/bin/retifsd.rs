@@ -1,7 +1,7 @@
 //! retifsd (prototype): the retifs shared instance.
 //!
 //!     retifsd [--store DIR] [--max-store SIZE] [--min-free SIZE] [--cache-max SIZE]
-//!             [--private-requests] [--hold-for-others SIZE] [--db-cache SIZE] [--lease-term DURATION] [--loss-target P]
+//!             [--private-requests] [--spare] [--hold-for-others SIZE] [--db-cache SIZE] [--lease-term DURATION] [--loss-target P]
 //!             [--public] [--put FILE]...
 //!
 //! SIZE: bytes, or with a K/M/G/T suffix (powers of 1024). Defaults (ADR-0012):
@@ -577,6 +577,8 @@ struct Args {
     put: Vec<PathBuf>,
     budget: retifs_store::Budget,
     private_requests: bool,
+    /// Fill free disk with spare copies (`--spare`, ADR-0012).
+    spare: bool,
     hold_limit: Option<u64>,
     /// How often to announce `retifs.node` (seconds; the announces say so).
     announce_s: u32,
@@ -664,6 +666,7 @@ fn args() -> Args {
         put: Vec::new(),
         budget: Default::default(),
         private_requests: false,
+        spare: false,
         hold_limit: None,
         announce_s: retifs_core::announce::DEFAULT_ANNOUNCE_S,
         db_cache: retifs_store::DEFAULT_DB_CACHE,
@@ -711,6 +714,7 @@ fn args() -> Args {
             "--min-free" => a.budget.min_free = Some(size(&it.next().expect("--min-free SIZE"))),
             "--cache-max" => a.budget.cache_max = Some(size(&it.next().expect("--cache-max SIZE"))),
             "--private-requests" => a.private_requests = true,
+            "--spare" => a.spare = true,
             "--hold-for-others" => a.hold_limit = Some(size(&it.next().expect("--hold-for-others SIZE"))),
             "--db-cache" => a.db_cache = size(&it.next().expect("--db-cache SIZE")) as usize,
             "--slow-link-budget" => a.slow_budget = duration_secs(&it.next().expect("--slow-link-budget DURATION")),
@@ -730,7 +734,7 @@ fn args() -> Args {
             "--announce-every" => a.announce_s = (duration_secs(&it.next().expect("--announce-every DURATION")) as u32).max(60),
             "-h" | "--help" => {
                 println!(
-                    "retifsd [--store DIR] [--max-store SIZE] [--min-free SIZE] [--cache-max SIZE] [--private-requests]
+                    "retifsd [--store DIR] [--max-store SIZE] [--min-free SIZE] [--cache-max SIZE] [--private-requests] [--spare]
                              [--hold-for-others SIZE] [--db-cache SIZE] [--lease-term DURATION] [--loss-target P] [--min-copies N] [--compact] [--no-storage] [--site NAME] [--slow-link-budget DURATION]\n        \
                      [--stamp-cost BITS] [--max-stamp-cost BITS] [--announce-every DURATION]\n        \
                      [--nomadnet NAMESPACE [--nomadnet-name NAME]] [--device NAME] [--default-libraries FILE] [--no-mounts] [--public] [--put FILE]..."
@@ -2296,6 +2300,9 @@ async fn serve(store: Arc<SlabStore>, identity: node::IdentitySecret, endpoint: 
             }
         }
     });
+    if args.spare {
+        worker("spare", spare_filler(daemon.clone()));
+    }
     worker("seeker", seeker(daemon));
 
     // Keep within the disk budget even when other programs fill the volume (ADR-0012).
@@ -5002,8 +5009,19 @@ async fn ensure_local(d: &Daemon, file: &FileRef, range: std::ops::Range<u64>, n
             peers.push(o.holder);
         }
     }
+    fetch_range(d, file, Some(range), &peers, deadline, tier::CACHE).await
+}
+
+/// Fetches what `range` of `file` needs (None: the whole file, padding
+/// included) from `peers` (ranked by the holder map) until `deadline`,
+/// storing arrivals in `tier`.
+async fn fetch_range(d: &Daemon, file: &FileRef, range: Option<std::ops::Range<u64>>, peers: &[PeerId], deadline: Instant, tier: u8) -> Result<(), String> {
     loop {
-        let missing = manifest::missing_for_range(&*d.store, file, range.clone()).map_err(|e| e.to_string())?;
+        let missing = match &range {
+            Some(r) => manifest::missing_for_range(&*d.store, file, r.clone()),
+            None => manifest::missing_whole(&*d.store, file),
+        }
+        .map_err(|e| e.to_string())?;
         if missing.is_empty() {
             return Ok(());
         }
@@ -5012,7 +5030,7 @@ async fn ensure_local(d: &Daemon, file: &FileRef, range: std::ops::Range<u64>, n
         }
         // Chunks are at most 256 KiB; most are far smaller. A rough upper bound.
         let bytes_needed = missing.len() as u64 * 64 * 1024;
-        let ranked = d.rank_sources(&file.root, &peers, bytes_needed);
+        let ranked = d.rank_sources(&file.root, peers, bytes_needed);
         let mut progressed = false;
         let mut too_slow = false;
         // Several holders known and much to fetch: a part from each at once.
@@ -5023,7 +5041,7 @@ async fn ensure_local(d: &Daemon, file: &FileRef, range: std::ops::Range<u64>, n
             .take(SPREAD_MAX_HOLDERS)
             .collect();
         if holders.len() >= 2 && missing.len() >= SPREAD_MIN_CHUNKS {
-            progressed = fetch_spread(d, &file.root, &missing, &holders, deadline).await?;
+            progressed = fetch_spread(d, &file.root, &missing, &holders, deadline, tier).await?;
         }
         for (peer, _) in &ranked {
             if progressed {
@@ -5059,7 +5077,7 @@ async fn ensure_local(d: &Daemon, file: &FileRef, range: std::ops::Range<u64>, n
             let _ = d.store.record_transfer(peer, bytes, t0.elapsed().as_millis() as u64);
             let chunks: Vec<(Cid, Vec<u8>)> = round.got.into_iter().map(|(i, ct, _)| (missing[i].0, ct)).collect();
             progressed |= !chunks.is_empty();
-            d.store.insert_batch(&chunks, tier::CACHE).map_err(|e| e.to_string())?;
+            d.store.insert_batch(&chunks, tier).map_err(|e| e.to_string())?;
         }
         // Nobody has it yet (a member may still be pulling it from its
         // writer): look again within the wait, as the mount promises.
@@ -5099,6 +5117,93 @@ fn msgpack_bytes(r: &[u8]) -> Vec<u8> {
     if r.len() == start + len { r[start..].to_vec() } else { r.to_vec() }
 }
 
+/// The spare tier is filled at most this often (ADR-0012).
+const SPARE_EVERY: Duration = Duration::from_secs(600);
+/// Spare filling stops while less than this is free above the reserve.
+const SPARE_MIN_ROOM: u64 = 256 << 20;
+/// At most this much is fetched for the spare tier in one pass.
+const SPARE_PER_PASS: u64 = 256 << 20;
+
+/// Fills free disk with spare copies (ADR-0012): content of the libraries this
+/// node reads but doesn't keep, rarest first (fewest holders seen), from fast
+/// links only, while nothing else is being sought. Spare chunks are served to
+/// the library's members like kept ones, promise nothing, and are the first
+/// evicted when room is needed.
+async fn spare_filler(d: Arc<Daemon>) {
+    // Not right at start: syncing comes first.
+    tokio::time::sleep(Duration::from_secs(120)).await;
+    let mut tick = tokio::time::interval(SPARE_EVERY);
+    loop {
+        tick.tick().await;
+        if stopping() {
+            return;
+        }
+        if let Err(e) = spare_pass(&d).await {
+            eprintln!("spare: {e}");
+        }
+    }
+}
+
+async fn spare_pass(d: &Daemon) -> Result<(), String> {
+    let sought = d.store.wanted_files().map_err(|e| e.to_string())?.len();
+    if sought > 0 {
+        println!("spare: {sought} file(s) being sought; spare copies wait (idle bandwidth only)");
+        return Ok(());
+    }
+    let room = d.store.limits().map_err(|e| e.to_string())?.room();
+    if room < SPARE_MIN_ROOM {
+        return Ok(());
+    }
+    let mut budget = (room - SPARE_MIN_ROOM).min(SPARE_PER_PASS);
+    // Candidates: (holders seen, size, library, file).
+    let mut candidates: Vec<(usize, u64, String, FileRef)> = Vec::new();
+    for ns in d.store.ns_names().map_err(|e| e.to_string())? {
+        if ns.starts_with("ch-") || d.leaving.lock().unwrap().contains(&ns) {
+            continue;
+        }
+        for r in d.store.records(&ns).map_err(|e| e.to_string())? {
+            for b in &r.blocks {
+                if b.size == 0 || b.size > budget || complete(&d.store, b) || d.store.is_wanted(&b.root).unwrap_or(false) {
+                    continue;
+                }
+                let seen = d.holder_map.lock().unwrap().seen_holding(&b.root, now_ms());
+                candidates.push((seen.0.len() + seen.1 as usize, b.size, ns.clone(), *b));
+            }
+        }
+    }
+    candidates.sort_by_key(|(holders, size, _, _)| (*holders, *size));
+    let mut filled = 0usize;
+    for (_, size, ns, file) in candidates {
+        if stopping() || size > budget {
+            break;
+        }
+        let mut peers = d.store.ns_peers(&ns).map_err(|e| e.to_string())?;
+        peers.extend(ns_holders(d, &ns).into_iter().filter(|h| !peers.contains(h)).collect::<Vec<_>>());
+        // Never over slow links (ADR-0014): spare copies aren't worth the airtime.
+        peers.retain(|p| !d.quality(p).slow());
+        if peers.is_empty() {
+            continue;
+        }
+        println!("spare: copying {} ({size} B) of {ns} from {} peer(s)", file.root, peers.len());
+        let deadline = Instant::now() + Duration::from_secs(300);
+        if let Err(e) = fetch_range(d, &file, None, &peers, deadline, tier::SPARE).await {
+            println!("spare: {}: {e}", file.root);
+            continue;
+        }
+        if !complete(&d.store, &file) {
+            continue;
+        }
+        // Served on, like a kept copy: the library's members may ask this node.
+        d.store.register_serving(&file_chunks(&d.store, &file)?).map_err(|e| e.to_string())?;
+        budget = budget.saturating_sub(size);
+        filled += 1;
+    }
+    if filled > 0 {
+        println!("spare: {filled} file(s) copied into free space, rarest first");
+    }
+    Ok(())
+}
+
 /// A read spreads over several known holders when it needs at least this many chunks.
 const SPREAD_MIN_CHUNKS: usize = 32;
 /// Holders a read spreads over at most.
@@ -5107,7 +5212,7 @@ const SPREAD_MAX_HOLDERS: usize = 3;
 /// Fetches `missing` from several `holders` at once, a part from each (the
 /// holder map's load spreading, ADR-0010). What a holder failed to bring
 /// stays missing and is asked of the next source. True if anything arrived.
-async fn fetch_spread(d: &Daemon, root: &Cid, missing: &[(Cid, retifs_core::Seed)], holders: &[PeerId], deadline: Instant) -> Result<bool, String> {
+async fn fetch_spread(d: &Daemon, root: &Cid, missing: &[(Cid, retifs_core::Seed)], holders: &[PeerId], deadline: Instant, tier: u8) -> Result<bool, String> {
     let mut links = Vec::new();
     for peer in holders {
         let left = deadline.saturating_duration_since(Instant::now());
@@ -5139,7 +5244,7 @@ async fn fetch_spread(d: &Daemon, root: &Cid, missing: &[(Cid, retifs_core::Seed
                 let _ = d.store.record_transfer(peer, bytes, took.as_millis() as u64);
                 let chunks: Vec<(Cid, Vec<u8>)> = round.got.into_iter().map(|(i, ct, _)| (part[i].0, ct)).collect();
                 progressed |= !chunks.is_empty();
-                d.store.insert_batch(&chunks, tier::CACHE).map_err(|e| e.to_string())?;
+                d.store.insert_batch(&chunks, tier).map_err(|e| e.to_string())?;
             }
             Err(_) => {
                 d.drop_link(peer);

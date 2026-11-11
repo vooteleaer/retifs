@@ -111,5 +111,13 @@ In `retifs-store` and `retifsd`:
 Built and in use on the testbed: the store limit and free-space reserve, hard and elastic tiers, eviction in the order above, refusing leases past the hold limit, refusing pinned writes with "disk budget reached", compaction (`retifsd --compact`), and short of room releasing own files with enough confirmed copies elsewhere to the cache ([ADR-0031](0031-storage-less-nodes.md)).
 
 Not built yet:
-- **Filling the spare tier:** the tier exists as a flag in the store, but nothing fills it by need score.
+- ~~**Filling the spare tier:** the tier exists as a flag in the store, but nothing fills it by need score.~~ First slice built (2026-11-11), see below.
 - **The signed release** (`retifs release`) a holder sends its owner when an operator shrinks a lease.
+
+## Spare tier, first slice (2026-11-11)
+- `retifsd --spare` (`spare = true` in `retifs.toml`; off by default) fills free disk with spare copies.
+- **Candidates:** content of the libraries this node reads but doesn't keep (joined lazily, or kept by rules), not already here. A node can only prove access to chunks whose seeds it knows, so other content isn't a candidate.
+- **Need score:** rarity alone, from the holder map (fewest holders seen in the last hour first), then the smaller file first. Recent demand, who asked and the spread policy are not used yet.
+- **When:** two minutes after start, then every ten minutes; only while nothing else is being sought (idle bandwidth), only while 256 MiB or more is free above the reserve, at most 256 MiB a pass. Never from a peer behind a slow link. Whole files, padding included, so a copy serves the file.
+- **Served:** a spare copy is registered for serving like a kept one, so the library's members (who ask its members first) get it from here. It promises nothing and is evicted first (least recently used; the swap by score isn't built).
+- Live (four daemons on one machine): a node holding nothing for others joined a library of three 1 MB files lazily; its first pass copied all three (3.4 MiB with padding) into the spare tier. With the writer stopped, a fourth node fetched one of the files from that node alone, identical.
