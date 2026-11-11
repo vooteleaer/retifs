@@ -52,7 +52,7 @@ fn install() {
     if !quiet
         && ask(
             &format!(
-                "Install retifs {VERSION} for this user?\n\nIt goes to {} and starts with your login (in the notification area). It runs on Reticulum: install Prns too, or have another Reticulum shared instance running.\n\nretifs is a prototype: its formats still change. Keep nothing in it you can't lose.",
+                "Install retifs {VERSION} for this user?\n\nIt goes to {} and starts with your login (in the notification area). It runs on Reticulum: have a Reticulum shared instance running (Prns, rnsd or another).\n\nretifs is a prototype: its formats still change. Keep nothing in it you can't lose.",
                 dir.display()
             ),
             MB_OKCANCEL | MB_ICONINFORMATION,

@@ -41,3 +41,6 @@ See the [threat model](../04-threat-model.md).
 ## Consequences
 - Easier: one language, single static binaries (musl), embedded and WASM targets come for free, no rewrite between prototype and implementation.
 - Harder: slower early prototyping than Python. Prns has a single dominant maintainer (bus factor). Rust on Haiku is tier 3. That's accepted: Linux is the primary target, and on Haiku, retifsd and the userlandfs module have built and run natively since 2026-10-31 (with a patched mio, upstream PR pending).
+
+## Any shared instance (2026-11-11, owner)
+Prns is the RNS stack *inside* retifs (retifsd and the CLI attach to the machine's shared instance as its clients, through the transport trait). The shared instance itself may be any Reticulum implementation that offers one: Prns's `prnsd`, Python's `rnsd`, or another; retifs joins it the standard way (the abstract Unix socket `rns/default` on Linux, else TCP 37428) and assumes nothing about which one runs. Nothing a user sees should name one: messages say "a Reticulum shared instance (Prns, rnsd, …)", and the desktop utility reads and changes connections in Reticulum's own configuration file, which every implementation reads, using `prnsd`'s command line only for extras where it's there (per-interface traffic, changes applied live).

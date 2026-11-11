@@ -11,10 +11,10 @@ What runs
 - Reticulum: retifsd joins a shared instance on the machine, which this
   package doesn't bring: install Prns (prnsd), or run any other Reticulum
   shared instance (rnsd). retifsd waits for it at start. Its connections
-  are Reticulum's, e.g. a TCP connection to a node you trust:
-      prnsd interfaces add
-      prnsd status
-  or use the retifs-desktop utility.
+  are Reticulum's own, in its configuration file (~/.reticulum/config,
+  read by every implementation), e.g. a TCP connection to a node you trust;
+  the retifs-desktop utility adds them there, or use your implementation's
+  tools (prnsd interfaces add, rnstatus, ...).
 
 First steps
 -----------

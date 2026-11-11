@@ -62,7 +62,7 @@ pub async fn attach(handle: &PrnsNodeHandle) -> Result<String, String> {
             Err(e) => errors.push(format!("{e:?}")),
         }
     }
-    Err(format!("no Reticulum shared instance running ({}); start prnsd first", errors.join("; ")))
+    Err(format!("no Reticulum shared instance running ({}); start one first: any Reticulum with a shared instance (Prns, rnsd, …)", errors.join("; ")))
 }
 
 /// Loads the node identity, creating it on first use, so the node keeps one address.
