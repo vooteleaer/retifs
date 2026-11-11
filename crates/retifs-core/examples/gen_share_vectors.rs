@@ -23,10 +23,11 @@ fn main() {
             "share_ns_id": hex::encode(ns_id),
             "source_record": hex::encode(source),
             "share_record": hex::encode(share::record_id(&source, &ns_id)),
+            "writeback_record": hex::encode(share::writeback_id(&source, &ns_id)),
         }));
     }
     let out = json!({
-        "about": "ADR-0021: a share copy's record ID = HKDF-SHA256(ikm = source record ID, salt = \"retifs/v1/share-record\", info = ns_id of the share)[0..16]; ns_id = SHA-256(\"retifs/v1/ns\" || share writer)[0..16]",
+        "about": "ADR-0021: a share copy's record ID = HKDF-SHA256(ikm = source record ID, salt = \"retifs/v1/share-record\", info = ns_id of the share)[0..16]; a member's addition written back to the source = HKDF-SHA256(ikm = the member's record ID, salt = \"retifs/v1/share-writeback\", info = ns_id of the share)[0..16] (source_record stands for the member's record there); ns_id = SHA-256(\"retifs/v1/ns\" || share writer)[0..16]",
         "cases": cases,
     });
     println!("{}", serde_json::to_string_pretty(&out).unwrap());

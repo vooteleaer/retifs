@@ -21,6 +21,7 @@ use sha2::Sha256;
 use crate::{channel::NsId, record::RecordId, record::Value};
 
 const SHARE_RECORD_SALT: &[u8] = b"retifs/v1/share-record";
+const WRITEBACK_SALT: &[u8] = b"retifs/v1/share-writeback";
 
 /// The `type` of a share's definition record, kept in the source namespace.
 pub const DEFINITION_TYPE: &str = "retifs.share";
@@ -29,6 +30,20 @@ pub const DEFINITION_TYPE: &str = "retifs.share";
 pub fn record_id(source: &RecordId, share: &NsId) -> RecordId {
     let mut out = [0u8; 16];
     Hkdf::<Sha256>::new(Some(SHARE_RECORD_SALT), source).expand(share, &mut out).expect("16 bytes is a valid HKDF output length");
+    out
+}
+
+/// The ID in the source namespace of a record a member added to the share
+/// `share` (write-back, ADR-0021): derived, so every owner node that keeps
+/// the share writes the addition as the same record (equal writes merge).
+///
+/// ```text
+/// source_id = HKDF-SHA256(ikm = the member's record ID, salt = "retifs/v1/share-writeback",
+///                         info = the share namespace's ns_id)[0..16]
+/// ```
+pub fn writeback_id(member_record: &RecordId, share: &NsId) -> RecordId {
+    let mut out = [0u8; 16];
+    Hkdf::<Sha256>::new(Some(WRITEBACK_SALT), member_record).expand(share, &mut out).expect("16 bytes is a valid HKDF output length");
     out
 }
 

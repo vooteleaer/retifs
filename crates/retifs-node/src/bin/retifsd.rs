@@ -5613,8 +5613,11 @@ async fn sync_share(d: &Daemon, source: &str, def: &Record) -> Result<usize, Str
         want.insert(share::record_id(&r.id, &ns_id), (share::copy_attrs(&r.attrs, &sd.omit), r.blocks.clone()));
     }
     let have: HashMap<RecordId, Record> = d.store.records(&target).map_err(|e| e.to_string())?.into_iter().map(|r| (r.id, r)).collect();
+    // Write-back: what members added goes into the source; what can't be
+    // placed there stays in the share as the member left it.
+    let (written_back, left) = write_back(d, source, &target, &sd, def, &want, &have).await?;
     let mut ops = Vec::new();
-    let mut changed = 0;
+    let mut changed = written_back;
     for (id, (attrs, blocks)) in &want {
         let before = have.get(id);
         let n = ops.len();
@@ -5632,12 +5635,20 @@ async fn sync_share(d: &Daemon, source: &str, def: &Record) -> Result<usize, Str
         }
         changed += usize::from(ops.len() > n);
     }
-    for id in have.keys().filter(|id| !want.contains_key(*id)) {
+    for id in have.keys().filter(|id| !want.contains_key(*id) && !left.contains(*id)) {
         ops.push(Op::Delete(*id));
         changed += 1;
     }
-    if ops.is_empty() {
+    if ops.is_empty() && written_back == 0 {
         return Ok(0);
+    }
+    if written_back > 0 {
+        // The source has the members' additions now: their copies at once,
+        // not at the next pass.
+        if !ops.is_empty() {
+            write_ops(d, &target, ops).await?;
+        }
+        return Ok(changed + Box::pin(sync_share(d, source, def)).await?);
     }
     match write_ops(d, &target, ops).await {
         Ok(_) => Ok(changed),
@@ -5645,6 +5656,120 @@ async fn sync_share(d: &Daemon, source: &str, def: &Record) -> Result<usize, Str
         Err(e) if e.contains("may not write") => Ok(0),
         Err(e) => Err(e),
     }
+}
+
+/// Write-back (ADR-0021): records members added to the share (written by a
+/// writer without `grant`; the owner's nodes hold `grant`) that aren't
+/// copies of the source are written into the source where the share's
+/// selection says: a folder share's path prefix (the file keeps its name),
+/// an album's name, any other `key=value` of the selection. The source
+/// record's ID is derived from the member's (`share::writeback_id`), so
+/// several owner nodes write the same record. The member's record then goes
+/// from the share, and the copy of the new source record takes its place.
+/// One that still doesn't fit the selection is left in the share. Members'
+/// changes to copies of the owner's records don't flow back.
+/// Returns how many were written back, and the records left alone.
+async fn write_back(
+    d: &Daemon,
+    source: &str,
+    target: &str,
+    sd: &ShareDef,
+    def: &Record,
+    want: &HashMap<RecordId, (std::collections::BTreeMap<String, Value>, Vec<FileRef>)>,
+    have: &HashMap<RecordId, Record>,
+) -> Result<(usize, std::collections::HashSet<RecordId>), String> {
+    let mut left = std::collections::HashSet::new();
+    let Ok(merged) = materialize(d, target) else { return Ok((0, left)) };
+    let members: std::collections::HashSet<retifs_core::ops::WriterKey> = merged
+        .writers
+        .iter()
+        .filter(|(_, rights)| rights.contains(&Right::Write) && !rights.contains(&Right::Grant))
+        .map(|(w, _)| *w)
+        .collect();
+    if members.is_empty() {
+        return Ok((0, left));
+    }
+    let added: std::collections::HashSet<RecordId> = {
+        let entry = ns_entry(d, target);
+        let cache = entry.lock().unwrap();
+        cache
+            .chains
+            .iter()
+            .filter(|(w, _)| members.contains(*w))
+            .flat_map(|(_, walked)| walked.iter().flat_map(|(_, _, c)| c.ops.iter()))
+            .filter_map(|op| match op {
+                Op::Set(id, _, _) | Op::Blocks(id, _) => Some(*id),
+                _ => None,
+            })
+            .filter(|id| have.contains_key(id) && !want.contains_key(id))
+            .collect()
+    };
+    let share_ns = sd.addr.ns_id();
+    let mut new_ids = Vec::new();
+    let mut ops = Vec::new();
+    for id in &added {
+        let r = &have[id];
+        let mut attrs: std::collections::BTreeMap<String, Value> =
+            r.attrs.iter().filter(|(k, _)| *k != "keep" && !k.starts_with("keep:")).map(|(k, v)| (k.clone(), v.clone())).collect();
+        for t in &sd.terms {
+            match t {
+                retifs_store::Term::Prefix(k, p) if k == "path" => {
+                    let path = match attrs.get("path") {
+                        Some(Value::Str(s)) => s.clone(),
+                        _ => match attrs.get("name") {
+                            Some(Value::Str(n)) => n.clone(),
+                            _ => continue,
+                        },
+                    };
+                    if !path.starts_with(p.as_str()) {
+                        let name = path.rsplit('/').next().unwrap_or(&path);
+                        attrs.insert("path".into(), Value::Str(format!("{}/{name}", p.trim_end_matches('/'))));
+                    }
+                }
+                retifs_store::Term::Eq(k, v) if k == "album" => {
+                    let mut albums: Vec<Value> = match attrs.get("album") {
+                        Some(Value::List(l)) => l.clone(),
+                        Some(other) => vec![other.clone()],
+                        None => Vec::new(),
+                    };
+                    if !albums.contains(v) {
+                        albums.push(v.clone());
+                    }
+                    attrs.insert("album".into(), if albums.len() == 1 { albums.remove(0) } else { Value::List(albums) });
+                }
+                retifs_store::Term::Eq(k, v) => {
+                    attrs.insert(k.clone(), v.clone());
+                }
+                _ => {}
+            }
+        }
+        let candidate = Record { id: share::writeback_id(id, &share_ns), attrs, blocks: r.blocks.clone() };
+        if !sd.terms.iter().all(|t| t.matches(&candidate)) {
+            left.insert(*id);
+            continue;
+        }
+        ops.extend(candidate.attrs.iter().map(|(k, v)| Op::Set(candidate.id, k.clone(), v.clone())));
+        if !candidate.blocks.is_empty() {
+            ops.push(Op::Blocks(candidate.id, candidate.blocks.clone()));
+        }
+        new_ids.push((*id, candidate.id));
+    }
+    if new_ids.is_empty() {
+        return Ok((0, left));
+    }
+    // A share of chosen records: the new ones join the selection.
+    if !sd.ids.is_empty() {
+        let mut ids: Vec<Value> = sd.ids.iter().map(|i| Value::Str(hex(i))).collect();
+        ids.extend(new_ids.iter().map(|(_, s)| Value::Str(hex(s))));
+        ops.push(Op::Set(def.id, "ids".into(), Value::List(ids)));
+    }
+    write_ops(d, source, ops).await?;
+    let gone: Vec<Op> = new_ids.iter().map(|(member, _)| Op::Delete(*member)).collect();
+    match write_ops(d, target, gone).await {
+        Ok(_) | Err(_) => {} // the copy replaces it on the next pass either way
+    }
+    println!("share {target}: {} record(s) members added written back into {source}", new_ids.len());
+    Ok((new_ids.len(), left))
 }
 
 /// Keeps every share whose source changed here up to date (ADR-0021), and
