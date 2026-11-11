@@ -305,7 +305,7 @@ fn collect(e: &Expr, out: &mut Vec<String>) {
             let key = match attr.as_str() {
                 "BEOS:TYPE" => "type",
                 "name" | "size" | "last_modified" => return,
-                k => k,
+                k => crate::media::key_for(k).unwrap_or(k),
             };
             // retifs compares by type (an integer never equals a float or a
             // string), Haiku by the attribute's: only strings are narrowed,

@@ -22,6 +22,7 @@
 mod ffi;
 #[cfg(target_os = "haiku")]
 mod ops;
+mod media;
 mod person;
 mod query;
 pub mod types;

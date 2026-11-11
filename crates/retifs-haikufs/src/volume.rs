@@ -258,6 +258,7 @@ impl Volume {
             if is_person(r) {
                 names.extend(crate::person::shown(|k| has(r, k)).into_iter().map(|(a, _)| a.to_string()));
             }
+            names.extend(crate::media::shown(|k| has(r, k)).into_iter().map(|(a, _)| a.to_string()));
         }
         names.extend(self.local_attrs.keys().filter(|(i, _)| *i == ino).map(|(_, n)| n.clone()));
         names
@@ -272,6 +273,10 @@ impl Volume {
         if name == MIME_ATTR {
             let m = mime(r)?;
             return Some(Attr { type_code: crate::types::B_MIME_STRING_TYPE, data: c_string(m) });
+        }
+        if let Some(key) = crate::media::key_for(name) {
+            let (_, v) = r.attrs.iter().find(|(k, _)| k == key)?;
+            return Some(crate::media::haiku_value(name, v));
         }
         let key = if is_person(r) { crate::person::key_for(name, |k| has(r, k)).unwrap_or(name) } else { name };
         let (_, v) = r.attrs.iter().find(|(k, _)| k == key)?;
@@ -549,7 +554,13 @@ impl Volume {
             }
             ("type".to_string(), t)
         } else {
-            let key = if person { crate::person::key_for(name, |k| keys.iter().any(|h| h == k)).unwrap_or(name) } else { name };
+            let key = if let Some(k) = crate::media::key_for(name) {
+                k
+            } else if person {
+                crate::person::key_for(name, |k| keys.iter().any(|h| h == k)).unwrap_or(name)
+            } else {
+                name
+            };
             (key.to_string(), from_haiku(&a))
         };
         if key == "path" && !matches!(&value, AttrValue::Str(p) if tree::normalize(p).is_some_and(|p| !tree::is_virtual(&p))) {
@@ -576,6 +587,8 @@ impl Volume {
         let r = self.record(ino).ok_or(Fail::NotFound)?;
         let key = if name == MIME_ATTR {
             "type"
+        } else if let Some(k) = crate::media::key_for(name) {
+            k
         } else if is_person(r) {
             crate::person::key_for(name, |k| has(r, k)).unwrap_or(name)
         } else {
@@ -658,7 +671,10 @@ impl crate::query::Subject for NodeView<'_> {
                 _ => None,
             },
             MIME_ATTR => self.record.and_then(mime).map(|m| AttrValue::Str(m.to_string())),
-            k => self.record?.attrs.iter().find(|(key, _)| key == k).map(|(_, v)| v.clone()),
+            k => {
+                let k = crate::media::key_for(k).unwrap_or(k);
+                self.record?.attrs.iter().find(|(key, _)| key == k).map(|(_, v)| v.clone())
+            }
         }
     }
 }
@@ -740,6 +756,11 @@ impl Volume {
         for r in self.records.values() {
             for (k, v) in &r.attrs {
                 seen.entry(k.as_str()).or_insert_with(|| haiku_attr(v).type_code);
+            }
+            for (attr, key) in crate::media::shown(|k| has(r, k)) {
+                if let Some((_, v)) = r.attrs.iter().find(|(k, _)| k == key) {
+                    seen.entry(attr).or_insert_with(|| crate::media::haiku_value(attr, v).type_code);
+                }
             }
         }
         out.extend(seen.into_iter().filter(|(k, _)| !out.iter().any(|(o, _)| o == k)).map(|(k, t)| (k.to_string(), t)).collect::<Vec<_>>());
