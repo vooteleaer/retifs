@@ -149,7 +149,7 @@ fn make_share(store: &Path, path: &Path, within: Option<(String, PathBuf)>, via:
         };
         let wanted = libretifs::link::suggest_name(&base);
         let name = (1..).map(|i| if i == 1 { wanted.clone() } else { format!("{wanted}-{i}") }).find(|n| !taken.contains(n)).unwrap();
-        let req = Request::ShareCreate { source: ns.clone(), name: name.clone(), terms, ids, omit: vec![], keep: vec![] };
+        let req = Request::ShareCreate { source: ns.clone(), name: name.clone(), terms, ids, omit: vec![] };
         let view = match client.call(req).await.map_err(|e| e.to_string())? {
             Response::Namespace(v) => v,
             Response::Error { message } => return Err(message),

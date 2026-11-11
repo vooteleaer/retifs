@@ -753,7 +753,8 @@ Covered ({}): {}", covered.len(), if covered.is_empty() { "none".into() } else {
                     };
                     let wanted = libretifs::link::suggest_name(&base);
                     let name = (1..).map(|i| if i == 1 { wanted.clone() } else { format!("{wanted}-{i}") }).find(|n| !taken.contains(n)).unwrap();
-                    let req = libretifs::Request::ShareCreate { source: source.clone(), name, terms, ids, omit: opt("--omit"), keep: opt("--keep") };
+                    let omit = [opt("--omit"), opt("--keep").into_iter().map(|k| format!("-{k}")).collect()].concat();
+                    let req = libretifs::Request::ShareCreate { source: source.clone(), name, terms, ids, omit };
                     match client.call(req).await.unwrap_or_else(|e| fail(e)) {
                         libretifs::Response::Namespace(v) => {
                             let (node, _, _) = client.ping().await.unwrap_or_else(|e| fail(e));
@@ -787,7 +788,8 @@ Covered ({}): {}", covered.len(), if covered.is_empty() { "none".into() } else {
                             i += 1;
                         }
                     }
-                    let req = libretifs::Request::ShareCreate { source, name, terms, ids: opt("--id"), omit: opt("--omit"), keep: opt("--keep") };
+                    let omit = [opt("--omit"), opt("--keep").into_iter().map(|k| format!("-{k}")).collect()].concat();
+                    let req = libretifs::Request::ShareCreate { source, name, terms, ids: opt("--id"), omit };
                     match client.call(req).await.unwrap_or_else(|e| fail(e)) {
                         libretifs::Response::Namespace(v) => {
                             let (node, _, _) = client.ping().await.unwrap_or_else(|e| fail(e));

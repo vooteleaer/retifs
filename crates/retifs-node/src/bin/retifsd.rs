@@ -3442,7 +3442,10 @@ async fn handle(d: &Daemon, req: Request) -> Result<Response, String> {
             Ok(Response::Namespace(ns_view(d, &ns)?))
         }
 
-        Request::ShareCreate { source, name, terms, ids, omit, keep } => {
+        Request::ShareCreate { source, name, terms, ids, omit } => {
+            // `-key`: a default left-out attribute kept after all.
+            let (keep, omit): (Vec<String>, Vec<String>) = omit.into_iter().partition(|k| k.starts_with('-'));
+            let keep: Vec<String> = keep.into_iter().map(|k| k[1..].to_string()).collect();
             let omit = share::with_default_omit(omit, &keep);
             writable(&source)?;
             writable(&name)?;

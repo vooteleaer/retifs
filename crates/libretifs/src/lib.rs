@@ -347,11 +347,10 @@ pub enum Request {
         terms: Vec<String>,
         #[serde(default)]
         ids: Vec<String>,
+        /// Attributes to leave out (`key`, or a prefix `key*`). A default
+        /// one (`geo`) written `-geo` is kept instead.
         #[serde(default)]
         omit: Vec<String>,
-        /// Attributes a share leaves out by default (`geo`) but should keep.
-        #[serde(default)]
-        keep: Vec<String>,
     },
     /// Ends a share: deletes its definition `id` from `source`, so updates
     /// stop. What members already have stays theirs.
