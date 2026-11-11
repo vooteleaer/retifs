@@ -5061,10 +5061,9 @@ async fn ensure_local(d: &Daemon, file: &FileRef, range: std::ops::Range<u64>, n
             d.saw_holding(&file.root, peer, round.asked, round.held);
             let bytes: u64 = round.got.iter().map(|(_, ct, _)| ct.len() as u64).sum();
             let _ = d.store.record_transfer(peer, bytes, t0.elapsed().as_millis() as u64);
-            for (i, ct, _) in round.got {
-                d.store.insert(&missing[i].0, &ct, tier::CACHE).map_err(|e| e.to_string())?;
-                progressed = true;
-            }
+            let chunks: Vec<(Cid, Vec<u8>)> = round.got.into_iter().map(|(i, ct, _)| (missing[i].0, ct)).collect();
+            progressed |= !chunks.is_empty();
+            d.store.insert_batch(&chunks, tier::CACHE).map_err(|e| e.to_string())?;
         }
         // Nobody has it yet (a member may still be pulling it from its
         // writer): look again within the wait, as the mount promises.
@@ -5142,10 +5141,9 @@ async fn fetch_spread(d: &Daemon, root: &Cid, missing: &[(Cid, retifs_core::Seed
                 d.saw_holding(root, peer, round.asked, round.held);
                 let bytes: u64 = round.got.iter().map(|(_, ct, _)| ct.len() as u64).sum();
                 let _ = d.store.record_transfer(peer, bytes, took.as_millis() as u64);
-                for (i, ct, _) in round.got {
-                    d.store.insert(&part[i].0, &ct, tier::CACHE).map_err(|e| e.to_string())?;
-                    progressed = true;
-                }
+                let chunks: Vec<(Cid, Vec<u8>)> = round.got.into_iter().map(|(i, ct, _)| (part[i].0, ct)).collect();
+                progressed |= !chunks.is_empty();
+                d.store.insert_batch(&chunks, tier::CACHE).map_err(|e| e.to_string())?;
             }
             Err(_) => {
                 d.drop_link(peer);
@@ -7485,9 +7483,8 @@ async fn seek_pass(d: &Daemon) -> Result<(), String> {
                     break;
                 }
                 progressed = true;
-                for (i, ct, pt) in round.got {
-                    arrived(store, &root, &wants[i], &ct, &pt)?;
-                }
+                let got: Vec<(Want, Vec<u8>, Vec<u8>)> = round.got.into_iter().map(|(i, ct, pt)| (wants[i], ct, pt)).collect();
+                arrived_many(store, &root, &got)?;
             }
             store.hint_result(&root, &hint.peer, progressed, now_ms()).map_err(|e| e.to_string())?;
             expand_local(store, &root)?;
@@ -7524,6 +7521,32 @@ fn arrived(store: &SlabStore, root: &retifs_core::Cid, want: &Want, ct: &[u8], p
         store.add_wants(root, &children).map_err(|e| e.to_string())?;
     }
     store.satisfied(root, &want.cid).map_err(|e| e.to_string())
+}
+
+/// A round's arrivals at once: the chunks stored in one batch (cache tier),
+/// manifest nodes expanded into one set of new wants, and the wants met in
+/// one transaction; one at a time, every chunk cost three index commits.
+fn arrived_many(store: &SlabStore, root: &retifs_core::Cid, got: &[(Want, Vec<u8>, Vec<u8>)]) -> Result<(), String> {
+    let chunks: Vec<(retifs_core::Cid, Vec<u8>)> = got.iter().map(|(w, ct, _)| (w.cid, ct.clone())).collect();
+    match store.insert_batch(&chunks, tier::CACHE) {
+        Ok(_) | Err(retifs_store::StoreError::Full(_)) => {}
+        Err(e) => return Err(e.to_string()),
+    }
+    let mut children = Vec::new();
+    for (want, _, pt) in got.iter().filter(|(w, _, _)| w.node) {
+        let node = if want.cid == *root { decode_root(pt, want.span) } else { decode_node(pt, want.span) }.map_err(|e| e.to_string())?;
+        children.extend(
+            node.entries
+                .iter()
+                .filter(|c| store.tier(&c.cid).ok().flatten().is_none())
+                .map(|c| Want { cid: c.cid, seed: c.seed, span: c.span, node: !node.leaf }),
+        );
+    }
+    if !children.is_empty() {
+        store.add_wants(root, &children).map_err(|e| e.to_string())?;
+    }
+    let met: Vec<retifs_core::Cid> = got.iter().map(|(w, _, _)| w.cid).collect();
+    store.satisfied_many(root, &met).map_err(|e| e.to_string())
 }
 
 /// Satisfies wants whose chunks are already local (expanding local nodes).

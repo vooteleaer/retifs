@@ -180,6 +180,19 @@ impl SlabStore {
         Ok(())
     }
 
+    /// Several wanted chunks arrived: one transaction.
+    pub fn satisfied_many(&self, root: &Cid, cids: &[Cid]) -> Result<(), StoreError> {
+        let w = self.write()?;
+        {
+            let mut t = w.open_table(WANTS)?;
+            for cid in cids {
+                t.remove(pair(root.as_bytes(), cid.as_bytes()).as_slice())?;
+            }
+        }
+        w.commit()?;
+        Ok(())
+    }
+
     /// Stops seeking a file (complete, or given up): drops its wants and hints.
     pub fn finish_file(&self, root: &Cid) -> Result<(), StoreError> {
         let start = root.as_bytes().to_vec();

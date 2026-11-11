@@ -25,7 +25,7 @@ fn segment_files(root: &std::path::Path) -> Vec<(String, u64)> {
         for seg in fs::read_dir(class.path()).unwrap() {
             let seg = seg.unwrap();
             out.push((format!("{}/{}", class.file_name().to_string_lossy(), seg.file_name().to_string_lossy()),
-                      seg.metadata().unwrap().len()));
+                      fs::metadata(seg.path()).unwrap().len())); // the file itself: NTFS updates a directory entry's size lazily while the file is open
         }
     }
     out.sort();

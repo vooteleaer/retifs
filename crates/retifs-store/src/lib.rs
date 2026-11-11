@@ -24,7 +24,7 @@ use std::{
     collections::HashMap,
     fmt,
     fs::{self, File, OpenOptions},
-    io::{self, Read, Seek, SeekFrom, Write},
+    io,
     path::{Path, PathBuf},
     sync::{Mutex, RwLock},
     time::{Duration, Instant, SystemTime, UNIX_EPOCH},
@@ -231,9 +231,60 @@ pub struct SlabStore {
     /// Asking the OS costs ~2 ms on Windows, so it's sampled at most once per
     /// DISK_SAMPLE and adjusted by what the store wrote or freed since.
     disk: Mutex<Option<(Instant, u64, u64, u64)>>,
+    /// Segment files kept open, read and written at offsets (no shared cursor),
+    /// so a chunk read or written doesn't open its segment each time.
+    /// Segments are never deleted, so a kept handle never goes stale.
+    segments: Mutex<HashMap<(u8, u32), std::sync::Arc<File>>>,
 }
 
 const DISK_SAMPLE: Duration = Duration::from_secs(1);
+
+/// Segment files kept open at most; past this the set is emptied and refilled.
+const OPEN_SEGMENTS: usize = 256;
+
+/// Reads `buf.len()` bytes at `offset`, without moving any cursor.
+fn read_at(f: &File, buf: &mut [u8], offset: u64) -> io::Result<()> {
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::FileExt;
+        f.read_exact_at(buf, offset)
+    }
+    #[cfg(windows)]
+    {
+        use std::os::windows::fs::FileExt;
+        let mut done = 0;
+        while done < buf.len() {
+            let n = f.seek_read(&mut buf[done..], offset + done as u64)?;
+            if n == 0 {
+                return Err(io::ErrorKind::UnexpectedEof.into());
+            }
+            done += n;
+        }
+        Ok(())
+    }
+}
+
+/// Writes all of `bytes` at `offset`, without moving any cursor.
+fn write_at(f: &File, bytes: &[u8], offset: u64) -> io::Result<()> {
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::FileExt;
+        f.write_all_at(bytes, offset)
+    }
+    #[cfg(windows)]
+    {
+        use std::os::windows::fs::FileExt;
+        let mut done = 0;
+        while done < bytes.len() {
+            let n = f.seek_write(&bytes[done..], offset + done as u64)?;
+            if n == 0 {
+                return Err(io::ErrorKind::WriteZero.into());
+            }
+            done += n;
+        }
+        Ok(())
+    }
+}
 
 /// In a batch, one write in this many is durable (see `SlabStore::write`).
 const BULK_DURABLE: usize = 256;
@@ -302,7 +353,23 @@ impl SlabStore {
             budget: RwLock::new(Budget::default()),
             touched: Mutex::new(HashMap::new()),
             disk: Mutex::new(None),
+            segments: Mutex::new(HashMap::new()),
         })
+    }
+
+    /// The segment's file, open for reading and writing (created if missing).
+    fn segment(&self, class: u8, seg: u32) -> io::Result<std::sync::Arc<File>> {
+        if let Some(f) = self.segments.lock().unwrap().get(&(class, seg)) {
+            return Ok(f.clone());
+        }
+        let path = self.segment_path(class, seg);
+        fs::create_dir_all(path.parent().expect("segment has a parent dir"))?;
+        let f = std::sync::Arc::new(OpenOptions::new().create(true).truncate(false).read(true).write(true).open(path)?);
+        let mut open = self.segments.lock().unwrap();
+        if open.len() >= OPEN_SEGMENTS {
+            open.clear();
+        }
+        Ok(open.entry((class, seg)).or_insert(f).clone())
     }
 
     /// fsync each pinned slot (default on). Cache and serving tiers are never
@@ -446,7 +513,7 @@ impl SlabStore {
         }
         if durable {
             for (class, seg) in &touched {
-                OpenOptions::new().write(true).open(self.segment_path(*class, *seg))?.sync_data()?;
+                self.segment(*class, *seg)?.sync_data()?;
             }
         }
         w.commit()?;
@@ -464,10 +531,8 @@ impl SlabStore {
             return Ok(None);
         };
         let size = SLOT_SIZES[class as usize];
-        let mut f = File::open(self.segment_path(class, seg))?;
-        f.seek(SeekFrom::Start(slot as u64 * size as u64))?;
         let mut buf = vec![0u8; size];
-        f.read_exact(&mut buf)?;
+        read_at(&*self.segment(class, seg)?, &mut buf, slot as u64 * size as u64)?;
         if !cid.verify(&buf) {
             return Err(StoreError::Corrupt(*cid));
         }
@@ -786,11 +851,8 @@ impl SlabStore {
     }
 
     fn write_slot(&self, class: u8, seg: u32, slot: u32, bytes: &[u8], durable: bool) -> Result<(), StoreError> {
-        let path = self.segment_path(class, seg);
-        fs::create_dir_all(path.parent().expect("segment has a parent dir"))?;
-        let mut f = OpenOptions::new().create(true).truncate(false).write(true).open(path)?;
-        f.seek(SeekFrom::Start(slot as u64 * bytes.len() as u64))?;
-        f.write_all(bytes)?;
+        let f = self.segment(class, seg)?;
+        write_at(&f, bytes, slot as u64 * bytes.len() as u64)?;
         if durable {
             f.sync_data()?;
         }
