@@ -14,8 +14,9 @@ use std::{
 use retifs_core::{manifest, ChunkToken, Cid, ConvergenceSecret, FileRef, Store};
 use retifs_net::{
     fetch::{fetch_file, FetchError, FetchOpts, NoCache},
-    protocol::{decode_have, decode_request, encode_bitmap, encode_response, HAVE_ENDPOINT},
+    protocol::HAVE_ENDPOINT,
     seek::seek_round,
+    serve,
     transport::Transport,
 };
 
@@ -74,41 +75,46 @@ impl Transport for MemTransport {
             if peer.behaviour == Behaviour::FailAll {
                 return Err("link broke".into());
             }
+            // The daemon's own serving code (retifs_net::serve), over this peer's chunks.
             let nonce = format!("link-{link}").into_bytes();
-            if endpoint == HAVE_ENDPOINT {
-                let items = decode_have(&body).map_err(|e| e.to_string())?;
-                let bits: Vec<bool> = items
-                    .iter()
-                    .map(|(p, proof)| {
-                        peer.chunks.keys().any(|c| {
-                            &c.as_bytes()[..8] == p.as_slice()
-                                && match &peer.tokens {
-                                    None => true,
-                                    Some(t) => t.get(c).is_some_and(|t| t.verify_have(&nonce, p, proof)),
-                                }
-                        })
-                    })
-                    .collect();
-                return Ok(encode_bitmap(&bits));
-            }
-            let req = decode_request(&body).map_err(|e| e.to_string())?;
-            let items: Vec<Option<Vec<u8>>> = req
-                .iter()
-                .map(|(c, proof)| {
-                    let ok = match &peer.tokens {
-                        None => true,
-                        Some(t) => t.get(c).is_some_and(|t| t.verify_get(&nonce, c, proof)),
-                    };
-                    peer.chunks.get(c).filter(|_| ok).cloned().map(|mut ct| {
-                        if peer.behaviour == Behaviour::Corrupt {
-                            ct[20] ^= 1;
-                        }
-                        ct
-                    })
-                })
-                .collect();
-            Ok(encode_response(&items))
+            let answer = if endpoint == HAVE_ENDPOINT { serve::answer_have(peer, &nonce, &body) } else { serve::answer_get(peer, &nonce, &body) };
+            answer.map_err(|e| format!("{e:?}"))
         }
+    }
+}
+
+/// A test peer's chunks as the serving side sees them: with `tokens`, each
+/// chunk is served under its token; without, every chunk is published.
+impl serve::Holdings for Peer {
+    fn serving_info(&self, cids: &[Cid]) -> Vec<(Option<ChunkToken>, bool)> {
+        cids.iter()
+            .map(|c| match (&self.tokens, self.chunks.contains_key(c)) {
+                (_, false) => (None, false),
+                (None, true) => (None, true),
+                (Some(t), true) => (t.get(c).cloned(), false),
+            })
+            .collect()
+    }
+
+    fn served_by_prefix(&self, prefix: &[u8; retifs_net::protocol::HAVE_PREFIX]) -> Option<(Cid, Option<ChunkToken>, bool)> {
+        let cid = *self.chunks.keys().find(|c| &c.as_bytes()[..prefix.len()] == prefix)?;
+        Some(match &self.tokens {
+            None => (cid, None, true),
+            Some(t) => (cid, t.get(&cid).cloned(), false),
+        })
+    }
+
+    fn present(&self, cid: &Cid) -> bool {
+        self.chunks.contains_key(cid)
+    }
+
+    fn chunk(&self, cid: &Cid) -> Option<Vec<u8>> {
+        self.chunks.get(cid).cloned().map(|mut ct| {
+            if self.behaviour == Behaviour::Corrupt {
+                ct[20] ^= 1;
+            }
+            ct
+        })
     }
 }
 

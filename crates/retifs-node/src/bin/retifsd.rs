@@ -71,10 +71,10 @@ use retifs_net::{
     fetch::{fetch_file, FetchOpts},
     node::{self, attach, destination_hex, load_or_create_identity, parse_destination},
     protocol::{
-        decode_have, decode_lease_request, decode_lease_status, decode_lease_statuses, decode_prove, decode_prove_reply,
+        decode_lease_request, decode_lease_status, decode_lease_statuses, decode_prove, decode_prove_reply,
         decode_receipt_replies, decode_receipt_request, encode_receipt_replies, encode_receipt_request, MAX_BUNDLE,
         decode_request, encode_bitmap, encode_lease_request, encode_prove, encode_prove_reply,
-        encode_lease_status, encode_response, LeaseRequest, LeaseStatus, ReceiptReply, GET_ENDPOINT, HAVE_ENDPOINT, LEASE_ENDPOINT,
+        encode_lease_status, LeaseRequest, LeaseStatus, ReceiptReply, GET_ENDPOINT, HAVE_ENDPOINT, LEASE_ENDPOINT,
         PROVE_ENDPOINT, RECEIPT_ENDPOINT, decode_bitmap, decode_put, encode_have, encode_put, HAVE_PREFIX, MAX_HAVE,
         MAX_PUT, PUT_ENDPOINT, HEAD_ENDPOINT, API_ENDPOINT, MAX_QUERY_TOKENS, QUERY_ENDPOINT, INVITE_ENDPOINT,
         READER_ENDPOINT, MAX_READER_PROOFS, GET_ITEM, encode_request,
@@ -351,24 +351,32 @@ impl RequestEndpoint<Arc<Shared>> for Get {
     /// "don't have" (holder privacy, ADR-0010). Fetched/cached chunks are never
     /// in the serving index, so they're never served.
     async fn handle(mut context: RequestContext<'_, Arc<Shared>>, _node: &impl PrnsNodeApi) -> Result<(), Decline> {
-        let Ok(items) = decode_request(context.data) else {
-            return Err(Decline::Ignore);
-        };
-        let store = &context.state.store;
         let nonce = context.respond_token().link_id.as_bytes().to_vec();
-        // One lookup for all items; same work on every path, so a refusal
-        // doesn't stand out by timing.
-        let cids: Vec<_> = items.iter().map(|(c, _)| *c).collect();
-        let info = store.serving_info(&cids).unwrap_or_else(|_| vec![(None, false); cids.len()]);
-        let out: Vec<Option<Vec<u8>>> = items
-            .iter()
-            .zip(info)
-            .map(|((cid, proof), (token, published))| {
-                let ok = published || token.is_some_and(|t| t.verify_get(&nonce, cid, proof));
-                if ok { store.fetch(cid).ok().flatten() } else { None }
-            })
-            .collect();
-        context.respond(encode_response(&out))
+        match retifs_net::serve::answer_get(&StoreHoldings(&context.state.store), &nonce, context.data) {
+            Ok(answer) => context.respond(answer),
+            Err(_) => Err(Decline::Ignore),
+        }
+    }
+}
+
+/// The store as the transport-free serving side sees it (retifs_net::serve).
+struct StoreHoldings<'a>(&'a SlabStore);
+
+impl retifs_net::serve::Holdings for StoreHoldings<'_> {
+    fn serving_info(&self, cids: &[Cid]) -> Vec<(Option<ChunkToken>, bool)> {
+        self.0.serving_info(cids).unwrap_or_else(|_| vec![(None, false); cids.len()])
+    }
+
+    fn served_by_prefix(&self, prefix: &[u8; retifs_net::protocol::HAVE_PREFIX]) -> Option<(Cid, Option<ChunkToken>, bool)> {
+        self.0.served_by_prefix(prefix).ok().flatten()
+    }
+
+    fn present(&self, cid: &Cid) -> bool {
+        self.0.tier(cid).ok().flatten().is_some()
+    }
+
+    fn chunk(&self, cid: &Cid) -> Option<Vec<u8>> {
+        self.0.fetch(cid).ok().flatten()
     }
 }
 
@@ -380,23 +388,11 @@ impl RequestEndpoint<Arc<Shared>> for Have {
     const POLICY: RequestEndpointPolicy = RequestEndpointPolicy::AllowAll;
 
     async fn handle(mut context: RequestContext<'_, Arc<Shared>>, _node: &impl PrnsNodeApi) -> Result<(), Decline> {
-        let Ok(items) = decode_have(context.data) else {
-            return Err(Decline::Ignore);
-        };
-        let store = &context.state.store;
         let nonce = context.respond_token().link_id.as_bytes().to_vec();
-        let bits: Vec<bool> = items
-            .iter()
-            .map(|(prefix, proof)| match store.served_by_prefix(prefix) {
-                // Leased chunks are in the serving index before they arrive: answer only for what's here.
-                Ok(Some((cid, token, published))) => {
-                    (published || token.is_some_and(|t| t.verify_have(&nonce, prefix, proof)))
-                        && store.tier(&cid).ok().flatten().is_some()
-                }
-                _ => false,
-            })
-            .collect();
-        context.respond(encode_bitmap(&bits))
+        match retifs_net::serve::answer_have(&StoreHoldings(&context.state.store), &nonce, context.data) {
+            Ok(answer) => context.respond(answer),
+            Err(_) => Err(Decline::Ignore),
+        }
     }
 }
 
