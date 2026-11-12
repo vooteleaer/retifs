@@ -1,7 +1,7 @@
 [package]
 name = "retifs-setup"
 description = "retifs for Windows: installs it for the current user, no administrator needed"
-version = "0.4.0"
+version = "0.5.0"
 edition = "2021"
 license = "MIT"
 publish = false

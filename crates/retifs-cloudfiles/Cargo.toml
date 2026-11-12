@@ -1,6 +1,6 @@
 [package]
 name = "retifs-cloudfiles"
-version = "0.4.0"
+version = "0.5.0"
 description = "retifs-cloudfiles: a namespace as a Windows Cloud Files sync root in Explorer (ADR-0002), prototype"
 edition.workspace = true
 license.workspace = true
