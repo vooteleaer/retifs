@@ -1,6 +1,6 @@
 [package]
 name = "retifs-tree"
-version = "0.4.1"
+version = "0.5.0"
 description = "The file-tree view of a namespace, shared by the FUSE and Cloud Files frontends (ADR-0002), prototype"
 edition.workspace = true
 license.workspace = true

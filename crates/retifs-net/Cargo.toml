@@ -1,6 +1,6 @@
 [package]
 name = "retifs-net"
-version = "0.4.1"
+version = "0.5.0"
 description = "retifs networking over Reticulum via Prns (prototype, unstable)"
 edition.workspace = true
 license.workspace = true
