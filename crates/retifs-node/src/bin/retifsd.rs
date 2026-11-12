@@ -1351,6 +1351,13 @@ fn watchdog(d: Arc<Daemon>) {
             }
             if quiet >= 300 {
                 eprintln!("watchdog: stalled for {quiet} s: aborting, to be started again");
+                // On Haiku an abort doesn't end the process: debug_server
+                // holds it for a dialog (Debug / Save report / Terminate),
+                // and until someone answers, retifs is down and can't be
+                // started again (2026-11-12). Exit instead.
+                #[cfg(target_os = "haiku")]
+                std::process::exit(70);
+                #[cfg(not(target_os = "haiku"))]
                 std::process::abort();
             }
         }

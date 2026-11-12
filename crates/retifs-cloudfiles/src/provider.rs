@@ -161,6 +161,12 @@ struct Shared {
     read_only: AtomicBool,
     /// Local files already reported as not written (read-only).
     refused: Mutex<HashSet<PathBuf>>,
+    /// Pinned files queued for or being hydrated by this process: the sync
+    /// loop leaves them alone until done. Taken for written here, they were
+    /// uploaded as new versions while still hydrating, and Windows refused
+    /// to mark them in sync ("the cloud operation is invalid"), the pattern
+    /// seen before cldapi's own callback thread crashed (2026-11-11).
+    hydrating: Mutex<HashSet<PathBuf>>,
     /// The folder as the last round planned it: what a folder opened for
     /// the first time is filled from (`fetch_placeholders`).
     plan: Mutex<Option<Arc<names::Plan>>>,
@@ -649,7 +655,9 @@ impl SyncFilter for Filter {
                 }
             }
             if want {
-                _ = shared.hydrate.lock().unwrap().send(path);
+                if shared.hydrating.lock().unwrap().insert(path.clone()) {
+                    _ = shared.hydrate.lock().unwrap().send(path);
+                }
             } else if hydrated
                 && let Err(e) = open_rw(&path).and_then(|mut ph| ph.update(UpdateOptions::default().dehydrate(), None).map(|_| ()))
             {
@@ -901,9 +909,11 @@ impl Library {
             hydrate: Mutex::new(hydrate_tx.clone()),
             read_only: AtomicBool::new(false),
             refused: Mutex::new(HashSet::new()),
+            hydrating: Mutex::new(HashSet::new()),
             plan: Mutex::new(None),
         });
         // Pinned files are hydrated one at a time, off the callback threads.
+        let hydrating = shared.clone();
         std::thread::spawn(move || {
             for path in hydrate_rx {
                 if let Ok(mut ph) = Placeholder::open(&path)
@@ -911,6 +921,7 @@ impl Library {
                 {
                     eprintln!("retifs-cloudfiles: {}: keeping: {e}", path.display());
                 }
+                hydrating.hydrating.lock().unwrap().remove(&path);
             }
         });
         Ok(Library { sync: Sync { shared: shared.clone(), hydrate: hydrate_tx, changed: Mutex::new(HashSet::new()) }, shared, daemon, applied: None, said_skipped: Mutex::new(HashSet::new()) })
@@ -1051,8 +1062,17 @@ impl Sync {
         if !self.shared.read_only.load(Ordering::Relaxed) {
             return false;
         }
-        if self.shared.refused.lock().unwrap().insert(abs.to_path_buf()) {
-            eprintln!("retifs-cloudfiles: {}: stays only on this device: {} is read-only here (no write grant)", abs.display(), self.shared.ns);
+        // Named one by one only for the first few: a read-only library can
+        // hold tens of thousands of such files (map tiles), and naming each
+        // filled the log by hundreds of megabytes.
+        let mut refused = self.shared.refused.lock().unwrap();
+        if refused.insert(abs.to_path_buf()) {
+            let n = refused.len();
+            if n <= 5 {
+                eprintln!("retifs-cloudfiles: {}: stays only on this device: {} is read-only here (no write grant)", abs.display(), self.shared.ns);
+            } else if n % 1000 == 0 || n == 6 {
+                eprintln!("retifs-cloudfiles: {}: {n} local files stay only on this device so far (read-only here; not named one by one)", self.shared.ns);
+            }
         }
         true
     }
@@ -1174,6 +1194,9 @@ impl Sync {
     /// A file at a path a record has: the record may have changed, or the
     /// file may have been changed here.
     fn refresh(&self, abs: &Path, w: &Want, state: Option<Info>, d: &mut Daemon) {
+        if self.shared.hydrating.lock().unwrap().contains(abs) {
+            return; // being hydrated by this process: not written here
+        }
         let (id, _) = names::parse_identity(&w.blob).unwrap_or(("", None));
         let Some(state) = state else {
             // An ordinary file where a placeholder was (saved by writing a
@@ -1337,7 +1360,7 @@ impl Sync {
         }
         let Ok(mut ph) = open_rw(abs) else { return };
         if w.keep {
-            if ph.mark_pin(PinState::Pinned, PinOptions::default()).is_ok() {
+            if ph.mark_pin(PinState::Pinned, PinOptions::default()).is_ok() && self.shared.hydrating.lock().unwrap().insert(abs.to_path_buf()) {
                 _ = self.hydrate.send(abs.to_path_buf());
             }
         } else {
