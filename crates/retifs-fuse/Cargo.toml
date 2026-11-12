@@ -1,6 +1,6 @@
 ﻿[package]
 name = "retifs-fuse"
-version = "0.3.0"
+version = "0.4.0"
 description = "retifs-mount: a namespace as a FUSE file tree (ADR-0002), prototype"
 edition.workspace = true
 license.workspace = true

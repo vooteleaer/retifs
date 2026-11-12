@@ -1,6 +1,6 @@
 [package]
 name = "retifs-extract"
-version = "0.3.0"
+version = "0.4.0"
 description = "retifs-extractd: reads new content and writes what's in it as attributes (ADR-0023)"
 edition.workspace = true
 license.workspace = true
