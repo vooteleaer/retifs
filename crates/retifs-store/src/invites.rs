@@ -6,9 +6,9 @@ use retifs_core::invite::Invitation;
 
 use crate::{SlabStore, StoreError};
 
-/// Invitation ID → spent(1) ‖ u16 len ‖ namespace ‖ the invitation (canonical).
+/// Invitation ID → spent(1) ‖ u16 len ‖ library ‖ the invitation (canonical).
 const INVITES: TableDefinition<&[u8], &[u8]> = TableDefinition::new("invites");
-/// Namespace name → an invitation to redeem there (canonical).
+/// Library name → an invitation to redeem there (canonical).
 const REDEEMS: TableDefinition<&str, &[u8]> = TableDefinition::new("redeems");
 
 pub(crate) fn open_tables(w: &redb::WriteTransaction) -> Result<(), StoreError> {

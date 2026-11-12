@@ -33,7 +33,8 @@ const SETTINGS: &[(&str, &str, &str, Kind)] = &[
     ("placement", "max_stamp_cost", "--max-stamp-cost", Kind::Value),
     ("placement", "slow_link_budget", "--slow-link-budget", Kind::Value),
     ("placement", "treat_as_slow", "--treat-as-slow", Kind::List),
-    ("nomadnet", "namespace", "--nomadnet", Kind::Value),
+    ("nomadnet", "library", "--nomadnet", Kind::Value),
+    ("nomadnet", "namespace", "--nomadnet", Kind::Value), // its name before 0.3.0
     ("nomadnet", "name", "--nomadnet-name", Kind::Value),
 ];
 
@@ -66,7 +67,7 @@ const TEMPLATE: &str = r#"# retifs node settings. Flags given to retifsd overrid
 # treat_as_slow = []         # nodes to treat as behind a slow link
 
 [nomadnet]
-# namespace = "..."          # serve this namespace's micron pages as a NomadNet node
+# library = "..."            # serve this library's micron pages as a NomadNet node
 # name = "retifs site"       # the node name it announces
 "#;
 

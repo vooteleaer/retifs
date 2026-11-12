@@ -18,12 +18,12 @@
 //! head key = HKDF-SHA256(ikm = read key, salt = "retifs/v1/head-seed", info = "", L = 64)
 //! ```
 //! - **Holders stay blind:** commits are chunks like any other; a head shows
-//!   only the namespace, the writer key, the sequence number and a commit CID.
+//!   only the library, the writer key, the sequence number and a commit CID.
 //! - **Rollback protection (decision 5):** anyone can verify a head and keep
 //!   the highest `seq` per writer, without the read key. `time` lets readers
 //!   refuse stale heads (freeze protection) where a channel promises updates.
 //! - **Multi-writer later (ADR-0006):** every commit and head names its writer
-//!   and has its own `seq`; a namespace with several writers merges their
+//!   and has its own `seq`; a library with several writers merges their
 //!   chains. Here one writer = one channel, and `ns_id` derives from its key.
 
 use aes::Aes256;
@@ -57,7 +57,7 @@ pub type NsId = [u8; NS_ID_LEN];
 pub enum ChannelError {
     Malformed(&'static str),
     BadSignature,
-    /// Signed by another writer, or for another namespace, than expected.
+    /// Signed by another writer, or for another library, than expected.
     WrongChannel,
     /// The head's commit seed doesn't decrypt with this read key.
     WrongKey,
@@ -139,8 +139,8 @@ impl std::str::FromStr for ChannelAddr {
 pub struct ChannelKey {
     signing: SigningKey,
     pub read_key: [u8; 32],
-    /// The namespace written to, when it isn't this writer's own (a member of
-    /// another's namespace, ADR-0017).
+    /// The library written to, when it isn't this writer's own (a member of
+    /// another's library, ADR-0017).
     ns: Option<NsId>,
 }
 
@@ -149,7 +149,7 @@ impl ChannelKey {
         ChannelKey { signing: SigningKey::from_bytes(&signing_seed), read_key, ns: None }
     }
 
-    /// A member's key: its own signing key, writing to namespace `ns_id`.
+    /// A member's key: its own signing key, writing to library `ns_id`.
     pub fn member(signing_seed: [u8; 32], read_key: [u8; 32], ns_id: NsId) -> Self {
         ChannelKey { signing: SigningKey::from_bytes(&signing_seed), read_key, ns: Some(ns_id) }
     }
@@ -217,7 +217,7 @@ impl Commit {
         [self.body().as_slice(), &self.signature].concat()
     }
 
-    /// Parses a commit's plaintext and checks it belongs to `addr`'s namespace
+    /// Parses a commit's plaintext and checks it belongs to `addr`'s library
     /// and is signed by the writer it names. Whether that writer may write is
     /// the merge's question (ADR-0017); a single-writer follower also checks
     /// `writer == addr.writer`.
@@ -293,7 +293,7 @@ impl Head {
 
     /// Parses and verifies a head's signature by the writer it names. Anyone can
     /// do this, without the read key. Whether the writer may write to `ns_id`
-    /// is decided by the namespace's grants (ADR-0017).
+    /// is decided by the library's grants (ADR-0017).
     pub fn decode(bytes: &[u8]) -> Result<Head, ChannelError> {
         if bytes.len() != HEAD_LEN {
             return Err(ChannelError::Malformed("head length"));

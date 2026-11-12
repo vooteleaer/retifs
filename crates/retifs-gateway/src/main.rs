@@ -1,4 +1,4 @@
-//! `retifs-gateway [--store DIR] [--listen 127.0.0.1:8740] [--via NODE]`: every namespace
+//! `retifs-gateway [--store DIR] [--listen 127.0.0.1:8740] [--via NODE]`: every library
 //! as a local, read-only website (`http://<namespace>.localhost:8740/`),
 //! through `retifsd`'s local API. The base for the browser extension (plan,
 //! phase 1). Content not here yet is fetched as it's read (ADR-0002).
@@ -158,7 +158,7 @@ fn main() {
     });
     let port = listen.rsplit(':').next().unwrap_or("8740").to_string();
     eprintln!(
-        "retifs-gateway: http://localhost:{port}/ (sites at http://<namespace>.localhost:{port}/, NomadNet nodes at http://nn-<address>.localhost:{port}/)"
+        "retifs-gateway: http://localhost:{port}/ (sites at http://<library>.localhost:{port}/, NomadNet nodes at http://nn-<address>.localhost:{port}/)"
     );
     let mut gw = Gateway { rt, client, store, via };
     for req in server.incoming_requests() {
@@ -287,7 +287,7 @@ fn serve(gw: &mut Gateway, req: tiny_http::Request, port: &str) -> std::io::Resu
         }
     };
     let Some(ns) = ns else {
-        // The index: every namespace here, each a link to its own origin.
+        // The index: every library here, each a link to its own origin.
         let names = match gw.call(Request::Namespaces) {
             Ok(Response::Names { names }) => names,
             _ => Vec::new(),
@@ -305,7 +305,7 @@ fn serve(gw: &mut Gateway, req: tiny_http::Request, port: &str) -> std::io::Resu
         return req.respond(page(
             200,
             "retifs",
-            &format!("<p>Namespaces on this node:</p><ul>{list}</ul><p>NomadNet nodes, over Reticulum: <code>http://nn-&lt;address&gt;.localhost:{port}/</code>, where the address is the node's 32 hex digits.</p>"),
+            &format!("<p>Libraries on this node:</p><ul>{list}</ul><p>NomadNet nodes, over Reticulum: <code>http://nn-&lt;address&gt;.localhost:{port}/</code>, where the address is the node's 32 hex digits.</p>"),
         ));
     };
     if let Some(node) = nomadnet_node(&ns) {

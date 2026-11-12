@@ -1,4 +1,4 @@
-# ADR-0016: Records, canonical encoding and namespace snapshots
+# ADR-0016: Records, canonical encoding and library snapshots
 
 - **Status:** proposed
 - **Date:** 2026-10-16
@@ -31,26 +31,26 @@ value    = nil | bool | int (i64) | float (f64) | str | bin | [ value, … ]
 ```
 - A record ID is 16 random bytes, stable across changes.
 - Blocks are content as read-caps (`FileRef`); a record may have none.
-- **A snapshot is one version of a small namespace**, stored as an ordinary file and published like any other (a channel's commit points to it). Large namespaces will use Prolly trees for indexes and diffs; snapshots stay as the simple form for sites and apps.
+- **A snapshot is one version of a small library**, stored as an ordinary file and published like any other (a channel's commit points to it). Large libraries will use Prolly trees for indexes and diffs; snapshots stay as the simple form for sites and apps.
 
 ### Not decided here
 - **Record vs content binding of attributes** (decision 7): all attributes in a snapshot bind to the record for now.
-- **Signed attribute writes and per-writer commit chains for databases** ([ADR-0006](0006-versioning-and-sharing.md)): a snapshot is published by a channel's signed commit; per-modification commits inside a namespace come with Prolly trees.
+- **Signed attribute writes and per-writer commit chains for databases** ([ADR-0006](0006-versioning-and-sharing.md)): a snapshot is published by a channel's signed commit; per-modification commits inside a library come with Prolly trees.
 
 ## Impact on the threat model
-See the [threat model](../04-threat-model.md). A snapshot is encrypted like any file; holders learn only its size class and chunk count (padded, [ADR-0009](0009-manifest-format.md)). Readers of a snapshot see all of it: share a filtered namespace to share less ([ADR-0006](0006-versioning-and-sharing.md)).
+See the [threat model](../04-threat-model.md). A snapshot is encrypted like any file; holders learn only its size class and chunk count (padded, [ADR-0009](0009-manifest-format.md)). Readers of a snapshot see all of it: share a filtered library to share less ([ADR-0006](0006-versioning-and-sharing.md)).
 
 ## Consequences
 - Easier: one encoding for everything signed, checkable with stock RNS tools; sites and apps can be published as trees today.
-- Harder: snapshots rewrite the whole namespace per version (fine for small ones; record-level dedup comes from the per-record secret of each block, not the snapshot itself).
+- Harder: snapshots rewrite the whole library per version (fine for small ones; record-level dedup comes from the per-record secret of each block, not the snapshot itself).
 
 ## Implementation status (2026-10-16)
 - **Format:** `retifs_core::record`; vectors `record-v1.json`, verified byte for byte with RNS's umsgpack (26/26: integer and string boundaries, floats, bytes, nested lists, two records, a snapshot).
-- **Local database** (`retifs-store`, `db.rs`): records per namespace, and an order-preserving index of every attribute value (ints and floats numerically, strings and bytes bytewise; list values per element). Queries are the AND of terms: `key=value`, `key>n`, `key>=n`, `key<n`, `key<=n` (the bound's type limits the range), `key^=prefix`, `has:key`.
+- **Local database** (`retifs-store`, `db.rs`): records per library, and an order-preserving index of every attribute value (ints and floats numerically, strings and bytes bytewise; list values per element). Queries are the AND of terms: `key=value`, `key>n`, `key>=n`, `key<n`, `key<=n` (the bound's type limits the range), `key^=prefix`, `has:key`.
 - **API and CLI:** `retifs rec add NS KEY=VALUE… [--file PATH]` (the file becomes the record's content block, stored under its own record secret, needed and placed like any file; `name` and `size` are filled in; `size` is the first block's, the content's, not all blocks'), `rec set … [--unset KEY]`, `rec get`, `rec rm` (its content is forgotten unless another record uses it), `retifs query NS TERM…`.
 - Live: records with and without content; queries by exact value, prefix, list element, numeric range combined with type, and `has:`; set and unset; delete.
-- **Namespaces over channels:** `retifs channel publish-ns NAME NS` publishes a snapshot of the namespace as the channel's next version. A follower rebuilds it into a local namespace `ch-<ns_id>` (queryable like any other) and seeks every content block it references; the version counts as complete only when the snapshot and all blocks are local, then all are pinned and served on, and whatever only the previous version had is forgotten. Live: a two-page site published over a channel was complete at the follower 34 s later (queries and content matched); the publisher added a page, marked one as draft and republished, and the follower updated by itself (three pages; `draft=true` found the marked one).
-- **NomadNet bridge (2026-10-19):** `retifsd --nomadnet NS [--nomadnet-name NAME]` runs a `nomadnetwork.node` destination (own identity, the name as announce app data, as NomadNet does) serving namespace NS, own or a followed channel's `ch-…`. A record with `path=/x.mu` (or `/page/x.mu`) is the page `/page/x.mu`, registered as a request path at run time (Prns `register_request_path`) and answered with the content as a msgpack `bin`, as NomadNet clients expect; without an `/index.mu` an index of the pages is generated as micron links. Paths follow the namespace (resynced every 15 s).
+- **Libraries over channels:** `retifs channel publish-ns NAME NS` publishes a snapshot of the library as the channel's next version. A follower rebuilds it into a local library `ch-<ns_id>` (queryable like any other) and seeks every content block it references; the version counts as complete only when the snapshot and all blocks are local, then all are pinned and served on, and whatever only the previous version had is forgotten. Live: a two-page site published over a channel was complete at the follower 34 s later (queries and content matched); the publisher added a page, marked one as draft and republished, and the follower updated by itself (three pages; `draft=true` found the marked one).
+- **NomadNet bridge (2026-10-19):** `retifsd --nomadnet NS [--nomadnet-name NAME]` runs a `nomadnetwork.node` destination (own identity, the name as announce app data, as NomadNet does) serving library NS, own or a followed channel's `ch-…`. A record with `path=/x.mu` (or `/page/x.mu`) is the page `/page/x.mu`, registered as a request path at run time (Prns `register_request_path`) and answered with the content as a msgpack `bin`, as NomadNet clients expect; without an `/index.mu` an index of the pages is generated as micron links. Paths follow the library (resynced every 15 s).
   - Live, with a Python RNS client speaking NomadNet's page protocol: the author's node served the generated index and a page; a follower of the site's channel served the same index and another page **with the author offline**. Before the follower had the site, it answered 13 index requests from elsewhere on the network (NomadNet clients or crawlers that heard its announce); it now says it is still fetching instead of serving an empty index.
   - Not yet: `/file/` downloads, NomadNet's `.allowed` access lists, form fields and dynamic pages.
 - **Since done:** per-modification signed commits ([ADR-0017](0017-multi-writer-namespaces.md), as operations) and Prolly trees ([ADR-0018](0018-state-trees.md)).

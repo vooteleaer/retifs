@@ -1,21 +1,21 @@
-# ADR-0006: Every modification is a version; sharing via multi-writer namespaces
+# ADR-0006: Every modification is a version; sharing via multi-writer libraries
 
 - **Status:** accepted
 - **Date:** 2026-10-13
-- **Irreversible:** yes. This shapes decisions 5 (namespace updates) and 8 (commit format) in [irreversible decisions](../02-irreversible-decisions.md).
+- **Irreversible:** yes. This shapes decisions 5 (library updates) and 8 (commit format) in [irreversible decisions](../02-irreversible-decisions.md).
 
 ## Context
 Two questions share one answer, the commit model:
 1. **Versioning.** Should every modification be a version, or may the daemon batch and thin history?
 2. **Sharing.** How do several people read and write the same data without a server?
 
-The earlier design assumed one writer per namespace and allowed batching and Time Machine-style thinning. Both assumptions would be baked into the commit format if not decided now.
+The earlier design assumed one writer per library and allowed batching and Time Machine-style thinning. Both assumptions would be baked into the commit format if not decided now.
 
 ## Principles
 Supports 2 (the signed chain of roots is a primitive), 4 (local-first: every write is a local, immediate version), "from trust to crypto" (permissions enforced by every reader's validation, not a server) and 7 (storage nodes stay blind). Violates none.
 
 ## Options
-1. **Single writer per namespace, batched commits.** Simple, but loses versions, and sharing needs a central writer.
+1. **Single writer per library, batched commits.** Simple, but loses versions, and sharing needs a central writer.
 2. **Shared head with locking.** Needs coordination, which is impossible offline.
 3. **Per-writer append-only chains, merged by every reader; one commit per modification.**
 
@@ -32,25 +32,25 @@ Option 3.
   | FUSE file write | `close` / `fsync` (one save), not each `write()` |
 
 - **No silent batching.** The daemon never merges separate modifications into one commit.
-- **Retention is separate from versioning.** The default is to keep every version forever. A namespace may opt into a thinning policy, which may only drop old *content*; commits themselves are never removed. Shredding ([API §5](../07-api.md#5-records)) remains the only way to make old content unreadable.
+- **Retention is separate from versioning.** The default is to keep every version forever. A library may opt into a thinning policy, which may only drop old *content*; commits themselves are never removed. Shredding ([API §5](../07-api.md#5-records)) remains the only way to make old content unreadable.
 - **Cheap by construction.** An attribute change is a small commit plus a few Prolly-tree nodes. A content change stores only changed chunks.
 - **Lazy content upload.** Commits and metadata sync promptly. Content of intermediate versions may stay "only here" on the authoring device and upload when bandwidth allows (important on LoRa). Sync ships many commits at once via Prolly diffs.
 - **Per-record history** in the API: `versions(id)`, `get_at(id, commit)`, `restore(id, commit)`.
 
-### Multi-writer namespaces
-- **Each writer has its own append-only commit chain** in the namespace, with its own sequence number (rollback protection per writer).
-- **The namespace state is the merge of all writers' heads**, computed by every reader:
+### Multi-writer libraries
+- **Each writer has its own append-only commit chain** in the library, with its own sequence number (rollback protection per writer).
+- **The library state is the merge of all writers' heads**, computed by every reader:
   - Attributes merge automatically (LWW per `(identity, key)`).
   - Concurrent content versions stay multi-valued until a merge commit resolves them.
 - **Validate-on-read.** Every write carries its author's signature and capability chain. Each member's daemon validates on merge and ignores invalid writes. There is no central enforcer.
 - **Roles are capabilities.** For example, an admin holds `Share` and can grant narrower capabilities, and a member may hold `Write` only on `type = "document"`.
 
 ### Sharing
-- **A share is a namespace.**
-  - **Group namespace:** one group key, wrapped separately for each member (X25519 → HKDF → Token). All members may write within their capabilities.
-  - **Share namespace** (filtered, read-only): the owner's daemon maintains a projection of a query (e.g. `album = "Prangli 2026"`) with its own key and index. Only per-block keys are re-wrapped, so no content is copied or re-encrypted. While the capability is valid, the share stays live.
+- **A share is a library.**
+  - **Group library:** one group key, wrapped separately for each member (X25519 → HKDF → Token). All members may write within their capabilities.
+  - **Share library** (filtered, read-only): the owner's daemon maintains a projection of a query (e.g. `album = "Prangli 2026"`) with its own key and index. Only per-block keys are re-wrapped, so no content is copied or re-encrypted. While the capability is valid, the share stays live.
   - Superseded in part by [ADR-0021](0021-shares.md): a share's records are copies of the selected records' attributes and content references (read-caps carry their own seeds), so no keys are re-wrapped.
-- A filter given together with the full namespace key would be a promise, not crypto. That's why filtered shares get their own namespace and key.
+- A filter given together with the full library key would be a promise, not crypto. That's why filtered shares get their own library and key.
 - **Removing a member** rotates the group key and re-wraps it for the remaining members. The removed member keeps what they had, gets nothing new, and their later writes fail validation.
 - **Membership changes are commits** and are ordered causally: a write counts if its author's capability was valid in the history that write had seen. The exact rule for writes made concurrently with a removal is an open question.
 
@@ -74,10 +74,10 @@ See the [threat model](../04-threat-model.md).
 
 ## Implementation status (2026-10-19)
 - **(Superseded by [ADR-0017](0017-multi-writer-namespaces.md) slice 2: commits now carry operations, not snapshots.)**
-- **Every modification is a version, single writer:** each local namespace is its writer's channel ([ADR-0015](0015-signed-channels.md)), created on first write. Every `rec add`, `set` and `rm` writes a namespace snapshot ([ADR-0016](0016-records-and-snapshots.md)) and a signed commit linking the previous one; there is no batching. The snapshot is sorted by record ID and chunked by content, so a change rewrites a chunk or two: in a 41-record namespace, one attribute change stored 3 new chunks (snapshot and commit).
-- **History:** `retifs rec history NS ID` walks the commit chain and shows the versions where a record changed; `retifs query NS --at VERSION …` queries the namespace as it was (the same terms, matched in memory against that version's snapshot).
+- **Every modification is a version, single writer:** each local library is its writer's channel ([ADR-0015](0015-signed-channels.md)), created on first write. Every `rec add`, `set` and `rm` writes a library snapshot ([ADR-0016](0016-records-and-snapshots.md)) and a signed commit linking the previous one; there is no batching. The snapshot is sorted by record ID and chunked by content, so a change rewrites a chunk or two: in a 41-record library, one attribute change stored 3 new chunks (snapshot and commit).
+- **History:** `retifs rec history NS ID` walks the commit chain and shows the versions where a record changed; `retifs query NS --at VERSION …` queries the library as it was (the same terms, matched in memory against that version's snapshot).
 - **Retention:** every version is kept locally; only the latest is placed on other nodes (older ones are unneeded there but stay pinned here).
-- **Sharing:** a namespace's channel address shares it read-only; followers get its latest version. Followed namespaces (`ch-…`) are read-only.
-- **Since done (2026-10-20 to 2026-11-03):** several writers per namespace and transactions over several records ([ADR-0017](0017-multi-writer-namespaces.md)); history fetched from peers on demand when a node started from a checkpoint ([ADR-0018](0018-state-trees.md)); removing a member rotates the read key, for every remaining member, readers included (ADR-0017); filtered shares ([ADR-0021](0021-shares.md)).
+- **Sharing:** a library's channel address shares it read-only; followers get its latest version. Followed libraries (`ch-…`) are read-only.
+- **Since done (2026-10-20 to 2026-11-03):** several writers per library and transactions over several records ([ADR-0017](0017-multi-writer-namespaces.md)); history fetched from peers on demand when a node started from a checkpoint ([ADR-0018](0018-state-trees.md)); removing a member rotates the read key, for every remaining member, readers included (ADR-0017); filtered shares ([ADR-0021](0021-shares.md)).
 - **Not yet:** thinning policies.
 

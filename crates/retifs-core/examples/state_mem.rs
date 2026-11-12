@@ -1,4 +1,4 @@
-//! How much memory a namespace's merged state takes: builds the state of
+//! How much memory a library's merged state takes: builds the state of
 //! N records with four fields each and counts the bytes allocated.
 //!
 //!     cargo run --release -p retifs-core --example state_mem [N]

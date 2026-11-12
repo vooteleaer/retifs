@@ -7,7 +7,7 @@
 ## Context
 The first user apps are a contacts app and a calendar (separate repositories, like the desktop utility). Others will read the same records: the desktop utility's Find, a CardDAV/CalDAV bridge for existing apps (Thunderbird, DAVx5, phones), Haiku's Tracker. So the records need one convention, written down here rather than in either app.
 
-Contacts already exist: [ADR-0020](0020-sharing-names-invitations.md) keeps the people a user knows as `type=contact` records in their own namespace `me` (`name`, `retifs:node`, `retifs:writer`, `lxmf`), so "share with Mom" finds Mom. The address book is those records, with more about each person.
+Contacts already exist: [ADR-0020](0020-sharing-names-invitations.md) keeps the people a user knows as `type=contact` records in their own library `me` (`name`, `retifs:node`, `retifs:writer`, `lxmf`), so "share with Mom" finds Mom. The address book is those records, with more about each person.
 
 ## Principles
 - Records, not files: a person or an event is a record with attributes, findable by any of them, synced and versioned like any other.
@@ -52,7 +52,7 @@ In any library: each library holding events is a calendar (`Family`, `Work`, a c
 Times are strings in ISO 8601 order so they sort and compare as text: `start^=2026-10` finds October, `start>=2026-10-24` everything from that day.
 
 ### References between records
-Records point at each other by record ID: IDs are 128 random bits, unique across libraries, so a reference needs no namespace and finds the record wherever the reader has it. The key names the role, qualified by the ID; the value is a readable hint (a name), never needed to follow it.
+Records point at each other by record ID: IDs are 128 random bits, unique across libraries, so a reference needs no library and finds the record wherever the reader has it. The key names the role, qualified by the ID; the value is a readable hint (a name), never needed to follow it.
 
 | On | Key | Means |
 |---|---|---|

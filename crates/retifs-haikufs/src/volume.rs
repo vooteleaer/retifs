@@ -1,4 +1,4 @@
-//! A mounted namespace: the file tree (`retifs-tree`) over the records the
+//! A mounted library: the file tree (`retifs-tree`) over the records the
 //! local daemon serves, with inode numbers, directory listings, content
 //! reads and attributes as Haiku typed attributes. Plain Rust; the C side is
 //! in `ops`.
@@ -38,7 +38,7 @@ impl Mount {
             }
         }
         Ok(Mount {
-            ns: ns.ok_or("no ns=NAME: which namespace to mount")?,
+            ns: ns.ok_or("no ns=NAME: which library to mount")?,
             store: store.unwrap_or_else(libretifs::default_store_dir),
             wait,
         })
@@ -147,7 +147,7 @@ impl Volume {
         }
     }
 
-    /// Reads the namespace again when the tree is older than [`FRESH`].
+    /// Reads the library again when the tree is older than [`FRESH`].
     pub fn refresh(&mut self, force: bool) -> Result<(), String> {
         if !force && self.loaded.is_some_and(|t| t.elapsed() < FRESH) {
             return Ok(());
@@ -733,7 +733,7 @@ impl Volume {
         self.tree.nodes.clone()
     }
 
-    /// The namespace's size: its files' sizes together. Reported as the
+    /// The library's size: its files' sizes together. Reported as the
     /// volume's capacity (Tracker offers only volumes with one for Find).
     pub fn total_bytes(&mut self) -> u64 {
         let _ = self.refresh(false);
@@ -741,7 +741,7 @@ impl Volume {
     }
 
     /// The volume's indexes as `lsindex` lists them: Haiku's own and every
-    /// attribute key in the namespace, typed by its first value seen. retifs
+    /// attribute key in the library, typed by its first value seen. retifs
     /// answers any attribute; these say which ones exist.
     pub fn indexes(&mut self) -> Vec<(String, u32)> {
         use crate::types::*;

@@ -15,7 +15,7 @@
 //! node (default 20 bits: about 0.1 s per lease on a desktop, a few seconds on a Pi;
 //! 0: none). `--max-stamp-cost`: the most this node pays when offering leases (default 24).
 //! A solver reuses the hash state after the workblock, so each try costs one small hash.
-//! `--nomadnet NS [--nomadnet-name NAME]`: also run a NomadNet node serving namespace NS
+//! `--nomadnet NS [--nomadnet-name NAME]`: also run a NomadNet node serving library NS
 //! (own or a followed channel's `ch-…`): a record with `path=/x.mu` is the page
 //! `/page/x.mu`; without an `/index.mu`, an index of the pages is generated.
 //! `--loss-target`: keep adding nearby holders for each needed file until the
@@ -277,7 +277,7 @@ impl RequestEndpoint<Arc<Shared>> for ReaderEndpoint {
     }
 }
 
-/// The latest commit of every writer of namespace `ns_id` this node knows
+/// The latest commit of every writer of library `ns_id` this node knows
 /// (its own included), with their seeds.
 fn ns_commits(store: &SlabStore, ns_id: &NsId) -> Vec<(Cid, retifs_core::chunk::Seed)> {
     let mut out: Vec<(Cid, retifs_core::chunk::Seed)> = store
@@ -301,7 +301,7 @@ fn ns_commits(store: &SlabStore, ns_id: &NsId) -> Vec<(Cid, retifs_core::chunk::
 /// library (readers say so daily).
 const READER_TTL_MS: u64 = 30 * 24 * 3600 * 1000;
 
-/// The last time another node answered a sync of each namespace (`ns ms` lines).
+/// The last time another node answered a sync of each library (`ns ms` lines).
 fn load_seen(file: &std::path::Path) -> HashMap<String, u64> {
     std::fs::read_to_string(file)
         .unwrap_or_default()
@@ -326,7 +326,7 @@ fn readers_file(root: &std::path::Path, ns_id: &NsId) -> PathBuf {
     root.join("readers").join(hex(ns_id))
 }
 
-/// Notes reader node `node` of namespace `ns_id` (`<store>/readers/<ns_id>`:
+/// Notes reader node `node` of library `ns_id` (`<store>/readers/<ns_id>`:
 /// `node ms` lines).
 fn note_reader(root: &std::path::Path, ns_id: &NsId, node: &[u8; 16]) -> std::io::Result<()> {
     let mut readers = noted_readers(root, ns_id);
@@ -511,7 +511,7 @@ impl RequestEndpoint<Arc<Shared>> for PutEndpoint {
     }
 }
 
-/// `/retifs/head`: the latest head this node knows for a namespace (its own
+/// `/retifs/head`: the latest head this node knows for a library (its own
 /// channels and those it follows), or nothing. Heads are signed and say only
 /// which commit is latest; the commit's seed is encrypted to readers (ADR-0015).
 struct HeadEndpoint;
@@ -523,7 +523,7 @@ impl RequestEndpoint<Arc<Shared>> for HeadEndpoint {
         let store = &context.state.store;
         let head = match context.data.len() {
             16 => store.head_for(context.data.try_into().unwrap()).ok().flatten().unwrap_or_default(),
-            // ns_id ‖ writer: one writer's head of a multi-writer namespace (ADR-0017).
+            // ns_id ‖ writer: one writer's head of a multi-writer library (ADR-0017).
             48 => writer_head_bytes(store, context.data[..16].try_into().unwrap(), context.data[16..].try_into().unwrap()),
             // ns_id ‖ writer ‖ key id: that writer's latest head under a given read key,
             // so members can cross a key rotation.
@@ -542,7 +542,7 @@ impl RequestEndpoint<Arc<Shared>> for HeadEndpoint {
     }
 }
 
-/// The latest head of `writer` in namespace `ns`: our own (as creator or
+/// The latest head of `writer` in library `ns`: our own (as creator or
 /// member), or one we hold for another writer.
 fn writer_head_bytes(store: &SlabStore, ns: &[u8; 16], writer: &[u8; 32]) -> Vec<u8> {
     for c in store.own_channels().unwrap_or_default() {
@@ -730,7 +730,7 @@ fn args() -> Args {
             "--treat-as-slow" => a.treat_as_slow.push(*parse_destination(&it.next().expect("--treat-as-slow NODE")).expect("node hash").as_bytes()),
             "--stamp-cost" => a.stamp_cost = it.next().and_then(|v| v.parse().ok()).expect("--stamp-cost BITS"),
             "--max-stamp-cost" => a.max_stamp_cost = it.next().and_then(|v| v.parse().ok()).expect("--max-stamp-cost BITS"),
-            "--nomadnet" => a.nomadnet = Some(it.next().expect("--nomadnet NAMESPACE")),
+            "--nomadnet" => a.nomadnet = Some(it.next().expect("--nomadnet LIBRARY")),
             "--nomadnet-name" => a.nomadnet_name = it.next().expect("--nomadnet-name NAME"),
             "--loss-target" => a.loss_target = it.next().and_then(|v| v.parse().ok()).expect("--loss-target P (e.g. 0.001)"),
             "--site" => a.site = Some(it.next().filter(|s| !s.trim().is_empty()).expect("--site NAME")),
@@ -746,7 +746,7 @@ fn args() -> Args {
                     "retifsd [--store DIR] [--max-store SIZE] [--min-free SIZE] [--cache-max SIZE] [--private-requests] [--spare]
                              [--hold-for-others SIZE] [--db-cache SIZE] [--lease-term DURATION] [--loss-target P] [--min-copies N] [--compact] [--no-storage] [--site NAME] [--slow-link-budget DURATION]\n        \
                      [--stamp-cost BITS] [--max-stamp-cost BITS] [--announce-every DURATION]\n        \
-                     [--nomadnet NAMESPACE [--nomadnet-name NAME]] [--device NAME] [--default-libraries FILE] [--no-mounts] [--public] [--put FILE]..."
+                     [--nomadnet LIBRARY [--nomadnet-name NAME]] [--device NAME] [--default-libraries FILE] [--no-mounts] [--public] [--put FILE]..."
                 );
                 std::process::exit(0);
             }
@@ -757,7 +757,7 @@ fn args() -> Args {
 }
 
 /// Public: convergent. With a record: one secret per record from the store's
-/// namespace key (versions dedup, records don't share CIDs). Otherwise a fresh
+/// library key (versions dedup, records don't share CIDs). Otherwise a fresh
 /// random secret (a one-off file).
 fn secret(store: &SlabStore, public: bool, record: Option<&str>) -> ConvergenceSecret {
     if public {
@@ -773,8 +773,8 @@ fn secret(store: &SlabStore, public: bool, record: Option<&str>) -> ConvergenceS
     }
 }
 
-/// The store's namespace key (created on first use). Prototype stand-in for
-/// real namespaces (phase 2): one personal namespace per store.
+/// The store's library key (created on first use). Prototype stand-in for
+/// real libraries (phase 2): one personal library per store.
 fn namespace_key(store: &SlabStore) -> [u8; 32] {
     let path = store.root().join("namespace_key");
     if let Some(k) = std::fs::read(&path).ok().and_then(|b| b.try_into().ok()) {
@@ -782,7 +782,7 @@ fn namespace_key(store: &SlabStore) -> [u8; 32] {
     }
     let mut k = [0u8; 32];
     getrandom::fill(&mut k).expect("OS entropy");
-    std::fs::write(&path, k).expect("write namespace key");
+    std::fs::write(&path, k).expect("write library key");
     k
 }
 
@@ -1044,11 +1044,11 @@ struct Daemon {
     identity_hash: [u8; 16],
     /// Serialises channel publishing (see `publish_channel`).
     publishing: tokio::sync::Mutex<()>,
-    /// The checkpoint each namespace's published blind index describes.
+    /// The checkpoint each library's published blind index describes.
     indexed: Mutex<HashMap<String, Cid>>,
     /// Links this node has identified itself on.
     identified: Mutex<std::collections::HashSet<LinkId>>,
-    /// Derives per-lease signing keys (prototype: one namespace per store).
+    /// Derives per-lease signing keys (prototype: one library per store).
     namespace_key: [u8; 32],
     lease_term: u64,
     /// Wakes lease upkeep (receipts, renewals, proofs, placement) after new leases or needs.
@@ -1073,20 +1073,20 @@ struct Daemon {
     max_stamp_cost: u8,
     /// Wakes the follower loop (a channel was followed).
     follow_wake: Notify,
-    /// Wakes namespace sync (joined, granted).
+    /// Wakes library sync (joined, granted).
     ns_wake: Notify,
     /// Per library, its merge state: each behind a lock of its own, so long
     /// work on one (walking 77,000 operations, writing 38,000 records) doesn't
     /// stop the others, nor every tokio worker waiting on one global lock.
     ns_cache: Mutex<HashMap<String, Arc<Mutex<NsCache>>>>,
-    /// Each namespace's last view (NsInfo) and when it was made: answered
-    /// from here while the namespace is busy (a sync merging it), so an app
+    /// Each library's last view (NsInfo) and when it was made: answered
+    /// from here while the library is busy (a sync merging it), so an app
     /// asking what's here isn't held up for seconds.
     ns_views: Mutex<HashMap<String, (NsView, std::time::Instant)>>,
-    /// When another node holding each namespace last answered a sync (ms),
+    /// When another node holding each library last answered a sync (ms),
     /// kept in `<store>/seen` across restarts.
     ns_seen: Mutex<HashMap<String, u64>>,
-    /// Joined namespaces still looking for a checkpoint to start from.
+    /// Joined libraries still looking for a checkpoint to start from.
     ns_seeking: Mutex<std::collections::HashSet<String>>,
     /// When a storage-less node last tried to fetch its own chain back, per
     /// library: tried again only after a while (an old chain whose commits
@@ -1097,7 +1097,7 @@ struct Daemon {
     announced_wake: Notify,
     /// This device's name for keep tags and rules (ADR-0005).
     device: String,
-    /// Per namespace, how often its records changed here (for `watch`).
+    /// Per library, how often its records changed here (for `watch`).
     changes: Mutex<HashMap<String, u64>>,
     changed: Notify,
     /// Open write sessions (the local API's WriteBegin … WriteCommit).
@@ -2031,7 +2031,7 @@ async fn serve(store: Arc<SlabStore>, identity: node::IdentitySecret, endpoint: 
     // on the network (found by the overnight soak test).
     let (heard_tx, mut heard_rx) = mpsc::channel::<(PeerId, u8, retifs_core::announce::NodeAnnounce)>(4096);
     let (lib_tx, mut lib_rx) = mpsc::channel::<(PeerId, u8, u32, Option<retifs_core::announce::LibraryAnnounce>)>(1024);
-    // Optionally a NomadNet node (its own identity and destination) serving a namespace.
+    // Optionally a NomadNet node (its own identity and destination) serving a library.
     let nomadnet = args.nomadnet.as_ref().map(|_| {
         let id = load_or_create_identity(&store.root().join("nomadnet_identity")).expect("nomadnet identity");
         let name: &'static [u8] = Box::leak(args.nomadnet_name.clone().into_bytes().into_boxed_slice());
@@ -2358,7 +2358,7 @@ async fn serve(store: Arc<SlabStore>, identity: node::IdentitySecret, endpoint: 
     });
 
     if let (Some(ns), Some(nn)) = (args.nomadnet.clone(), nn_hash) {
-        println!("NomadNet node \"{}\" <{}> serving namespace {ns}", args.nomadnet_name, destination_hex(&nn));
+        println!("NomadNet node \"{}\" <{}> serving library {ns}", args.nomadnet_name, destination_hex(&nn));
         worker("nomadnet", nomadnet::serve(daemon_for_nn.clone(), handle.clone(), nn, ns, args.nomadnet_name.clone(), nn_rx));
     }
 
@@ -2546,7 +2546,7 @@ async fn connection(mut stream: impl AsyncRead + AsyncWrite + Unpin, daemon: Arc
                 Ok(()) => {
                     let names_only = matches!(req.msg, Request::Namespaces);
                     match handle(&daemon, req.msg).await {
-                        // An app sees only its own namespaces.
+                        // An app sees only its own libraries.
                         Ok(Response::Names { names }) if names_only => {
                             Response::Names { names: names.into_iter().filter(|n| s.namespaces.contains(n)).collect() }
                         }
@@ -2564,7 +2564,7 @@ async fn connection(mut stream: impl AsyncRead + AsyncWrite + Unpin, daemon: Arc
     }
 }
 
-/// A write session's commit, shared by its repeats: when, which namespace
+/// A write session's commit, shared by its repeats: when, which library
 /// (for an app's scope), and its result once done.
 struct PendingCommit {
     at: Instant,
@@ -2598,12 +2598,12 @@ fn hello(d: &Daemon, req: Request, exe: Option<&str>) -> Result<AppScope, String
     Ok(AppScope { name: app.name.clone(), namespaces: app.namespaces.clone(), write: app.write, app })
 }
 
-/// Whether an app may make this request: reads in its namespaces, writes
+/// Whether an app may make this request: reads in its libraries, writes
 /// there if it may write, nothing else (no grants, keys, files or placement).
 fn authorize(d: &Daemon, s: &AppScope, req: &Request) -> Result<(), String> {
     let deny = |what: &str| Err(format!("app {} may not {what}", s.name));
     let ns_ok = |ns: &str| s.namespaces.iter().any(|n| n == ns);
-    let read = |ns: &str| if ns_ok(ns) { Ok(()) } else { deny(&format!("use namespace {ns}")) };
+    let read = |ns: &str| if ns_ok(ns) { Ok(()) } else { deny(&format!("use library {ns}")) };
     let write = |ns: &str| {
         if !s.write {
             deny("write")
@@ -2855,7 +2855,7 @@ async fn handle(d: &Daemon, req: Request) -> Result<Response, String> {
 
         Request::AppAdd { name, namespaces, write, device, keys } => {
             if name.is_empty() || namespaces.is_empty() {
-                return Err("an app needs a name and at least one namespace".into());
+                return Err("an app needs a name and at least one library".into());
             }
             let device = match device {
                 Some(addr) => Some(
@@ -3132,7 +3132,7 @@ async fn handle(d: &Daemon, req: Request) -> Result<Response, String> {
         }
 
         Request::LiveQuery { ns, terms, since, timeout_ms } => {
-            // Waits for changes to the namespace, and answers once the
+            // Waits for changes to the library, and answers once the
             // query's answer differs from the one `since` names (or at the
             // end of the wait, without records).
             let deadline = Instant::now() + Duration::from_millis(timeout_ms.min(600_000));
@@ -3349,13 +3349,13 @@ async fn handle(d: &Daemon, req: Request) -> Result<Response, String> {
             }
             let addr: ChannelAddr = address.parse().map_err(|e: retifs_core::channel::ChannelError| e.to_string())?;
             // One library, one name here: joined again (heard twice, a link
-            // opened twice) it would be a second copy of the same namespace.
+            // opened twice) it would be a second copy of the same library.
             if let Some(other) =
                 visible_namespaces(d)?.into_iter().find(|n| current_addr(d, n).is_ok_and(|a| a.to_string() == addr.to_string()))
             {
                 return Err(format!("this library is here already, as {other}"));
             }
-            // This node's writer identity in the namespace (X25519 ‖ Ed25519): others
+            // This node's writer identity in the library (X25519 ‖ Ed25519): others
             // wrap rotated read keys to it.
             let mut identity = [0u8; 64];
             getrandom::fill(&mut identity).expect("OS entropy");
@@ -3426,9 +3426,9 @@ async fn handle(d: &Daemon, req: Request) -> Result<Response, String> {
         }
 
         Request::NsInfo { ns } => {
-            // Asking about a name isn't making a namespace of it.
+            // Asking about a name isn't making a library of it.
             if d.store.ns_info(&ns).map_err(|e| e.to_string())?.is_none() {
-                return Err(format!("no namespace {ns}"));
+                return Err(format!("no library {ns}"));
             }
             Ok(Response::Namespace(ns_view_now(d, &ns)?))
         }
@@ -3467,7 +3467,7 @@ async fn handle(d: &Daemon, req: Request) -> Result<Response, String> {
             writable(&source)?;
             writable(&name)?;
             if source == name {
-                return Err("a share is a namespace of its own".into());
+                return Err("a share is a library of its own".into());
             }
             if d.store.ns_info(&name).map_err(|e| e.to_string())?.is_some() {
                 return Err(format!("{name} already exists here"));
@@ -3482,7 +3482,7 @@ async fn handle(d: &Daemon, req: Request) -> Result<Response, String> {
                 parse_record_id(id)?;
             }
             if d.store.ns_info(&source).map_err(|e| e.to_string())?.is_none() {
-                return Err(format!("no namespace {source}"));
+                return Err(format!("no library {source}"));
             }
             ensure_namespace(d, &name)?;
             let mut attrs = vec![
@@ -3518,7 +3518,7 @@ async fn handle(d: &Daemon, req: Request) -> Result<Response, String> {
         Request::InviteCreate { ns, read, grant, keys, until, expires_ms, q, label } => {
             writable(&ns)?;
             if d.store.ns_info(&ns).map_err(|e| e.to_string())?.is_none() {
-                return Err(format!("no namespace {ns}"));
+                return Err(format!("no library {ns}"));
             }
             let merged = materialize(d, &ns)?;
             let own = own_writer(d, &ns)?;
@@ -3591,7 +3591,7 @@ async fn handle(d: &Daemon, req: Request) -> Result<Response, String> {
                 let join = Request::NsJoin { ns: ns.clone(), address: inv.ns.to_string(), from: vec![hex(&inv.node)], lazy: false };
                 Box::pin(handle(d, join)).await?;
             } else if current_addr(d, &ns)?.writer != inv.ns.writer {
-                return Err(format!("{ns} here is another namespace"));
+                return Err(format!("{ns} here is another library"));
             } else if !d.store.ns_peers(&ns).map_err(|e| e.to_string())?.contains(&inv.node) {
                 // Here already (joined before, perhaps through a node gone
                 // since): the inviting node is one to sync with too.
@@ -3891,7 +3891,7 @@ async fn publish_channel(d: &Daemon, name: &str, data: Vec<u8>, compress: bool, 
     Ok((c.seq, file))
 }
 
-/// The local namespace a followed channel's snapshots are rebuilt into.
+/// The local library a followed channel's snapshots are rebuilt into.
 fn channel_ns(addr: &ChannelAddr) -> String {
     format!("ch-{}", hex(&addr.ns_id()[..8]))
 }
@@ -3924,8 +3924,8 @@ fn parse_writer(s: &str) -> Result<[u8; 32], String> {
     bytes.and_then(|b| b.try_into().ok()).ok_or_else(|| format!("bad writer key {s} (64 hex digits)"))
 }
 
-/// A namespace's view without waiting: the last one if it's fresh (a few
-/// seconds) or the namespace is busy now (being merged), else made anew.
+/// A library's view without waiting: the last one if it's fresh (a few
+/// seconds) or the library is busy now (being merged), else made anew.
 fn ns_view_now(d: &Daemon, ns: &str) -> Result<NsView, String> {
     let last = d.ns_views.lock().unwrap().get(ns).cloned();
     if let Some((view, made)) = last {
@@ -3937,7 +3937,7 @@ fn ns_view_now(d: &Daemon, ns: &str) -> Result<NsView, String> {
     ns_view(d, ns)
 }
 
-/// How long a namespace's view is answered as it was.
+/// How long a library's view is answered as it was.
 const NS_VIEW_FRESH: Duration = Duration::from_secs(5);
 
 fn ns_view(d: &Daemon, ns: &str) -> Result<NsView, String> {
@@ -3991,7 +3991,7 @@ fn ns_view_made(d: &Daemon, ns: &str) -> Result<NsView, String> {
     })
 }
 
-/// Keeps joined and own namespaces in sync with their other members (ADR-0017):
+/// Keeps joined and own libraries in sync with their other members (ADR-0017):
 /// asks each peer for each known writer's head, fetches the commits and
 /// operations files missing here (pinned and served on, so members can sync
 /// from each other), merges, and seeks record content not held yet.
@@ -4046,7 +4046,7 @@ fn own_node(d: &Daemon) -> Result<PeerId, String> {
 }
 
 /// Members know each other's nodes (ADR-0022): this node's address is in the
-/// namespace (written once it may write, and again if it changed), and every
+/// library (written once it may write, and again if it changed), and every
 /// member's node is a peer to sync with, not just the one this node joined
 /// through. A member whose only peer loses its path still syncs through the
 /// others.
@@ -4292,16 +4292,16 @@ fn checkpoint_floors(d: &Daemon, ns: &str) -> HashMap<[u8; 32], Cid> {
         .unwrap_or_default()
 }
 
-/// Checks the namespace's checkpoint against its history (ADR-0018):
+/// Checks the library's checkpoint against its history (ADR-0018):
 /// replays every chain up to the checkpoint's frontier and compares the
 /// result with the checkpoint, exactly. A checkpoint that doesn't match is
-/// dropped and the namespace rebuilt from the history. Needs the history
+/// dropped and the library rebuilt from the history. Needs the history
 /// up to the frontier here (`retifs ns verify` fetches it).
 fn verify_checkpoint(d: &Daemon, ns: &str) -> Result<(bool, String), String> {
     let Some(file) = d.store.ns_checkpoint(ns).map_err(|e| e.to_string())? else {
         return Ok((true, "no checkpoint here: the state is replayed from the whole history".into()));
     };
-    let (creator, _) = d.store.ns_info(ns).map_err(|e| e.to_string())?.ok_or_else(|| format!("no namespace {ns}"))?;
+    let (creator, _) = d.store.ns_info(ns).map_err(|e| e.to_string())?.ok_or_else(|| format!("no library {ns}"))?;
     let cp = manifest::read_all(&*d.store, &file)
         .map_err(|e| e.to_string())
         .and_then(|b| Checkpoint::decode(&b).map_err(|e| e.to_string()))?;
@@ -4448,7 +4448,7 @@ async fn fetch_chain(
 /// Takes a fetched checkpoint as this node's starting point: fetches its
 /// state tree, checks that it loads, keeps it and resumes from it.
 async fn install_checkpoint(d: &Daemon, ns: &str, link: LinkId, file: &FileRef) -> Result<(), String> {
-    let (creator, _) = d.store.ns_info(ns).map_err(|e| e.to_string())?.ok_or_else(|| format!("no namespace {ns}"))?;
+    let (creator, _) = d.store.ns_info(ns).map_err(|e| e.to_string())?.ok_or_else(|| format!("no library {ns}"))?;
     let cp = manifest::read_all(&*d.store, file)
         .map_err(|e| e.to_string())
         .and_then(|b| Checkpoint::decode(&b).map_err(|e| e.to_string()))?;
@@ -4549,9 +4549,9 @@ fn declared_here(d: &Daemon, ns: &str) -> Result<Vec<String>, String> {
 }
 
 /// Builds the blind index of `ns`'s declared keys and publishes it on the
-/// namespace's index channel (ADR-0019), when the checkpoint changed since
+/// library's index channel (ADR-0019), when the checkpoint changed since
 /// the last one (or `force`). Returns the search capability, or None if the
-/// namespace declares no searchable keys.
+/// library declares no searchable keys.
 async fn publish_index(d: &Daemon, ns: &str, force: bool) -> Result<Option<String>, String> {
     if ns.starts_with("ch-") || d.store.ns_lazy(ns).map_err(|e| e.to_string())? {
         return Ok(None);
@@ -4713,7 +4713,7 @@ async fn search_query(d: &Daemon, ns: &str, node: &str, terms: &[String]) -> Res
     }
     let answer = d.ask(link, QUERY_ENDPOINT, body).await?;
     let (as_of_ms, _state, lists) =
-        parse_search_answer(&answer, tokens.len()).ok_or_else(|| format!("<{node}> doesn't hold this namespace's index"))?;
+        parse_search_answer(&answer, tokens.len()).ok_or_else(|| format!("<{node}> doesn't hold this library's index"))?;
     let mut ids: Option<std::collections::BTreeSet<RecordId>> = None;
     for (t, entries) in tokens.iter().zip(lists) {
         let these: std::collections::BTreeSet<RecordId> = entries.iter().map(|e| keys.open_entry(t, e)).collect();
@@ -4800,7 +4800,7 @@ const LAZY_SEARCH_MISS: Duration = Duration::from_secs(300);
 const LAZY_SEARCH_WAIT: Duration = Duration::from_secs(8);
 
 /// Fetches the state tree paths to `ids` from the checkpoint held here, from
-/// the namespace's peers (and `extra`): a lazy member's records on demand.
+/// the library's peers (and `extra`): a lazy member's records on demand.
 /// Each leaf fetched is complete, so its records merge exactly; the state is
 /// reloaded from the checkpoint with them. Returns the nodes fetched.
 ///
@@ -4910,8 +4910,8 @@ async fn fill_lazy(d: &Daemon, ns: &str) -> Result<usize, String> {
     fetch_paths(d, ns, &ids.into_iter().collect::<Vec<_>>(), &[], true).await
 }
 
-/// Makes a lazily held namespace whole: its checkpoint's state tree is
-/// fetched from a peer and the namespace is no longer lazy (records all here,
+/// Makes a lazily held library whole: its checkpoint's state tree is
+/// fetched from a peer and the library is no longer lazy (records all here,
 /// queries answered here). Lazy again if no peer has it all.
 async fn hold_whole(d: &Daemon, ns: &str) -> Result<(), String> {
     if d.no_storage {
@@ -4946,7 +4946,7 @@ async fn hold_whole(d: &Daemon, ns: &str) -> Result<(), String> {
 
 /// Whether this node's own chain in `ns` is not all here: a storage-less
 /// node's, after a restart (its head is in the keyring, its commits
-/// elsewhere). Merged without it, the namespace would lack this node's own
+/// elsewhere). Merged without it, the library would lack this node's own
 /// operations, and write them again on every round.
 fn own_chain_missing(d: &Daemon, ns: &str) -> bool {
     if !d.no_storage {
@@ -5049,7 +5049,7 @@ async fn publish_checkpoint(d: &Daemon, ns: &str) -> Result<(), String> {
 
 /// Reads `range` of `file`, fetching what it needs and isn't here: only the
 /// chunks the range covers (and the manifest nodes above them), from the
-/// namespace's peers and the file's hinted holders, in rounds (each round's
+/// library's peers and the file's hinted holders, in rounds (each round's
 /// nodes reveal the next level). Gives up at `wait` instead of hanging, and
 /// at once when no peer is reachable; a peer over a slow link is used only if
 /// the transfer fits the slow-link budget (ADR-0013). Fetched chunks go to
@@ -5634,21 +5634,21 @@ async fn fetch_spread(d: &Daemon, root: &Cid, missing: &[(Cid, retifs_core::Seed
     Ok(progressed)
 }
 
-/// Followed channels' namespaces belong to their writer.
+/// Followed channels' libraries belong to their writer.
 fn writable(ns: &str) -> Result<(), String> {
     if ns.starts_with("ch-") {
-        return Err(format!("{ns} is a followed channel's namespace: read-only here"));
+        return Err(format!("{ns} is a followed channel's library: read-only here"));
     }
     Ok(())
 }
 
-/// The channel a namespace's own writes go to (separate from channels that
+/// The channel a library's own writes go to (separate from channels that
 /// publish snapshots, like `channel publish-ns`).
 fn ns_channel(ns: &str) -> String {
     format!("ns:{ns}")
 }
 
-/// The namespace's identity (creator, read key); created on first write, with
+/// The library's identity (creator, read key); created on first write, with
 /// this node as its creator (ADR-0017).
 fn ensure_namespace(d: &Daemon, ns: &str) -> Result<ChannelAddr, String> {
     if let Some((creator, read_key)) = d.store.ns_info(ns).map_err(|e| e.to_string())? {
@@ -5667,14 +5667,14 @@ fn ensure_namespace(d: &Daemon, ns: &str) -> Result<ChannelAddr, String> {
     Ok(ChannelAddr { writer: creator, read_key })
 }
 
-/// The namespace's address with its newest read key known here.
+/// The library's address with its newest read key known here.
 fn current_addr(d: &Daemon, ns: &str) -> Result<ChannelAddr, String> {
-    let (creator, _) = d.store.ns_info(ns).map_err(|e| e.to_string())?.ok_or_else(|| format!("no namespace {ns}"))?;
+    let (creator, _) = d.store.ns_info(ns).map_err(|e| e.to_string())?.ok_or_else(|| format!("no library {ns}"))?;
     let keys = d.store.ns_keys(ns).map_err(|e| e.to_string())?;
-    Ok(ChannelAddr { writer: creator, read_key: *keys.last().expect("a namespace has a key") })
+    Ok(ChannelAddr { writer: creator, read_key: *keys.last().expect("a library has a key") })
 }
 
-/// Makes `key` this node's current read key for the namespace: later commits
+/// Makes `key` this node's current read key for the library: later commits
 /// and heads are encrypted with it.
 fn use_key(d: &Daemon, ns: &str, key: &[u8; 32]) -> Result<(), String> {
     d.store.add_ns_key(ns, key).map_err(|e| e.to_string())?;
@@ -5687,7 +5687,7 @@ fn use_key(d: &Daemon, ns: &str, key: &[u8; 32]) -> Result<(), String> {
     Ok(())
 }
 
-/// The signing key of an own channel: its own namespace, or a member's key
+/// The signing key of an own channel: its own library, or a member's key
 /// writing to another's (ADR-0017).
 fn channel_key(d: &Daemon, c: &retifs_store::OwnChannel) -> ChannelKey {
     channel_key_in(&d.store, c)
@@ -5831,9 +5831,9 @@ async fn transaction(d: &Daemon, ns: &str, steps: Vec<TxStep>) -> Result<Vec<Rec
     write_ops(d, ns, ops).await?;
     // Content no record uses any more: no longer kept elsewhere; deleted
     // records' content also becomes evictable here.
-    // (Reads every record of every namespace: only when something was replaced
+    // (Reads every record of every library: only when something was replaced
     // or deleted. An import of new records skipped it after the scale test
-    // found every write getting slower with the namespace's size.)
+    // found every write getting slower with the library's size.)
     let still_used: std::collections::HashSet<Cid> = if replaced.is_empty() && deleted.is_empty() {
         Default::default()
     } else {
@@ -5858,8 +5858,8 @@ async fn transaction(d: &Daemon, ns: &str, steps: Vec<TxStep>) -> Result<Vec<Rec
     Ok(out)
 }
 
-/// One modification of a namespace (ADR-0006, ADR-0017): its operations are
-/// committed to this node's writer chain, then the namespace is rebuilt by
+/// One modification of a library (ADR-0006, ADR-0017): its operations are
+/// committed to this node's writer chain, then the library is rebuilt by
 /// merging every writer chain held here.
 async fn write_ops(d: &Daemon, ns: &str, mut ops: Vec<Op>) -> Result<u64, String> {
     // A storage-less node writes on top of its own chain: back first.
@@ -5920,7 +5920,7 @@ fn kept(r: &Record, device: &str, all: bool, rules: &[Vec<retifs_store::Term>]) 
     all || tagged("keep") || tagged(&format!("keep:{device}")) || rules.iter().any(|terms| terms.iter().all(|t| t.matches(r)))
 }
 
-/// The keep rules of a namespace that apply to this device: records with
+/// The keep rules of a library that apply to this device: records with
 /// `type = "keep-rule"`, a `query` of comma-separated terms (as `retifs query`
 /// takes them) and an optional `device`.
 fn keep_rules(records: &[Record], device: &str) -> Vec<Vec<retifs_store::Term>> {
@@ -5940,7 +5940,7 @@ fn keep_rules(records: &[Record], device: &str) -> Vec<Vec<retifs_store::Term>> 
         .collect()
 }
 
-/// A share's definition (ADR-0021), from its record in the source namespace.
+/// A share's definition (ADR-0021), from its record in the source library.
 struct ShareDef {
     addr: ChannelAddr,
     terms: Vec<retifs_store::Term>,
@@ -5969,7 +5969,7 @@ fn share_def(r: &Record) -> Option<ShareDef> {
 /// record copied (attributes but the omitted ones, content by reference)
 /// under its derived ID, changed copies changed, copies no longer selected
 /// deleted, in one commit. Does nothing on a node that doesn't hold the
-/// share namespace or may not write to it yet. Returns how many records
+/// share library or may not write to it yet. Returns how many records
 /// changed.
 async fn sync_share(d: &Daemon, source: &str, def: &Record) -> Result<usize, String> {
     let Some(sd) = share_def(def) else { return Ok(0) };
@@ -6152,7 +6152,7 @@ async fn write_back(
 }
 
 /// Keeps every share whose source changed here up to date (ADR-0021), and
-/// all of them once a minute (for shares whose namespace or grant arrived
+/// all of them once a minute (for shares whose library or grant arrived
 /// later).
 async fn share_keeper(d: Arc<Daemon>) {
     let mut seen: HashMap<String, u64> = HashMap::new();
@@ -6182,8 +6182,8 @@ async fn share_keeper(d: Arc<Daemon>) {
     }
 }
 
-/// Content kept here for a namespace is served to its members, like the
-/// namespace's commits and operations: a member whose only peer is another
+/// Content kept here for a library is served to its members, like the
+/// library's commits and operations: a member whose only peer is another
 /// member gets content a third member wrote through it (the four-node soak:
 /// reads of RTR-2's files failed on rtr-4, whose only peer was cafa-cloud,
 /// which held them but wouldn't serve them). Requests still prove the
@@ -6263,7 +6263,7 @@ type Walked = (u64, Cid, Arc<WriterCommit>);
 /// A commit chunk by CID and seed.
 type CommitRef = (Cid, retifs_core::Seed);
 
-/// What's been walked and merged per namespace, so a write only reads the
+/// What's been walked and merged per library, so a write only reads the
 /// new commits and writes the records that changed (chains are append-only).
 #[derive(Default)]
 struct NsCache {
@@ -6414,10 +6414,10 @@ fn own_writer(d: &Daemon, ns: &str) -> Result<[u8; 32], String> {
     })
 }
 
-/// Every writer chain of a namespace held here: this node's and the others'.
+/// Every writer chain of a library held here: this node's and the others'.
 /// Resumed from a checkpoint, only commits after it, unless `full`.
 fn chains(d: &Daemon, ns: &str, full: bool) -> Result<(ChannelAddr, [u8; 32], Chains), String> {
-    // Reading never makes a namespace (writes do, in write_ops): a read of one
+    // Reading never makes a library (writes do, in write_ops): a read of one
     // just left made a new, empty one of the same name.
     let addr = current_addr(d, ns)?;
     let mut heads: Vec<([u8; 32], Option<CommitRef>)> = Vec::new();
@@ -6508,7 +6508,7 @@ fn ns_changed(d: &Daemon, ns: &str) {
     d.changed.notify_waiters();
 }
 
-/// Resumes a namespace from its local checkpoint, if the cache is empty
+/// Resumes a library from its local checkpoint, if the cache is empty
 /// (after a restart): the state and the point each chain was applied to.
 fn resume(d: &Daemon, ns: &str) -> Result<(), String> {
     if ns_entry_get(d, ns).is_some_and(|e| e.lock().unwrap().state.is_some()) {
@@ -6562,7 +6562,7 @@ fn resume(d: &Daemon, ns: &str) -> Result<(), String> {
     Ok(())
 }
 
-/// Stores the namespace's state as a checkpoint (ADR-0018): its records as a
+/// Stores the library's state as a checkpoint (ADR-0018): its records as a
 /// Prolly tree under the state secret, and the checkpoint file. The previous
 /// checkpoint's chunks that the new one doesn't share become evictable.
 fn save_checkpoint(d: &Daemon, ns: &str, state: &State, frontier: Vec<Frontier>) -> Result<FileRef, String> {
@@ -6597,7 +6597,7 @@ fn save_checkpoint(d: &Daemon, ns: &str, state: &State, frontier: Vec<Frontier>)
     Ok(file)
 }
 
-/// Rebuilds a namespace's local view by merging every writer chain held here.
+/// Rebuilds a library's local view by merging every writer chain held here.
 /// The result's `records` is empty: the records are in the store's view
 /// (`d.store.records(ns)`), updated here from what changed.
 fn materialize(d: &Daemon, ns: &str) -> Result<retifs_core::ops::Merged, String> {
@@ -6784,7 +6784,7 @@ fn materialize(d: &Daemon, ns: &str) -> Result<retifs_core::ops::Merged, String>
     Ok(merged)
 }
 
-/// The namespace as of each of this node's versions, oldest first: `visit`
+/// The library as of each of this node's versions, oldest first: `visit`
 /// sees (version, time, state). A version includes every writer's
 /// operations up to its time. One replay for the whole history: rebuilding
 /// each version from scratch made `rec history` quadratic in time and memory
@@ -6952,7 +6952,7 @@ async fn follow_pass(d: &Daemon, mut f: retifs_store::Follow) -> Result<(), Stri
     {
         eprintln!("follow {ns}: {e}");
     }
-    // A snapshot version is rebuilt into a local namespace (queryable), and
+    // A snapshot version is rebuilt into a local library (queryable), and
     // its records' content blocks are sought too (ADR-0016).
     if let Some(cur) = f.current
         && complete(&d.store, &cur)
@@ -7061,7 +7061,7 @@ async fn follow_pass(d: &Daemon, mut f: retifs_store::Follow) -> Result<(), Stri
 
 /// Gives memory freed after a large operation (loading or saving a
 /// checkpoint) back to the system. glibc's allocator otherwise keeps the
-/// peak: a daemon that resumed a 100,000-record namespace stayed at 457 MiB
+/// peak: a daemon that resumed a 100,000-record library stayed at 457 MiB
 /// with 108 MiB of state live.
 fn trim_memory() {
     #[cfg(all(target_os = "linux", target_env = "gnu"))]
@@ -7423,8 +7423,8 @@ fn sorted(chunks: &[(Cid, ChunkToken)]) -> Vec<(Cid, ChunkToken)> {
 /// Brings one file's holders up to date: forgets holders whose lease ran
 /// out, trims a surplus copy. Returns the loss estimate and current holders
 /// if the file needs more.
-/// The copies each file's namespaces ask for (`retifs.placement` records),
-/// where they ask: the most any of its namespaces asks.
+/// The copies each file's libraries ask for (`retifs.placement` records),
+/// where they ask: the most any of its libraries asks.
 fn copies_wanted(d: &Daemon) -> HashMap<Cid, usize> {
     let mut out: HashMap<Cid, usize> = HashMap::new();
     let placement = retifs_store::Term::Eq("type".into(), Value::Str(libretifs::PLACEMENT_TYPE.into()));
@@ -7451,7 +7451,7 @@ fn copies_wanted(d: &Daemon) -> HashMap<Cid, usize> {
     out
 }
 
-/// How many copies a file gets: a namespace's own number (exactly that), or
+/// How many copies a file gets: a library's own number (exactly that), or
 /// the node's rule (the loss target, and at least `min_copies`). The floor
 /// and the site rule are for the file's own copies (its writer's, or one kept
 /// here); a reader's node places copies near itself by the estimate alone,
@@ -7565,7 +7565,7 @@ fn review(
     if want.enough(d, risk, copies, own, elsewhere) {
         // Surplus after a repair (the absent holder came back): stop renewing
         // the worst copy once the target holds well without it, never below
-        // the floor; with a namespace's own number, whatever is over it.
+        // the floor; with a library's own number, whatever is over it.
         // The last copy at another site is never trimmed, nor offered for it.
         let protected = |p: &PeerId| own && d.site.is_some() && elsewhere && !elsewhere_without(Some(p));
         let all_confirmed = views.iter().all(|h| h.confirmed);
@@ -8218,7 +8218,7 @@ fn local_status(store: &SlabStore, file: &FileRef) -> Status {
     status
 }
 
-/// A NomadNet node serving a retifs namespace (ADR-0016): any node holding a
+/// A NomadNet node serving a retifs library (ADR-0016): any node holding a
 /// site (its author, or a follower of its channel) can serve it to unmodified
 /// NomadNet clients, so the site stays reachable while its author is offline.
 mod nomadnet {
@@ -8253,7 +8253,7 @@ mod nomadnet {
         }
     }
 
-    /// Pages of the namespace: request path → record.
+    /// Pages of the library: request path → record.
     fn pages(store: &SlabStore, ns: &str) -> HashMap<String, Record> {
         store
             .records(ns)

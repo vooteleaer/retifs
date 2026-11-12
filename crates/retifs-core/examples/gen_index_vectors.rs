@@ -77,7 +77,7 @@ fn main() {
         })
         .collect();
 
-    // A namespace: settings, 400 records, an index of the declared keys.
+    // A library: settings, 400 records, an index of the declared keys.
     let settings = vec![("type".to_string(), s(index::SETTINGS_TYPE)), ("keys".to_string(), Value::List(vec![s("album"), s("type"), s("tags:*")]))];
     let mut records: Vec<(RecordId, Vec<(String, Value)>)> = vec![(id(1_000_000), settings)];
     for i in 0..400u32 {

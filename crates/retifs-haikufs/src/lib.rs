@@ -1,5 +1,5 @@
 //! retifs as a Haiku file system (ADR-0002): a userlandfs module with
-//! Haiku's own kernel file system interface, so a namespace is a volume
+//! Haiku's own kernel file system interface, so a library is a volume
 //! Tracker browses, with each record's attributes as Haiku attributes.
 //! Like the FUSE mount it holds no keys and no store: it talks to the local
 //! `retifsd` through `libretifs`.
@@ -11,7 +11,7 @@
 //! views of their keys (see `person`), so People edits retifs contacts.
 //!
 //! Install the built library as `~/config/non-packaged/add-ons/userlandfs/retifs`
-//! and mount a namespace with
+//! and mount a library with
 //! `mount -t userlandfs -p "retifs ns=NAME [store=DIR] [wait=SECONDS]" /mnt/point`.
 //! On other systems only its plain parts build (for their tests).
 

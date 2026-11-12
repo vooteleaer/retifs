@@ -34,7 +34,7 @@ fn queries_match_befs_style_terms() {
     st.put_record("photos", &rec(3, &[("type", s("document")), ("name", s("notes")), ("width", Value::Int(-5))])).unwrap();
     st.put_record("other", &rec(9, &[("type", s("image"))])).unwrap();
 
-    assert_eq!(q(&st, "type=image"), vec![1, 2], "per namespace");
+    assert_eq!(q(&st, "type=image"), vec![1, 2], "per library");
     assert_eq!(q(&st, "type=image width>2000"), vec![1]);
     assert_eq!(q(&st, "width>=-5 width<1200"), vec![3], "negative ints order correctly");
     assert_eq!(q(&st, "width<=1200"), vec![2, 3]);
@@ -53,7 +53,7 @@ fn queries_match_befs_style_terms() {
     assert_eq!(q(&st, "type=image"), Vec::<u8>::new());
     assert_eq!(q(&st, "type=document"), vec![1, 3]);
 
-    // A snapshot replaces the namespace.
+    // A snapshot replaces the library.
     st.replace_namespace("photos", &[rec(7, &[("type", s("image"))])]).unwrap();
     assert_eq!(q(&st, ""), vec![7]);
     assert_eq!(st.namespaces().unwrap(), vec!["other".to_string(), "photos".to_string()]);

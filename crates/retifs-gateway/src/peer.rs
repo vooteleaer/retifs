@@ -202,7 +202,7 @@ fn same_addr(a: &SocketAddr, b: &SocketAddr) -> bool {
 }
 
 /// Requests other websites make in the background (images, scripts, fetches)
-/// are refused before any lookup: they could probe which namespaces and files
+/// are refused before any lookup: they could probe which libraries and files
 /// exist, or make the node fetch content. Following a link (navigation) is fine.
 pub fn cross_site_subresource(sec_fetch_site: Option<&str>, sec_fetch_mode: Option<&str>) -> bool {
     sec_fetch_site == Some("cross-site") && sec_fetch_mode != Some("navigate")

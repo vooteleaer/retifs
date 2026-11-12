@@ -8,7 +8,7 @@
 //! Changes are told to node monitors (`notify_*`), so Tracker windows and
 //! People follow them; changes from elsewhere reach live queries.
 //!
-//! Live queries: a thread follows the namespace's changes (the daemon's
+//! Live queries: a thread follows the library's changes (the daemon's
 //! watch, as the FUSE mount does) and tells each live query what came and
 //! went, through the port and token it was opened with.
 
@@ -245,7 +245,7 @@ unsafe extern "C" fn read_fs_info(volume: *mut fs_volume, info: *mut fs_info) ->
         info.block_size = 4096;
         info.io_size = 65536;
         // What's free is what the store's disk has (Tracker checks before a
-        // copy); the capacity is that and the namespace, at least one block
+        // copy); the capacity is that and the library, at least one block
         // (a volume without capacity isn't offered by Tracker's Find).
         let free = free_bytes(&v.store) / 4096;
         info.total_blocks = ((bytes.div_ceil(4096) + free) as off_t).max(1);
@@ -862,7 +862,7 @@ unsafe extern "C" fn free_query_cookie(_volume: *mut fs_volume, cookie: *mut c_v
 }
 
 /// Starts the volume's watcher once (at mount): a long poll on the
-/// namespace's changes on a thread of its own, and after each change
+/// library's changes on a thread of its own, and after each change
 /// `on_change`. Ends when the volume is unmounted.
 fn watch(v: Arc<Vol>) {
     if v.watching.swap(true, Ordering::AcqRel) {
@@ -896,7 +896,7 @@ fn watch(v: Arc<Vol>) {
 /// library's first sync: a Tracker window shows the top folders).
 const MANY_CHANGES: usize = 2000;
 
-/// After a change to the namespace (here, or another member's arriving):
+/// After a change to the library (here, or another member's arriving):
 /// the tree is read again, node monitors are told what came, went and
 /// changed (so a Tracker window fills as a library syncs), and live queries
 /// what they match now.

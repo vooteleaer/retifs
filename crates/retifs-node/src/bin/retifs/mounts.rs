@@ -1,7 +1,7 @@
-//! `retifs mount` and `retifs unmount` (ADR-0002): a namespace's file tree
+//! `retifs mount` and `retifs unmount` (ADR-0002): a library's file tree
 //! through this platform's frontend, `retifs-mount` (FUSE) on Linux and
 //! `retifs-cloudfiles` (a Cloud Files sync root) on Windows, started in the
-//! background. Which namespaces are mounted where, and by which process, is
+//! background. Which libraries are mounted where, and by which process, is
 //! kept under the store (`mounts/<namespace>`); the frontend's log is next
 //! to it.
 
@@ -25,7 +25,7 @@ fn frontend() -> PathBuf {
     std::env::current_exe().ok().and_then(|e| e.parent().map(|d| d.join(FRONTEND))).filter(|p| p.exists()).unwrap_or_else(|| FRONTEND.into())
 }
 
-/// Where a namespace is mounted unless told otherwise: `~/retifs/<ns>`.
+/// Where a library is mounted unless told otherwise: `~/retifs/<ns>`.
 fn default_dir(ns: &str) -> PathBuf {
     let home = std::env::var_os(if cfg!(windows) { "USERPROFILE" } else { "HOME" }).map(PathBuf::from).unwrap_or_else(|| ".".into());
     home.join("retifs").join(ns)
@@ -35,7 +35,7 @@ struct Mounted {
     ns: String,
     pid: u32,
     dir: PathBuf,
-    /// The node holding the namespace, when it isn't this one.
+    /// The node holding the library, when it isn't this one.
     via: Option<String>,
 }
 
@@ -131,8 +131,8 @@ fn log_tail(path: &Path, lines: usize) -> String {
     all[all.len().saturating_sub(lines)..].join("\n")
 }
 
-/// `retifs mount`: with no namespace, lists the mounts. `via`: the
-/// namespace is on another of the user's nodes (ADR-0019).
+/// `retifs mount`: with no library, lists the mounts. `via`: the
+/// library is on another of the user's nodes (ADR-0019).
 pub fn mount(store: &Path, args: &[String], via: Option<&str>) {
     #[cfg(target_os = "haiku")]
     {
@@ -196,7 +196,7 @@ pub fn mount(store: &Path, args: &[String], via: Option<&str>) {
     let pid = child.id();
     std::fs::write(mounts_dir(store).join(ns.as_str()), format!("{pid}\n{}\n{}\n", dir.display(), via.unwrap_or(""))).unwrap_or_else(|e| super::fail(e));
     // Up once the frontend says so; a frontend that stops has failed.
-    let ready = if cfg!(windows) { "retifs-cloudfiles: namespace" } else { "retifs-mount: namespace" };
+    let ready = if cfg!(windows) { "retifs-cloudfiles: library" } else { "retifs-mount: library" };
     let started = Instant::now();
     while started.elapsed() < Duration::from_secs(15) {
         std::thread::sleep(Duration::from_millis(300));
@@ -260,9 +260,9 @@ fn stop(m: &Mounted) {
     }
 }
 
-/// On Haiku a namespace is a volume of the `retifs` userlandfs module
+/// On Haiku a library is a volume of the `retifs` userlandfs module
 /// (`retifs-haikufs`): mounted by the kernel, no frontend process to keep.
-/// `retifs mount --all` mounts every namespace this node has (at login: it
+/// `retifs mount --all` mounts every library this node has (at login: it
 /// waits for retifsd first); the record under the store says where.
 #[cfg(target_os = "haiku")]
 mod haiku {
@@ -282,7 +282,7 @@ mod haiku {
         d.dev() != p.dev()
     }
 
-    /// Every namespace this node has, waiting up to a minute for retifsd.
+    /// Every library this node has, waiting up to a minute for retifsd.
     fn namespaces(store: &Path) -> Vec<String> {
         let store = store.to_path_buf();
         // A runtime of its own: the CLI's is busy running this command.

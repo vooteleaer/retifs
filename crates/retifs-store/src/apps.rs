@@ -1,5 +1,5 @@
 //! Applications allowed on the local API's app socket (ADR-0004): each has
-//! a token (only its hash is kept), the namespaces it may use, whether it may
+//! a token (only its hash is kept), the libraries it may use, whether it may
 //! write (and which attribute keys, if limited), and the executable it was
 //! first used from (pinned on Linux).
 
@@ -7,7 +7,7 @@ use redb::{ReadableTable, TableDefinition};
 
 use crate::{SlabStore, StoreError};
 
-/// App name → hash(32) ‖ write(1) ‖ u16 n ‖ (u16 len ‖ namespace)* ‖ u16 len ‖ exe
+/// App name → hash(32) ‖ write(1) ‖ u16 n ‖ (u16 len ‖ library)* ‖ u16 len ‖ exe
 /// [‖ device(16) [‖ u16 n ‖ (u16 len ‖ key)*]]; with keys but no device, the device is zeros.
 const APPS: TableDefinition<&str, &[u8]> = TableDefinition::new("apps");
 

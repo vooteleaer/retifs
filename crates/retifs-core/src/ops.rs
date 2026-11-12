@@ -1,6 +1,6 @@
 //! Operation chains and their merge (ADR-0017; decisions 4 and 8). Draft v1.
 //!
-//! A namespace commit's tree is an operations file:
+//! A library commit's tree is an operations file:
 //! ```text
 //! ops file = { "ops": [ op, … ], "retifs": "ns-ops/1" }        canonical msgpack (ADR-0016)
 //! op       = [ "set", id, key, value ] | [ "unset", id, key ] | [ "blocks", id, [ ref, … ] ]
@@ -147,7 +147,7 @@ pub enum Op {
     /// A new read key for epoch `epoch`, wrapped to each remaining writer
     /// (keywrap: RNS `Identity.encrypt`). Counts only from a writer holding `grant`.
     Rekey(u64, Vec<(WriterKey, Vec<u8>)>),
-    /// The writer's checkpoint of the namespace (ADR-0018): a file a new
+    /// The writer's checkpoint of the library (ADR-0018): a file a new
     /// member may start from instead of the history. It changes no state.
     Checkpoint(FileRef),
 }
@@ -411,7 +411,7 @@ pub struct RekeyEvent {
     pub entries: Vec<(WriterKey, Vec<u8>)>,
 }
 
-/// The merged state of a namespace.
+/// The merged state of a library.
 #[derive(Debug, Clone, PartialEq, Default)]
 pub struct Merged {
     /// Writers' public identities, as they announced them.
@@ -540,7 +540,7 @@ pub fn accepted(chain: &[WriterCommit], now_ms: u64) -> Vec<&WriterCommit> {
     out
 }
 
-/// A namespace's state as a CRDT (ADR-0017): every field keeps the stamp
+/// A library's state as a CRDT (ADR-0017): every field keeps the stamp
 /// that set it, so data operations apply one at a time, in any order, with
 /// the same result as [`merge`]'s replay. Control operations form a timeline
 /// evaluated as a whole. A new one is added in place if it's newer than every
@@ -857,7 +857,7 @@ impl State {
     }
 }
 
-/// The namespace as of each of `own`'s commits, oldest first (ADR-0006: every
+/// The library as of each of `own`'s commits, oldest first (ADR-0006: every
 /// modification is a version): `own`'s commits up to it and every other
 /// writer's commits up to its time. `visit(seq, time, state)` sees each.
 /// One state is carried from version to version, so a whole history costs

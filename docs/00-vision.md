@@ -13,7 +13,7 @@
 
 | Reticulum | This project |
 |---|---|
-| No IP addresses, only identities | No file paths, only records and namespaces |
+| No IP addresses, only identities | No file paths, only records and libraries |
 | No central address allocation | No central server or owner |
 | Works over any medium | Storage over any node, disk, stick |
 | Crypto by default | Crypto by default, with no unencrypted mode |

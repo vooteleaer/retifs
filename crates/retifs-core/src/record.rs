@@ -1,4 +1,4 @@
-//! Records and namespace snapshots (phase 2, ADR-0016; irreversible decision 2:
+//! Records and library snapshots (phase 2, ADR-0016; irreversible decision 2:
 //! canonical serialization). Draft v1.
 //!
 //! A record is a stable ID, attributes and content blocks. Everything signed
@@ -16,8 +16,8 @@
 //! value    = nil | bool | int (i64) | float (f64) | str | bin | [ value, … ]
 //! ```
 //! A snapshot is stored as an ordinary file (manifest, sealed chunks): one
-//! version of a small namespace, e.g. a site or an app, published over a
-//! channel (ADR-0015). Large namespaces will use Prolly trees instead.
+//! version of a small library, e.g. a site or an app, published over a
+//! channel (ADR-0015). Large libraries will use Prolly trees instead.
 
 use std::collections::BTreeMap;
 
@@ -100,7 +100,7 @@ impl Record {
     }
 }
 
-/// All records of a namespace at one version.
+/// All records of a library at one version.
 #[derive(Debug, Clone, PartialEq, Default)]
 pub struct Snapshot {
     /// Sorted by ID, unique.
@@ -140,7 +140,7 @@ impl Snapshot {
             records.push(read_record(&mut r)?);
         }
         if r.str()? != "retifs" || r.str()? != SNAPSHOT_TAG || !r.0.is_empty() {
-            return Err(RecordError::Malformed("not a namespace snapshot"));
+            return Err(RecordError::Malformed("not a library snapshot"));
         }
         let snap = Snapshot::new(records)?;
         canonical(bytes, snap.encode())?;

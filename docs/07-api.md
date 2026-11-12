@@ -7,15 +7,15 @@ The implemented local API is the `Request`/`Response` enums in `crates/libretifs
 
 | Section | Implemented as | Differences from the draft |
 |---|---|---|
-| §3 Connection and access | owner socket `retifs.sock`; app socket `apps.sock` with `Hello { token }`, `AppAdd/List/Remove` | apps get a namespace list, read/write and optionally the attribute keys they may write (`keys`, [ADR-0023](adr/0023-attribute-extraction.md)), not query scopes; the token is pinned to the executable on Linux |
-| §4 Namespaces | `Namespaces`, `NsInfo`, `NsAddress`, `NsJoin`, `NsKeep`, `NsCheckpoint`, `NsVerify`, `NsAnnounce`, `HeardLibraries`, `NsLeave`, `NsDelete` | namespaces are created on first write (or by `NsAddress`); `NsInfo` on an unknown name is an error; `NsAnnounce` and `HeardLibraries` announce public libraries and list the ones heard (ADR-0029); `NsLeave` leaves on this node (one made here only with `mine`), `NsDelete` deletes a library on every member's node ([ADR-0034](adr/0034-deleting-a-library.md)) |
+| §3 Connection and access | owner socket `retifs.sock`; app socket `apps.sock` with `Hello { token }`, `AppAdd/List/Remove` | apps get a library list, read/write and optionally the attribute keys they may write (`keys`, [ADR-0023](adr/0023-attribute-extraction.md)), not query scopes; the token is pinned to the executable on Linux |
+| §4 Libraries | `Namespaces`, `NsInfo`, `NsAddress`, `NsJoin`, `NsKeep`, `NsCheckpoint`, `NsVerify`, `NsAnnounce`, `HeardLibraries`, `NsLeave`, `NsDelete` | libraries are created on first write (or by `NsAddress`); `NsInfo` on an unknown name is an error; `NsAnnounce` and `HeardLibraries` announce public libraries and list the ones heard (ADR-0029); `NsLeave` leaves on this node (one made here only with `mine`), `NsDelete` deletes a library on every member's node ([ADR-0034](adr/0034-deleting-a-library.md)) |
 | §5–6 Records, attributes | `RecordCreate`, `RecordSet`, `RecordGet`, `RecordDelete` | |
 | §7 Blocks | `ReadRange` (fetches missing chunks within a wait), `WriteBegin/At/Read/Truncate/Commit/Abort`; files by read-cap: `Put`, `PutFd` (the open file passed as a descriptor, Unix), `Get` | content is one `content` block per record; write sessions instead of `put_block` |
 | §8 Queries | `Query` with the CLI's terms, optionally `at` a version; `SearchQuery` through a search node's blind index; `NsSearch` publishes the index | remote queries without the read key are exact matches on declared keys ([ADR-0019](adr/0019-remote-query-and-blind-index.md)) |
-| §9 Live queries | `Watch { ns, since, timeout_ms }`: a long poll per namespace | no per-query events; clients re-query |
+| §9 Live queries | `Watch { ns, since, timeout_ms }`: a long poll per library | no per-query events; clients re-query |
 | §10 Transactions, history | `Transaction` (create, set, delete steps, one commit), `RecordHistory`, `Query { at }` | |
 | §11 Availability | `Status`, `Want`, `Replicate`, `Forget`, `StorageNodes`, `NsKeep`, keep rules as records | a miss waits up to the client's wait, then fails (`EIO` in the mount), not `Unavailable` at once |
-| §12 Sharing | `NsGrant` (rights, `keys`, `until`), `NsRevoke`, channels (`ChannelCreate`, `Follow`, …), shares (`ShareCreate`, `ShareDelete`), invitations (`InviteCreate`, `InviteList`, `InviteCancel`, `InviteAccept`, [ADR-0020](adr/0020-sharing-names-invitations.md)) | a filtered share is a namespace filled by the owner's nodes, not a projection with re-wrapped keys ([ADR-0021](adr/0021-shares.md)) |
+| §12 Sharing | `NsGrant` (rights, `keys`, `until`), `NsRevoke`, channels (`ChannelCreate`, `Follow`, …), shares (`ShareCreate`, `ShareDelete`), invitations (`InviteCreate`, `InviteList`, `InviteCancel`, `InviteAccept`, [ADR-0020](adr/0020-sharing-names-invitations.md)) | a filtered share is a library filled by the owner's nodes, not a projection with re-wrapped keys ([ADR-0021](adr/0021-shares.md)) |
 | §14 Wire protocol | the same requests over an RNS Link (`/retifs/api`, or `Remote { node, req }` through the local daemon) for the user's own devices; `/retifs/query` for search nodes ([ADR-0019](adr/0019-remote-query-and-blind-index.md)) | own nodes get the full API; search nodes only blind index lookups |
 | §15 C ABI | not yet | |
 | §16 POSIX mapping | `retifs-mount` ([ADR-0002](adr/0002-os-integration.md)) | |
@@ -28,7 +28,7 @@ Large content: one message is at most 256 MiB (`MAX_FRAME`), and through another
 1. [Overview](#1-overview)
 2. [Core types](#2-core-types)
 3. [Connection and access](#3-connection-and-access)
-4. [Namespaces](#4-namespaces)
+4. [Libraries](#4-libraries)
 5. [Records](#5-records)
 6. [Attributes](#6-attributes)
 7. [Blocks (content)](#7-blocks-content)
@@ -70,7 +70,7 @@ All calls below are shown as Rust signatures. The C ABI mirrors them one to one.
 |---|---|---|
 | `RecordId` | 16 random bytes | Stable for the record's whole life. Shown as base32. |
 | `Cid` | version byte + hash of the ciphertext | **⚠ irreversible** (decision 1). Content-addressed and verifiable without the key. |
-| `RootId` | `Cid` of a database root | A snapshot of a namespace (§10). |
+| `RootId` | `Cid` of a database root | A snapshot of a library (§10). |
 | `CommitId` | `Cid` of a commit object | **⚠ irreversible** format (decision 8). |
 | `NsAddr` | 16-byte RNS destination hash | `retifs.ns.<name>` + owner identity. |
 | `Identity` | RNS identity hash (16 bytes) | A person, device or app identity. |
@@ -126,9 +126,9 @@ let grant = rt.request_access(&[
 
 A scope's filter is a query (§8). The app sees and changes only records matching it, and writes that would take a record outside its scope fail with `OutOfScope`.
 
-## 4. Namespaces
+## 4. Libraries
 
-A namespace is an independently versioned database: the photo collection and the system configuration are separate.
+A library is an independently versioned database: the photo collection and the system configuration are separate. Earlier docs called it a namespace, and the code and formats still do (`ns`, the `Ns…` requests, `Namespaces`): those names are kept so nothing breaks.
 
 ```rust
 rt.namespaces().await?                        -> Vec<NsInfo>
@@ -139,7 +139,7 @@ rt.create_namespace("photos", NsOptions{..}).await? -> Ns
 `NsInfo { addr, petname, owner, role, head: CommitId, synced: SyncState }`
 
 - Petnames are local labels. Resolving `community/…`-style community names is an open question.
-- The namespace update format with sequence numbers and rollback protection is **⚠ irreversible** (decision 5).
+- The library update format with sequence numbers and rollback protection is **⚠ irreversible** (decision 5).
 
 All following calls are made on an `Ns` handle (or on a transaction, §10).
 
@@ -336,10 +336,10 @@ ns.restore(id, commit).await?      -> CommitId      // a new version with the ol
 
 `Commit { id, parents, root, author, seq, time, message }`
 
-- Each writer (person or device) has its own append-only chain with its own `seq`. The namespace state is the merge of all writers' heads, computed by every reader, and writes without a valid capability are ignored on merge.
+- Each writer (person or device) has its own append-only chain with its own `seq`. The library state is the merge of all writers' heads, computed by every reader, and writes without a valid capability are ignored on merge.
 - Two heads mean two devices or people changed things concurrently. Attributes merge automatically (CRDT). Concurrent content versions stay multi-valued until resolved, and `merge` records the resolution.
 - `at()` gives the whole API, read-only, against an old snapshot. History queries are ordinary queries.
-- **Retention:** every version is kept by default. `ns.set_retention(policy)` lets a namespace opt into thinning, which drops only old *content*, never commits.
+- **Retention:** every version is kept by default. `ns.set_retention(policy)` lets a library opt into thinning, which drops only old *content*, never commits.
 - Commits and metadata sync promptly, while the content of intermediate versions may upload lazily (shown as `OnlyHere` in `status()`).
 
 ## 11. Availability and offline
@@ -369,8 +369,8 @@ struct Availability {
 ## 12. Sharing and capabilities
 
 ```rust
-rt.create_group("family", &[alice, bob]).await? -> Ns   // group namespace, all members write
-ns.create_share(filter, Share {..}).await?     -> (Ns, Capability) // filtered read-only share namespace
+rt.create_group("family", &[alice, bob]).await? -> Ns   // group library, all members write
+ns.create_share(filter, Share {..}).await?     -> (Ns, Capability) // filtered read-only share library
 ns.add_member(identity, actions, filter).await?
 
 ns.share(Share {
@@ -387,7 +387,7 @@ ns.members().await?               -> Vec<Member>  // groups
 ns.remove_member(identity).await? // rotates the group key
 ```
 
-- **A share is a namespace** ([ADR-0006](adr/0006-versioning-and-sharing.md)). A group namespace has one group key wrapped for each member. A filtered share is a projection namespace with its own key: only per-block keys are re-wrapped, and no content is copied.
+- **A share is a library** ([ADR-0006](adr/0006-versioning-and-sharing.md)). A group library has one group key wrapped for each member. A filtered share is a projection library with its own key: only per-block keys are re-wrapped, and no content is copied.
 - A capability is `{issuer, audience, resource, action, expiry, proof}`, content-addressed. Each delegation can only narrow, and the daemon rejects any wider grant with `CannotWiden`. **⚠ irreversible** semantics (decision 4).
 - Read permission = key, and write permission = signature.
 - Revoking read access rotates keys, so the revoked party keeps what they already received but nothing new.
@@ -540,5 +540,5 @@ let docs = old.query(r#"type = "document""#, Default::default()).await?;
 - Multi-valued attributes: is `tags:<tag> = true` enough, or do we need a real set type?
 - ~~Daemon-side metadata extraction: which formats, and does it run sandboxed?~~ A separate daemon, an app with a key limit ([ADR-0023](adr/0023-attribute-extraction.md)).
 - Pagination and consistency of cursors across commits (snapshot the root per cursor?).
-- ~~Partial namespace sync for small devices.~~ Lazy members: `NsJoin { lazy }` holds only the records needed ([ADR-0018](adr/0018-state-trees.md)).
+- ~~Partial library sync for small devices.~~ Lazy members: `NsJoin { lazy }` holds only the records needed ([ADR-0018](adr/0018-state-trees.md)).
 - Language bindings beyond Rust/C: which first?

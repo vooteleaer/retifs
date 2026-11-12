@@ -1,12 +1,12 @@
 //! What the gateway serves, independent of HTTP (tested on its own).
 //!
 //! - `http://<namespace>.localhost:<port>/<path>` is the record of that
-//!   namespace whose `path` attribute is `/<path>`; `/` and directories look
+//!   library whose `path` attribute is `/<path>`; `/` and directories look
 //!   for `index.html`.
-//! - Every namespace is its own origin, so one site can't read another's
+//! - Every library is its own origin, so one site can't read another's
 //!   data through the browser.
 
-/// The namespace a Host header names, if it's one of ours: `<ns>.localhost`
+/// The library a Host header names, if it's one of ours: `<ns>.localhost`
 /// (with any port). `None` for the bare `localhost` (the index) or a foreign
 /// host (refused: DNS rebinding).
 pub fn site(host: &str) -> Result<Option<String>, ()> {

@@ -1,4 +1,4 @@
-//! The file-tree view of a namespace (ADR-0002): which record sits at which
+//! The file-tree view of a library (ADR-0002): which record sits at which
 //! path, and how attribute values read and write as text (xattrs). Shared by
 //! the FUSE mount and the Windows Cloud Files provider; builds everywhere.
 //!

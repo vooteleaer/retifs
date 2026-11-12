@@ -1,4 +1,4 @@
-//! Namespace checkpoints (ADR-0018): the merged state at given points of
+//! Library checkpoints (ADR-0018): the merged state at given points of
 //! every writer's chain, so a node resumes from it instead of replaying.
 //!
 //! ```text
@@ -47,7 +47,7 @@ pub struct Checkpoint {
     pub state: Option<Root>,
 }
 
-/// The convergence secret of a namespace's state trees: every member with
+/// The convergence secret of a library's state trees: every member with
 /// the read key builds the same tree from the same state.
 pub fn state_secret(read_key: &[u8; 32]) -> ConvergenceSecret {
     ConvergenceSecret::for_record(read_key, STATE_LABEL)

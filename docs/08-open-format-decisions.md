@@ -29,7 +29,7 @@ Two choices were left before [ADR-0008](adr/0008-chunk-encryption-and-cid.md) (c
 
 ## 2. Smallest size class: 1 KiB or 512 B
 
-**Today:** classes run 1 KiB … 256 KiB, and every chunk is padded to one ([ADR-0008](adr/0008-chunk-encryption-and-cid.md)). Since multi-writer namespaces, every modification is two small chunks: a commit (268 B) and an operations file (48–389 B in the vectors). Each is padded to 1 KiB, so **a write costs 2 KiB** on the wire for under 700 B of content.
+**Today:** classes run 1 KiB … 256 KiB, and every chunk is padded to one ([ADR-0008](adr/0008-chunk-encryption-and-cid.md)). Since multi-writer libraries, every modification is two small chunks: a commit (268 B) and an operations file (48–389 B in the vectors). Each is padded to 1 KiB, so **a write costs 2 KiB** on the wire for under 700 B of content.
 
 Over LoRa (SF7, 125 kHz, about 5 kbit/s raw, 10 % airtime limit) that's roughly 4 s of airtime per write at 1 KiB, or 2 s with a 512 B class. A 512 B class carries up to 443 B of payload, which fits a commit and most operations files.
 

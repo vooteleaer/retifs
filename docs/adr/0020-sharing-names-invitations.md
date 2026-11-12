@@ -5,7 +5,7 @@
 - **Irreversible:** partly. The `retifs:` link envelope, the invitation encoding and the fingerprint words are [irreversible decision 13](../02-irreversible-decisions.md) (printed on QR codes; words compared between implementations), with vectors verified with RNS, and wait for the external review with the other formats. How invitations are redeemed is protocol, and the grant they lead to is the existing operation ([ADR-0017](0017-multi-writer-namespaces.md)).
 
 ## Context
-Sharing works, but by hand: a namespace address is about 140 characters (`retifs-ch:1:<writer>:<read key>`), a node is a 32-digit hash, and giving someone write access is a round trip. They join and send back their writer key, then the creator grants it. People won't do that for a family calendar or a shared album. They need names they recognise, a way to pass an address without typing it, and a share that takes one step.
+Sharing works, but by hand: a library address is about 140 characters (`retifs-ch:1:<writer>:<read key>`), a node is a 32-digit hash, and giving someone write access is a round trip. They join and send back their writer key, then the creator grants it. People won't do that for a family calendar or a shared album. They need names they recognise, a way to pass an address without typing it, and a share that takes one step.
 
 ## Principles
 - Supports "from location to identity" and "from machine to person": you share with *Mom*, not with a hash.
@@ -20,8 +20,8 @@ Sharing works, but by hand: a namespace address is about 140 characters (`retifs
 ## Decision
 
 ### Names
-- **Display name:** every node may publish a profile (`/retifs/profile`: display name, optionally per namespace). Prns doesn't pass announce app data on, so it's fetched, not announced. Apps always show it with a short fingerprint, and never use it to decide anything.
-- **Petnames:** adding someone creates a contact record in the user's own namespace (`type=contact`, `name=Mom`, `retifs:node`, `retifs:writer`, `lxmf`). The record is the address book: "share with Mom" looks it up. It syncs like any record, so every device of the user knows Mom.
+- **Display name:** every node may publish a profile (`/retifs/profile`: display name, optionally per library). Prns doesn't pass announce app data on, so it's fetched, not announced. Apps always show it with a short fingerprint, and never use it to decide anything.
+- **Petnames:** adding someone creates a contact record in the user's own library (`type=contact`, `name=Mom`, `retifs:node`, `retifs:writer`, `lxmf`). The record is the address book: "share with Mom" looks it up. It syncs like any record, so every device of the user knows Mom.
 - **Fingerprint words:** a key's fingerprint can be shown as a few words from a fixed list (`SHA-256(key)`, 11 bits per word). Both sides compare them when it matters (adding a contact in person, a first grant).
 
 ### Links and QR codes
@@ -31,27 +31,27 @@ retifs:<kind>/<what>[?q=<query>&view=<hint>&name=<label>&…]
 
 kind    what                                      e.g.
 node    a node address                            add a contact
-ns      a namespace address (read) + query        a calendar; an album (q=album=Prangli); one record (q=@<id>)
+ns      a library address (read) + query          a calendar; an album (q=album=Prangli); one record (q=@<id>)
 invite  an invitation (see below) + query         join and write, opening on a view
 ch      a channel address                         follow a store or a site
 cap     a read-cap (+ attributes)                 one file, nothing else
 ```
-- **`q`** is a query in the CLI's terms (URL-encoded): what the recipient's app opens on. An album, a playlist, one record and a whole namespace are all a namespace plus a query (or none).
-- **A query is a view, not a limit.** The address carries the read key, so whoever has the link can read the whole namespace. Sharing only an album means the album is its own namespace: a share ([ADR-0021](0021-shares.md)). Apps must say so ("this shares your whole Photos library") rather than let a query look like a limit.
+- **`q`** is a query in the CLI's terms (URL-encoded): what the recipient's app opens on. An album, a playlist, one record and a whole library are all a library plus a query (or none).
+- **A query is a view, not a limit.** The address carries the read key, so whoever has the link can read the whole library. Sharing only an album means the album is its own library: a share ([ADR-0021](0021-shares.md)). Apps must say so ("this shares your whole Photos library") rather than let a query look like a limit.
 - **`view`** hints which app opens it (`photos`, `music`, `calendar`, `store`). Without one, the record type decides, the way Android routes intents to apps.
 - **Unknown kinds and parameters** are shown for what they are (with a generic action: open in the gateway, save the file), never an error. New kinds can be added without breaking printed codes.
-- **QR** is the main in-person channel: shown on one screen, scanned by the other. A namespace address or an invitation is a few hundred characters, well within an easily scanned code.
+- **QR** is the main in-person channel: shown on one screen, scanned by the other. A library address or an invitation is a few hundred characters, well within an easily scanned code.
 - Over a distance the same link goes in an LXMF message (end-to-end encrypted to the recipient, who is often already an LXMF contact), so sharing reuses Reticulum messaging and needs no new channel.
-- **Sharing one record** without the rest of its namespace: a `cap` link (its content and attributes, no access to anything else; can't be revoked) or a small share namespace holding just that record (revocable, updatable). Which one an app offers is open.
+- **Sharing one record** without the rest of its library: a `cap` link (its content and attributes, no access to anything else; can't be revoked) or a small share library holding just that record (revocable, updatable). Which one an app offers is open.
 
 ### Invitations: one-step sharing
 ```text
-invitation = { "ns": namespace address, "node": creator's node, "secret": 32 random bytes,
+invitation = { "ns": library address, "node": creator's node, "secret": 32 random bytes,
                "rights": [...], "limits": { "keys"?, "until"? }, "expires": time, "q"?: query }   canonical msgpack, base32 in the link
 ```
 1. The creator's node makes the invitation and keeps `H(secret)` with the rights, limits and expiry, as pending.
 2. The invitation travels as a link (QR, LXMF, …).
-3. The recipient's node joins the namespace (it can read from then on: the address carries the read key) and asks the creator's node (`/retifs/invite`, over a Link): `H(secret) ‖ writer key ‖ HMAC(secret, link id ‖ writer key)`.
+3. The recipient's node joins the library (it can read from then on: the address carries the read key) and asks the creator's node (`/retifs/invite`, over a Link): `H(secret) ‖ writer key ‖ HMAC(secret, link id ‖ writer key)`.
 4. The creator's node checks that the invitation is pending, unexpired and the proof good. It then writes the grant (`Op::Grant` or `Op::GrantLimited`) for that writer key and marks the invitation spent. If the creator is offline, the recipient's node asks again on its next sync.
 
 - **One use:** the first redemption spends it. A copy of the QR code redeemed later gets nothing beyond what the address already gives (reading).
@@ -60,8 +60,8 @@ invitation = { "ns": namespace address, "node": creator's node, "secret": 32 ran
 
 ## Implementation status (2026-10-21)
 - **Links:** `libretifs::link` parses and writes the envelope (percent-encoded; unknown kinds and parameters kept). For `ns`, `<what>` is the address without its `retifs-ch:` prefix (`1:<writer>:<read key>`), and **`from`** (repeatable) names nodes to fetch from, since a joining node needs a peer before it has any.
-- `retifs ns link NS [--name LABEL] [--q TERMS]` prints a namespace's link (with this node as `from`, and a reminder that the link reads the whole namespace); `retifs open LINK [--as NAME]` joins it under its `name` (made into a local name) and says what `q` opens on; `ns join NAME LINK` takes a link where it took an address. `share create` and Explorer's **Share with retifs…** give the share's link.
-- A namespace link is about 200 characters (two 64-digit hex keys, a node, a label): a QR code of version 10 or so.
+- `retifs ns link NS [--name LABEL] [--q TERMS]` prints a library's link (with this node as `from`, and a reminder that the link reads the whole library); `retifs open LINK [--as NAME]` joins it under its `name` (made into a local name) and says what `q` opens on; `ns join NAME LINK` takes a link where it took an address. `share create` and Explorer's **Share with retifs…** give the share's link.
+- A library link is about 200 characters (two 64-digit hex keys, a node, a label): a QR code of version 10 or so.
 - **Invitations** (2026-10-21), as decided above, with these details:
   - The encoding is canonical msgpack `{expires, limits {keys?, until?}, node, ns (writer ‖ read key, bin 64), q?, rights, secret}`, base32 (RFC 4648, lowercase, no padding) in `retifs:invite/<base32>?name=<label>`: about 330 characters.
   - `id = SHA-256("retifs/v1/invite" ‖ secret)`. The redemption over a Link to `/retifs/invite` is `id ‖ writer key ‖ node ‖ HMAC-SHA256(secret, link id ‖ writer key ‖ node)`: the member's node is in it too (and in the proof), so the creator knows whom to sync with. The answer is a status byte and a message.
@@ -72,16 +72,16 @@ invitation = { "ns": namespace address, "node": creator's node, "secret": 32 ran
 - Live (four nodes, 2026-10-21, 14 checks): the first opener writes at once and its writes reach the creator; a second use, an expired and a withdrawn invitation are refused and grant nothing; a key-limited invitation grants limited write; with the creator stopped, the recipient joins, reads, and gets its grant once the creator is back.
 - **QR (2026-10-22):** `--qr` on `ns link`, `invite create` and `share create` draws the link as a QR code in the terminal (error correction L, light modules drawn, for dark terminals). An invitation is a version 13 code.
 - **Fingerprint words (decided 2026-10-22: BIP-39 English):** consecutive 11-bit groups of SHA-256(key), most significant bit first, as words from the BIP-39 English list (the file, SHA-256 `2f5eed53…dbda`, is in `retifs-core`); six words (66 bits) by default. Vectors: `test-vectors/words-v1.json` (`verify_words.py`).
-- **Contacts (decided 2026-10-22: in the user's own namespace `me`):** a contact is a record `type=contact` (now `application/x-person`, [ADR-0025](0025-types-are-mime-types.md)), `name` (the petname), `retifs:node` in `me`, which the user's devices share like any namespace (and which will hold saved queries and other personal settings).
+- **Contacts (decided 2026-10-22: in the user's own library `me`):** a contact is a record `type=contact` (now `application/x-person`, [ADR-0025](0025-types-are-mime-types.md)), `name` (the petname), `retifs:node` in `me`, which the user's devices share like any library (and which will hold saved queries and other personal settings).
   - `retifs me` shows this node and its words; `retifs me link [--name LABEL] [--qr]` gives a `retifs:node/<node>?name=<label>` link; `retifs open` on one adds the contact (the label as its name, or `--as NAME`) and shows its words to compare with the other side's `retifs me`.
   - `retifs contact add NAME NODE|LINK`, `contact list` (with words), `contact rm NAME`. Adding a known node again renames it; a name already used for another node is refused.
   - A contact's name works where a node goes (`--from Mom`).
   - Live (two nodes, 11 checks).
-- **Saved queries (2026-10-23)** live in `me` too: `type=retifs.query`, `name`, `query` (terms as `retifs query` takes them, comma-separated) and `scope`, the namespaces it looks in by their creators' keys (stable, the same on every device whatever each calls them; empty: all). `retifs query NS[,NS]|'*' TERM... --save NAME`, `retifs saved` (list), `saved run NAME [--watch]` (live: runs again when one of its namespaces changes), `saved rm NAME`. They're what the desktop utility's Find saves; being `retifs.*` records without a path, they aren't files in the mounts. Live (two devices, 9 checks): a query saved on one ran on the other through `me`, finding its namespace under another local name and saying which wasn't there.
+- **Saved queries (2026-10-23)** live in `me` too: `type=retifs.query`, `name`, `query` (terms as `retifs query` takes them, comma-separated) and `scope`, the libraries it looks in by their creators' keys (stable, the same on every device whatever each calls them; empty: all). `retifs query NS[,NS]|'*' TERM... --save NAME`, `retifs saved` (list), `saved run NAME [--watch]` (live: runs again when one of its libraries changes), `saved rm NAME`. They're what the desktop utility's Find saves; being `retifs.*` records without a path, they aren't files in the mounts. Live (two devices, 9 checks): a query saved on one ran on the other through `me`, finding its library under another local name and saying which wasn't there.
 - Not yet: display names published by nodes (`/retifs/profile`), writer keys in contacts, sending links over LXMF.
 
 ## Impact on the threat model
-- **Anyone who sees an invitation can read the namespace** (it carries the read key, as an address does). Only the write grant is single-use. Show QR codes in person, and treat a leaked one like a leaked address: revoke and rotate.
+- **Anyone who sees an invitation can read the library** (it carries the read key, as an address does). Only the write grant is single-use. Show QR codes in person, and treat a leaked one like a leaked address: revoke and rotate.
 - **Display names are claims:** a node can call itself anything. Petnames and fingerprint words are what to rely on.
 - **A pending invitation** is a standing offer until it expires or is spent. Short expiry by default (e.g. a day).
 
@@ -91,8 +91,8 @@ invitation = { "ns": namespace address, "node": creator's node, "secret": 32 ran
 
 ## Open
 - ~~The word list for fingerprints~~: BIP-39 English over SHA-256 of the key (decision 13, `verify_words.py`).
-- One-record sharing: `cap` links, share namespaces, or both.
-- Whether a profile is per node or per person (a person has several nodes; a profile record in their namespace could list them).
+- One-record sharing: `cap` links, share libraries, or both.
+- Whether a profile is per node or per person (a person has several nodes; a profile record in their library could list them).
 
 ## Decided (2026-11-11, owner)
 - **Profiles are a person's, not a node's:** one profile record in the person's `me` (display name, the nodes that are theirs), which their nodes give to their contacts. Every device of a person then shows as one person. Not `/retifs/profile` per node, and not a name in node announces. Apps still show a name with a short fingerprint and never decide anything by it.

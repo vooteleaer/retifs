@@ -1,9 +1,9 @@
-//! Multi-writer namespaces (ADR-0017): which namespace a name is, which
+//! Multi-writer libraries (ADR-0017): which library a name is, which
 //! channel this node writes it with, and the other writers' latest heads.
 //!
 //! ```text
 //! NS_INFO          name → creator (32) ‖ read key (32)
-//! MEMBER_CHANNELS  channel name → ns_id (16)        own channels writing to another's namespace
+//! MEMBER_CHANNELS  channel name → ns_id (16)        own channels writing to another's library
 //! WRITER_HEADS     ns_id (16) ‖ writer (32) → latest head (258) ‖ commit cid (33) ‖ commit seed (32)
 //! NS_PEERS         name → peer (16) × n                 other members' nodes to sync with
 //! NS_IDENTITY      name → X25519 secret (32) ‖ Ed25519 seed (32)   this node's writer identity
@@ -23,16 +23,16 @@ const NS_PEERS: TableDefinition<&str, &[u8]> = TableDefinition::new("ns_peers");
 const NS_IDENTITY: TableDefinition<&str, &[u8]> = TableDefinition::new("ns_identity");
 const NS_KEYS: TableDefinition<&str, &[u8]> = TableDefinition::new("ns_keys");
 const KEY_HEADS: TableDefinition<&[u8], &[u8]> = TableDefinition::new("key_heads");
-/// Namespace name → its latest local checkpoint file (root ‖ seed ‖ u64 size).
+/// Library name → its latest local checkpoint file (root ‖ seed ‖ u64 size).
 const NS_CHECKPOINT: TableDefinition<&str, &[u8]> = TableDefinition::new("ns_checkpoint");
-/// Namespace name → root CID of the checkpoint this node last committed to its chain.
+/// Library name → root CID of the checkpoint this node last committed to its chain.
 const NS_CHECKPOINT_PUBLISHED: TableDefinition<&str, &[u8]> = TableDefinition::new("ns_checkpoint_published");
-/// Namespace name → how this node keeps its content: 0 everything, 1 by keep tags and rules (ADR-0005).
+/// Library name → how this node keeps its content: 0 everything, 1 by keep tags and rules (ADR-0005).
 const NS_KEEP_MODE: TableDefinition<&str, u8> = TableDefinition::new("ns_keep_mode");
-/// (namespace ‖ 0 ‖ root CID) → file: content this node pulled because it's kept,
+/// (library ‖ 0 ‖ root CID) → file: content this node pulled because it's kept,
 /// and may release when it no longer is.
 const NS_KEPT: TableDefinition<&[u8], &[u8]> = TableDefinition::new("ns_kept");
-/// Namespace name → 1 if this node holds only the part of its state it
+/// Library name → 1 if this node holds only the part of its state it
 /// fetched on demand (a lazy member, ADR-0018).
 const NS_LAZY: TableDefinition<&str, u8> = TableDefinition::new("ns_lazy");
 
@@ -52,7 +52,7 @@ pub(crate) fn open_tables(w: &redb::WriteTransaction) -> Result<(), StoreError> 
     Ok(())
 }
 
-/// A namespace's creator key and read key.
+/// A library's creator key and read key.
 pub type NsInfo = ([u8; 32], [u8; 32]);
 
 /// A writer's latest known head and the commit it points to.
@@ -64,7 +64,7 @@ pub struct WriterHead {
 }
 
 impl SlabStore {
-    /// Which namespace `name` is: its creator and read key.
+    /// Which library `name` is: its creator and read key.
     pub fn set_ns_info(&self, name: &str, creator: &[u8; 32], read_key: &[u8; 32]) -> Result<(), StoreError> {
         let w = self.write()?;
         w.open_table(NS_INFO)?.insert(name, [creator.as_slice(), read_key].concat().as_slice())?;
@@ -72,7 +72,7 @@ impl SlabStore {
         Ok(())
     }
 
-    /// (creator, read key) of namespace `name`.
+    /// (creator, read key) of library `name`.
     pub fn ns_info(&self, name: &str) -> Result<Option<NsInfo>, StoreError> {
         let r = self.db.begin_read()?;
         Ok(r.open_table(NS_INFO)?.get(name)?.map(|v| {
@@ -81,7 +81,7 @@ impl SlabStore {
         }))
     }
 
-    /// This node's writer identity in namespace `name` (X25519 secret ‖ Ed25519 seed).
+    /// This node's writer identity in library `name` (X25519 secret ‖ Ed25519 seed).
     pub fn set_ns_identity(&self, name: &str, identity: &[u8; 64]) -> Result<(), StoreError> {
         let w = self.write()?;
         w.open_table(NS_IDENTITY)?.insert(name, identity.as_slice())?;
@@ -89,7 +89,7 @@ impl SlabStore {
         Ok(())
     }
 
-    /// The namespace's latest checkpoint file kept here (ADR-0018).
+    /// The library's latest checkpoint file kept here (ADR-0018).
     pub fn ns_checkpoint(&self, name: &str) -> Result<Option<retifs_core::FileRef>, StoreError> {
         let r = self.db.begin_read()?;
         Ok(r.open_table(NS_CHECKPOINT)?.get(name)?.and_then(|v| {
@@ -102,7 +102,7 @@ impl SlabStore {
         }))
     }
 
-    /// Leaves namespace `name` here: its records and index, keys, writer
+    /// Leaves library `name` here: its records and index, keys, writer
     /// identity, peers, checkpoints, keep settings and member channel. The
     /// files its records name are the caller's to forget first. Others'
     /// copies and other members aren't touched.
@@ -228,8 +228,8 @@ impl SlabStore {
         Ok(r.open_table(NS_IDENTITY)?.get(name)?.and_then(|v| v.value().try_into().ok()))
     }
 
-    /// Read keys of namespace `name` known here, oldest first (ADR-0017 key
-    /// rotation); the namespace's first key comes from its address.
+    /// Read keys of library `name` known here, oldest first (ADR-0017 key
+    /// rotation); the library's first key comes from its address.
     pub fn ns_keys(&self, name: &str) -> Result<Vec<[u8; 32]>, StoreError> {
         let r = self.db.begin_read()?;
         let mut keys: Vec<[u8; 32]> = self.ns_info(name)?.map(|(_, k)| vec![k]).unwrap_or_default();
@@ -268,7 +268,7 @@ impl SlabStore {
         Ok(r.open_table(KEY_HEADS)?.get(key.as_slice())?.map(|v| v.value().to_vec()))
     }
 
-    /// Names of the namespaces this node writes or has joined.
+    /// Names of the libraries this node writes or has joined.
     pub fn ns_names(&self) -> Result<Vec<String>, StoreError> {
         use redb::ReadableTable;
         let r = self.db.begin_read()?;
@@ -276,7 +276,7 @@ impl SlabStore {
         t.iter()?.map(|e| e.map(|(k, _)| k.value().to_string()).map_err(StoreError::from)).collect()
     }
 
-    /// Nodes to sync namespace `name` with (other members).
+    /// Nodes to sync library `name` with (other members).
     pub fn add_ns_peers(&self, name: &str, peers: &[PeerId]) -> Result<(), StoreError> {
         let mut all = self.ns_peers(name)?;
         for p in peers {
@@ -298,7 +298,7 @@ impl SlabStore {
             .unwrap_or_default())
     }
 
-    /// Own channel `channel` writes to namespace `ns_id` (not its own).
+    /// Own channel `channel` writes to library `ns_id` (not its own).
     pub fn set_member_channel(&self, channel: &str, ns_id: &NsId) -> Result<(), StoreError> {
         let w = self.write()?;
         w.open_table(MEMBER_CHANNELS)?.insert(channel, ns_id.as_slice())?;
@@ -320,7 +320,7 @@ impl SlabStore {
         Ok(())
     }
 
-    /// Other writers' latest heads for a namespace.
+    /// Other writers' latest heads for a library.
     pub fn writer_heads(&self, ns_id: &NsId) -> Result<Vec<WriterHead>, StoreError> {
         let r = self.db.begin_read()?;
         let t = r.open_table(WRITER_HEADS)?;
@@ -343,7 +343,7 @@ impl SlabStore {
         Ok(out)
     }
 
-    /// The latest head of one writer of a namespace, if known.
+    /// The latest head of one writer of a library, if known.
     pub fn writer_head(&self, ns_id: &NsId, writer: &[u8; 32]) -> Result<Option<WriterHead>, StoreError> {
         Ok(self.writer_heads(ns_id)?.into_iter().find(|h| h.writer == *writer))
     }

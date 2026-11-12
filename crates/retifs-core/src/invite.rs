@@ -1,4 +1,4 @@
-//! Invitations (ADR-0020): membership of a namespace in one step: to read
+//! Invitations (ADR-0020): membership of a library in one step: to read
 //! (`rights` empty: a member the creator knows, who gets the read key when it
 //! rotates), to write, or to write and invite.
 //!

@@ -142,7 +142,7 @@ receipt  = 0x01 ‖ lease_id ‖ SHA-256(lease body) ‖ holds_until ‖ holder 
 proof    = HMAC-SHA256(nonce, "retifs/v1/prove" ‖ ciphertext)[0..16]
 ```
 - **Chunk list, never a manifest.** Each entry carries the chunk's access token (one-way from its seed), so the holder verifies requesters' proofs and proves access itself when pulling, without being able to decrypt. Blind wants are (CID, token).
-- **Per-lease signing key:** `Ed25519 seed = HKDF(namespace key, "retifs/v1/lease-key", lease_id)`. Leases are unlinkable to the owner and to each other; only the owner can renew.
+- **Per-lease signing key:** `Ed25519 seed = HKDF(library key, "retifs/v1/lease-key", lease_id)`. Leases are unlinkable to the owner and to each other; only the owner can renew.
 - **Renewal moves only the expiry** and fits one packet, so keeping data alive over LoRa costs one packet per lease.
 - **Receipts** are signed with the holder's RNS identity and bound to the exact lease body. The owner checks that the key hashes to the `retifs.node` destination it leased to. At startup `retifsd` checks that the Prns identity layout matches RNS (X25519 ‖ Ed25519).
 - **Holder:** `retifsd --hold-for-others SIZE` accepts leases up to SIZE (estimated at 16 KiB per chunk; default 0, refuse; since [ADR-0014](0014-placement-follows-need.md) the default is the store limit, and `0` opts out). Leased chunks are in the hard SERVING tier and the serving index, so the holder serves them exactly as the owner would. The lease puller pulls missing chunks from the lease's sources with the same per-chunk proofs (`retifs_net::seek::pull_round`). When the last lease keeping a chunk expires, its flag and token go, and a chunk with no other tier is removed.

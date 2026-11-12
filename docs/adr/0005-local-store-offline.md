@@ -18,8 +18,8 @@ Supports 4 (local-first), 1 (data at rest stays encrypted) and 7 (the local stor
 ## Decision
 Option 3.
 
-- **Metadata is always local.** The database for the user's namespaces (indexes, attributes, commits) is synced in full. Queries, `watch` and history always work offline, and the daemon always knows whether a block is present.
-  - Superseded in part by [ADR-0018](0018-state-trees.md) (lazy members hold only part of a namespace's state) and [ADR-0031](0031-storage-less-nodes.md) (storage-less nodes keep only a keyring on disk).
+- **Metadata is always local.** The database for the user's libraries (indexes, attributes, commits) is synced in full. Queries, `watch` and history always work offline, and the daemon always knows whether a block is present.
+  - Superseded in part by [ADR-0018](0018-state-trees.md) (lazy members hold only part of a library's state) and [ADR-0031](0031-storage-less-nodes.md) (storage-less nodes keep only a keyring on disk).
 - **Content tiers** in one store:
 
   | Tier | What | Evicted? |
@@ -39,17 +39,17 @@ Option 3.
 - **Writes never miss.** They land in the pinned tier immediately and show "only here" until pinning nodes confirm with signed receipts.
 
 ## Impact on the threat model
-Ciphertext at rest means a stolen device without its key reveals only chunk counts and sizes. `keep:<device>` tags reveal device names and usage patterns to anyone who can read the namespace's attributes. That's acceptable, since they're encrypted like all attributes. See the [threat model](../04-threat-model.md).
+Ciphertext at rest means a stolen device without its key reveals only chunk counts and sizes. `keep:<device>` tags reveal device names and usage patterns to anyone who can read the library's attributes. That's acceptable, since they're encrypted like all attributes. See the [threat model](../04-threat-model.md).
 
 ## Consequences
 - Easier: offline behaviour is predictable and user-controlled. Queries never block on the network. One store format for own data and served data.
-- Harder: full metadata sync costs space on small devices (a later option: partial namespaces). Every read pays one decryption pass. Pinned sets can exceed disk space, so the daemon must report this rather than silently dropping pins.
+- Harder: full metadata sync costs space on small devices (a later option: partial libraries). Every read pays one decryption pass. Pinned sets can exceed disk space, so the daemon must report this rather than silently dropping pins.
 
 ## Implementation status (2026-10-20)
 - **Device name:** `retifsd --device NAME`, by default the host name in lower case.
 - **Keep tags:** a record is kept on this device if its `keep` or `keep:<device>` attribute is `true`.
 - **Keep rules:** records with `type = "keep-rule"`, a `query` of comma-separated terms (the syntax `retifs query` takes, e.g. `album=Prangli 2026, type=photo`), and an optional `device`. Without `device` the rule applies to every device. A rule that doesn't parse is ignored.
-- **Keep mode per namespace on each node:** `retifs ns keep NS all|rules`.
+- **Keep mode per library on each node:** `retifs ns keep NS all|rules`.
   - `all` is the default and today's behaviour: a member pulls all content. A lazy join (`ns join … --lazy`, [ADR-0018](0018-state-trees.md)) starts in `rules`.
   - `rules` pulls only tagged and matching records, for devices that can't hold everything.
   - `ns info` shows the mode, the device name and how many files were pulled because they're kept.
@@ -67,5 +67,5 @@ Ciphertext at rest means a stolen device without its key reveals only chunk coun
 - **Not yet:**
   - Relative dates in rules (`modified > -30d`).
   - Reporting pinned sets that don't fit the disk budget.
-  - Content pulled before this change (by the old "fetch everything" sync) isn't tracked as kept, so switching such a namespace to `rules` doesn't release it.
+  - Content pulled before this change (by the old "fetch everything" sync) isn't tracked as kept, so switching such a library to `rules` doesn't release it.
 

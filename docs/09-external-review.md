@@ -16,12 +16,12 @@ Every derivation and signature carries its own label. HKDF uses the label as sal
 | `retifs/v1/chunk` | HKDF salt: chunk keys and IV from the chunk seed | `chunk.rs` |
 | `retifs/v1/public` | SHA-256 of it: the public convergence secret | `secret.rs` |
 | `retifs/v1/restricted` | HKDF salt: a publisher line's convergence secret | `secret.rs` |
-| `retifs/v1/record` | HKDF salt: one record's convergence secret from the namespace key | `secret.rs` |
+| `retifs/v1/record` | HKDF salt: one record's convergence secret from the library key | `secret.rs` |
 | `retifs/v1/pad` | HMAC message prefix: padding chunks' bytes | `manifest.rs` |
 | `retifs/v1/serve` | HKDF salt: a chunk's access token from its seed | `access.rs` |
 | `retifs/v1/get`, `retifs/v1/have` | HMAC message prefixes: per-chunk proofs bound to a link | `access.rs` |
 | `retifs/v1/lease`, `/renew`, `/receipt` | Signature labels | `lease.rs` |
-| `retifs/v1/lease-key` | HKDF salt: a per-lease signing key from the namespace key | `lease.rs` |
+| `retifs/v1/lease-key` | HKDF salt: a per-lease signing key from the library key | `lease.rs` |
 | `retifs/v1/prove` | HMAC message prefix: storage proof answers | `lease.rs` |
 | `retifs/v1/stamp` | Stamp material prefix (LXMF's construction) | `stamp.rs` |
 | `retifs/v1/ns` | SHA-256 prefix: a channel's `ns_id` from its writer key | `channel.rs` |
@@ -47,7 +47,7 @@ chunk = iv ‖ AES-256-CBC(enc, iv, PKCS7(frame)) ‖ HMAC-SHA256(sign, iv ‖ c
 cid   = 0x01 ‖ SHA-256(chunk)
 classes: 512 B, 1, 2, 4, 8, 16, 32, 64, 128, 256 KiB
 ```
-Convergence secrets: public (`SHA-256("retifs/v1/public")`, network-wide dedup), restricted (per publisher line), per record (`HKDF(namespace key, "retifs/v1/record", record ID)`), or random.
+Convergence secrets: public (`SHA-256("retifs/v1/public")`, network-wide dedup), restricted (per publisher line), per record (`HKDF(library key, "retifs/v1/record", record ID)`), or random.
 
 **Questions for the reviewer:**
 - The IV is derived, not random: deterministic encryption is the point (convergence). Is the SIV-style argument sound: the seed is a PRF of the whole frame, so equal IVs mean equal plaintexts?
@@ -65,14 +65,14 @@ Chunk boundaries (FastCDC) and the fanout of 64 are writer policy, not format: t
 `chunk_token = HKDF(seed, "retifs/v1/serve")`; proofs `HMAC(chunk_token, "retifs/v1/get" ‖ link nonce ‖ cid)[0..16]`. **Question:** is a 16-byte truncation enough for a proof bound to one link?
 
 ### Leases, renewals, receipts, storage proofs (decision 6; ADR-0010/0011), vectors `lease-v1.json`
-Leases are signed by a per-lease Ed25519 key `HKDF(namespace key, "retifs/v1/lease-key", lease ID)`, so leases are unlinkable to the owner and to each other. Receipts are signed by the holder's RNS identity and bound to the lease body's hash. Storage proofs: `HMAC(nonce, "retifs/v1/prove" ‖ ciphertext)[0..16]`. Stamps on lease offers are LXMF's construction over `"retifs/v1/stamp" ‖ SHA-256(lease body)` (checked with LXMF's own functions).
+Leases are signed by a per-lease Ed25519 key `HKDF(library key, "retifs/v1/lease-key", lease ID)`, so leases are unlinkable to the owner and to each other. Receipts are signed by the holder's RNS identity and bound to the lease body's hash. Storage proofs: `HMAC(nonce, "retifs/v1/prove" ‖ ciphertext)[0..16]`. Stamps on lease offers are LXMF's construction over `"retifs/v1/stamp" ‖ SHA-256(lease body)` (checked with LXMF's own functions).
 
-**Question:** the namespace key is both the root of per-record convergence secrets (salt `retifs/v1/record`) and of lease keys (salt `retifs/v1/lease-key`): is domain separation by HKDF salt alone enough here?
+**Question:** the library key is both the root of per-record convergence secrets (salt `retifs/v1/record`) and of lease keys (salt `retifs/v1/lease-key`): is domain separation by HKDF salt alone enough here?
 
 ### Signed channels (decisions 5, 8; [ADR-0015](adr/0015-signed-channels.md)), vectors `channel-v1.json`
 Commits are sealed chunks signed by the writer (`"retifs/v1/commit" ‖ body`); a head (258 B) is signed too and carries the commit's seed under a Token keyed by `HKDF(read key, "retifs/v1/head-seed", L = 64)`. Anyone can verify a head and keep the highest `seq` per writer (rollback protection) without the read key.
 
-**Question:** the head Token uses RNS's Token with a random IV; the same key seals every head of the namespace. Any concern with that key's lifetime (it changes only with the read key)?
+**Question:** the head Token uses RNS's Token with a random IV; the same key seals every head of the library. Any concern with that key's lifetime (it changes only with the read key)?
 
 ### Records, canonical msgpack (decision 2; [ADR-0016](adr/0016-records-and-snapshots.md)), vectors `record-v1.json`
 A strict canonical msgpack profile: smallest integers, 64-bit floats, no NaN, sorted string keys, bin for bytes, decoding rejects anything that doesn't re-encode identically. Checked against RNS's own umsgpack. **Question:** any ambiguity left (e.g. float edge cases, `-0.0`)?

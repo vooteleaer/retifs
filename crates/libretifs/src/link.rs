@@ -6,7 +6,7 @@
 //! ```
 //!
 //! Kinds: `node`, `ns`, `invite`, `ch`, `cap`. For `ns`, `<what>` is the
-//! namespace address without its `retifs-ch:` prefix (`1:<writer>:<read key>`).
+//! library address without its `retifs-ch:` prefix (`1:<writer>:<read key>`).
 //! Parameters: `q` (a query, in the CLI's terms: what to open on), `view`
 //! (which kind of app), `name` (a label), `from` (a node to fetch from, may
 //! repeat). Values are percent-encoded. Unknown kinds and parameters are
@@ -23,7 +23,7 @@ pub struct Link {
 }
 
 impl Link {
-    /// A read link to a namespace: its address (as `ns address` prints it),
+    /// A read link to a library: its address (as `ns address` prints it),
     /// the nodes to fetch from, and a label.
     pub fn namespace(address: &str, from: &[String], name: Option<&str>) -> Link {
         let mut params: Vec<(String, String)> = Vec::new();
@@ -42,7 +42,7 @@ impl Link {
         self.params.iter().filter(move |(k, _)| k == key).map(|(_, v)| v.as_str())
     }
 
-    /// For an `ns` link: the namespace address, as `ns join` takes it.
+    /// For an `ns` link: the library address, as `ns join` takes it.
     pub fn ns_address(&self) -> Option<String> {
         (self.kind == "ns").then(|| format!("{CHANNEL_PREFIX}{}", self.what))
     }
@@ -76,7 +76,7 @@ impl std::fmt::Display for Link {
     }
 }
 
-/// A local namespace name from a label (a link's `name`, a folder's name):
+/// A local library name from a label (a link's `name`, a folder's name):
 /// lowercase letters, digits and dashes.
 pub fn suggest_name(label: &str) -> String {
     let mut out = String::new();

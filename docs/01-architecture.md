@@ -4,7 +4,7 @@
 
 1. **Encrypted chunks**: content (from IPFS).
 2. **Prolly-tree database**: attributes, indexes, queries (from BeFS).
-3. **Signed chain of roots**: history, namespaces, permissions (from RNS identity).
+3. **Signed chain of roots**: history, libraries, permissions (from RNS identity).
 
 Files, folders, albums, packages, versions and branches are all combinations of these.
 
@@ -41,17 +41,17 @@ Files, folders, albums, packages, versions and branches are all combinations of 
 - **A folder is a query.** An album is `album = "Prangli 2026"`.
 - **POSIX view:** `path` is an attribute. Rename = attribute change, and a folder = prefix query. `path` isn't unique, so a conflict is presented as `plan (2).txt`.
 
-## 3. History, namespaces, permissions
+## 3. History, libraries, permissions
 
 - **Database root CID = snapshot.** A version is a root.
 - **Commit:** `{parents[], db_root, author, time, message, signature}`, encrypted. A branch is a reference to the latest commit. Two heads = conflict, and a merge commit resolves it.
 - Changing several records under one root is an atomic commit.
 - History queries are ordinary queries against an older root.
 - Sub-namespaces are versioned independently (photo collection ≠ system configuration).
-- **Every modification is a version** (one API call, one transaction, or one file save). Every version is kept by default. A namespace can opt into thinning, which drops only old content, never commits. See [ADR-0006](adr/0006-versioning-and-sharing.md).
-- **Multi-writer:** each writer has its own append-only chain. The namespace state is the merge of all heads, and every reader validates signatures and capabilities on merge.
-- **Sharing:** a share is a namespace, either a group namespace (all members write) or a filtered read-only projection with its own key.
-- **Namespace** = destination (`retifs.ns.<name>` + identity), addressed like an RNS destination hash. Updates carry a per-writer sequence number (rollback protection) and propagate via announce.
+- **Every modification is a version** (one API call, one transaction, or one file save). Every version is kept by default. A library can opt into thinning, which drops only old content, never commits. See [ADR-0006](adr/0006-versioning-and-sharing.md).
+- **Multi-writer:** each writer has its own append-only chain. The library state is the merge of all heads, and every reader validates signatures and capabilities on merge.
+- **Sharing:** a share is a library, either a group library (all members write) or a filtered read-only projection with its own key.
+- **Library** (a namespace in the code and formats: `ns`) = destination (`retifs.ns.<name>` + identity), addressed like an RNS destination hash. Updates carry a per-writer sequence number (rollback protection) and propagate via announce.
 - **Capabilities** (UCAN-like): `{issuer, audience, resource, action, expiry, proof}`, content-addressed. Delegation chain where each link may only narrow. Read permission = key, and write permission = signature.
 - **Revocation:** short expiry times plus signed revocation records. Revoking read access = key rotation.
 
@@ -82,8 +82,8 @@ Files, folders, albums, packages, versions and branches are all combinations of 
 - **Redundancy by default** ([ADR-0011](adr/0011-redundancy-by-default.md), proposed): every piece of own data has a replication target, met by own-node pools, recruited peers and volunteer storage nodes, with repair and storage proofs.
 - **Disk budget** ([ADR-0012](adr/0012-disk-budget.md), accepted as prototype): a store size limit and a free-space reserve; evict cache first, refuse new leases next, never silently drop pinned data or active leases.
 - **Placement follows need** ([ADR-0014](adr/0014-placement-follows-need.md), accepted as prototype): every node is a storage node by default; whoever needs data leases it to the nearest storage nodes (hops and link cost), renewing keeps it alive, and unneeded copies expire.
-- **Multi-writer namespaces** ([ADR-0017](adr/0017-multi-writer-namespaces.md), proposed): each writer commits operations to its own chain; every member merges all chains per field in stamp order; grants decide whose operations count; members sync each other without a server.
-- **NomadNet bridge:** `retifsd --nomadnet NS` serves a record namespace as a NomadNet node; any follower of a site's channel can serve it, so sites outlive their author's uptime ([ADR-0016](adr/0016-records-and-snapshots.md)).
+- **Multi-writer libraries** ([ADR-0017](adr/0017-multi-writer-namespaces.md), proposed): each writer commits operations to its own chain; every member merges all chains per field in stamp order; grants decide whose operations count; members sync each other without a server.
+- **NomadNet bridge:** `retifsd --nomadnet NS` serves a record library as a NomadNet node; any follower of a site's channel can serve it, so sites outlive their author's uptime ([ADR-0016](adr/0016-records-and-snapshots.md)).
 - **Signed channels** ([ADR-0015](adr/0015-signed-channels.md), proposed): a writer's signed chain of commits and a signed head; followers verify, update automatically and mirror. The basis for sites and app updates.
 - **Slow links** ([ADR-0013](adr/0013-slow-links.md), proposed): LoRa carries the control plane; bulk only on explicit request within an airtime budget; prioritised sending; inline tiny files and compression before encryption (format, pending).
 - **Deletion = key destruction.**
@@ -94,7 +94,7 @@ Files, folders, albums, packages, versions and branches are all combinations of 
 - A package is a manifest/CID. It's mounted (packagefs/FUSE), not extracted.
 - Activation = a signed CID list, so update and rollback are atomic.
 - `.PackageInfo` provides/requires → attributes. A repo is the query `type=package AND publisher=<id>`.
-- Two levels: system namespace and user namespace.
+- Two levels: system library and user library.
 - Reproducible builds: several identities sign the same CID.
 - Prototype: the real hpkg format plus a FUSE driver that reads from retifs.
 
@@ -106,10 +106,10 @@ Files, folders, albums, packages, versions and branches are all combinations of 
   - the `retifs` CLI;
   - `retifs-mount`, the FUSE file tree: attributes as xattrs, `.query/` directories, reads on demand, writes through write sessions;
   - `retifs-cloudfiles`, the same tree in Windows Explorer as a Cloud Files sync root: placeholders hydrated on demand, changes in the folder written back, "Always keep on this device" as keep tags;
-  - `retifs-gateway`: namespaces as local read-only websites, one origin each;
-  - `retifs-haikufs` (started): a namespace as a Haiku volume, attributes and live queries in Tracker;
+  - `retifs-gateway`: libraries as local read-only websites, one origin each;
+  - `retifs-haikufs` (started): a library as a Haiku volume, attributes and live queries in Tracker;
   - `retifs-extractd`: attributes from what's in files, an app with a key limit ([ADR-0023](adr/0023-attribute-extraction.md)).
-- **The local API's building blocks:** records and queries, transactions (several changes as one commit), `watch` (wait for a namespace to change), write sessions (content written in place without holding it whole), and on-demand range reads.
+- **The local API's building blocks:** records and queries, transactions (several changes as one commit), `watch` (wait for a library to change), write sessions (content written in place without holding it whole), and on-demand range reads.
 - ~~Thin client~~ (removed from the plan, 2026-11-11): a minimal local bootstrap, with applications and data on the network. **The local disk is a cache**, and a pinned set enables offline use.
 - **Identity travels with you:** a YubiKey (device key, authorised by the root) plus a root identity kept offline. Login issues a short-lived session capability.
 - ~~USB stick layout: EFI (UKI) · bootstrap EROFS + dm-verity · F2FS cache with LUKS (bound to the YubiKey) · writable layer on tmpfs.~~

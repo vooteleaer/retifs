@@ -21,7 +21,7 @@
 //! - Each entry carries the chunk's access token (`ChunkToken`, one-way from
 //!   its seed): the holder can verify requesters' proofs and prove access
 //!   itself when pulling, without ever being able to decrypt.
-//! - The signer is a **per-lease key** derived from the owner's namespace key
+//! - The signer is a **per-lease key** derived from the owner's library key
 //!   and the lease ID ([`LeaseKey::derive`]): leases are unlinkable to the
 //!   owner's identity and to each other, and only the owner can renew.
 //! - A renewal only moves the expiry, so keeping data alive over LoRa costs
@@ -76,7 +76,7 @@ impl std::error::Error for LeaseError {}
 pub struct LeaseKey(SigningKey);
 
 impl LeaseKey {
-    /// `Ed25519 seed = HKDF-SHA256(ikm = namespace key, salt = "retifs/v1/lease-key", info = lease_id, L = 32)`.
+    /// `Ed25519 seed = HKDF-SHA256(ikm = library key, salt = "retifs/v1/lease-key", info = lease_id, L = 32)`.
     /// The owner can always re-derive it to renew; nobody else can link it to
     /// the owner or to other leases.
     pub fn derive(namespace_key: &[u8; 32], id: &LeaseId) -> Self {

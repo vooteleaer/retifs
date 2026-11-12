@@ -1,4 +1,4 @@
-//! `retifs-mount NS MOUNTPOINT [--store DIR]`: a namespace as a directory
+//! `retifs-mount NS MOUNTPOINT [--store DIR]`: a library as a directory
 //! tree (ADR-0002), through `retifsd`'s local API. Linux (FUSE) only.
 
 #[cfg(target_os = "linux")]
@@ -10,7 +10,7 @@ mod fs;
 fn usage() -> ! {
     eprintln!("retifs-mount [--store DIR] [--wait SECONDS] [--via NODE] NS MOUNTPOINT");
     eprintln!("  --wait: how long a read waits for content that isn't here yet (default 30)");
-    eprintln!("  --via: the namespace is on another of your nodes (ADR-0019), not this one");
+    eprintln!("  --via: the library is on another of your nodes (ADR-0019), not this one");
     std::process::exit(2)
 }
 
@@ -36,7 +36,7 @@ fn main() {
 #[cfg(target_os = "linux")]
 fn run(store: &std::path::Path, ns: &str, mountpoint: &std::path::Path, wait: std::time::Duration, via: Option<String>) {
     let on = via.as_deref().map(|v| format!(" on node {v}")).unwrap_or_default();
-    eprintln!("retifs-mount: namespace {ns}{on} at {} (unmount with fusermount3 -u or umount)", mountpoint.display());
+    eprintln!("retifs-mount: library {ns}{on} at {} (unmount with fusermount3 -u or umount)", mountpoint.display());
     if let Err(e) = fs::mount(store, ns, mountpoint, wait, via) {
         eprintln!("retifs-mount: {e}");
         std::process::exit(1);

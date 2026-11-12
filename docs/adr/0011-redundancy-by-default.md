@@ -15,7 +15,7 @@ Supports 8 (redundant by default), 7 (holders are blind), 4 (local-first: writes
 ## Decision
 
 ### Replication target as policy
-- Every piece of own data has a target, set per namespace, keep rule or tag. Example: "all my storage nodes, at least 2 copies, one in another failure domain".
+- Every piece of own data has a target, set per library, keep rule or tag. Example: "all my storage nodes, at least 2 copies, one in another failure domain".
 - **Default greater than 1.** If the target can't be met (e.g. one node only), writes still succeed locally and `status` says **under-replicated** clearly.
 - `status` shows the real state: only here, N/M replicas, or complete.
 
@@ -88,7 +88,7 @@ A receipt is a promise. Before handing out a lease, the owner precomputes a few 
 - **Decided:** full replicas now; erasure coding later as a separate layer below chunks (share maps: a chunk group = n shares, any k rebuild it, each chunk still checked against its CID), with its own ADR. Chunks and manifests don't change for it, so nothing has to be reserved in ADR-0008/0009. Replicas suit slow links: one holder is enough to read, where shares need k ([options](../08-open-format-decisions.md)).
 
 ### Who holds copies (confirmed 2026-10-23)
-Any retifs node may hold the encrypted chunks; the nearest and fastest are preferred (ADR-0014). What a file holds, its name, path and other attributes, are readable only by the club's members (the namespace's read key): a holder sees ciphertext and chunk CIDs, not which namespace, record or file they belong to. A storage node that missed its last 5 `retifs.node` announces gets no new leases, and one silent for a day (and ten of its intervals) is forgotten; its next announce brings it back. A node states its interval in its announce's app data, canonical msgpack `{"announce_s": N, "v": 1}` (`retifsd --announce-every`, default 10 minutes; older nodes' `retifs/v0` counts as 10 minutes) (gone test nodes had piled up as candidates, each costing a 20 s link attempt). Its existing leases are left to upkeep, whose storage proofs judge it as before.
+Any retifs node may hold the encrypted chunks; the nearest and fastest are preferred (ADR-0014). What a file holds, its name, path and other attributes, are readable only by the club's members (the library's read key): a holder sees ciphertext and chunk CIDs, not which library, record or file they belong to. A storage node that missed its last 5 `retifs.node` announces gets no new leases, and one silent for a day (and ten of its intervals) is forgotten; its next announce brings it back. A node states its interval in its announce's app data, canonical msgpack `{"announce_s": N, "v": 1}` (`retifsd --announce-every`, default 10 minutes; older nodes' `retifs/v0` counts as 10 minutes) (gone test nodes had piled up as candidates, each costing a 20 s link attempt). Its existing leases are left to upkeep, whose storage proofs judge it as before.
 
 ## Impact on the threat model
 See the [threat model](../04-threat-model.md).

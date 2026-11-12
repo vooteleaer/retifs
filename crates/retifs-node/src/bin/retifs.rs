@@ -36,11 +36,11 @@
 //!     retifs [--store DIR] me | me link [--name LABEL] [--qr] | contact add NAME NODE|LINK | contact list | contact rm NAME
 //!     retifs [--store DIR] invite create NS [--read | --grant] [--keys K1,K2] [--until DATE] [--expires 1d] [--q TERMS] [--name LABEL] [--qr] | invite list NS | invite cancel NS ID
 //!
-//! Several writers per namespace (ADR-0017): a member joins with the address
+//! Several writers per library (ADR-0017): a member joins with the address
 //! and shows its writer key; the creator grants it; members sync each other.
-//! Every change to a namespace is a version (ADR-0006): a signed commit in the
-//! namespace's own chain. `rec history` shows a record's versions; `--at`
-//! queries the namespace as it was.
+//! Every change to a library is a version (ADR-0006): a signed commit in the
+//! library's own chain. `rec history` shows a record's versions; `--at`
+//! queries the library as it was.
 //!
 //! Channels (ADR-0015): a writer publishes versions; followers keep the latest.
 //! Records (ADR-0016): attributes and content blocks, queried BeFS style:
@@ -364,7 +364,7 @@ Covered ({}): {}", covered.len(), if covered.is_empty() { "none".into() } else {
                 let ns = it.next().unwrap_or_else(|| usage());
                 let req = libretifs::Request::ChannelPublishNs { name: name.clone(), ns: ns.clone() };
                 match client.call(req).await.unwrap_or_else(|e| fail(e)) {
-                    libretifs::Response::Published { seq, cap } => println!("published namespace {ns} as {name} version {seq}: {cap}"),
+                    libretifs::Response::Published { seq, cap } => println!("published library {ns} as {name} version {seq}: {cap}"),
                     libretifs::Response::Error { message } => fail(message),
                     _ => fail("unexpected response"),
                 }
@@ -563,7 +563,7 @@ Covered ({}): {}", covered.len(), if covered.is_empty() { "none".into() } else {
                 "checkpoint" => libretifs::Request::NsCheckpoint { ns },
                 "keep" => libretifs::Request::NsKeep { ns, mode: rest.first().cloned().unwrap_or_else(|| usage()) },
                 "copies" => {
-                    // The namespace's own setting, a record every member's node follows.
+                    // The library's own setting, a record every member's node follows.
                     let find = libretifs::Request::Query { ns: ns.clone(), terms: vec![format!("type={}", libretifs::PLACEMENT_TYPE)], at: None };
                     let current = client.records(find).await.unwrap_or_else(|e| fail(e)).into_iter().next();
                     let copies = |r: &libretifs::RecordView| r.attrs.iter().find_map(|(k, v)| match (k.as_str(), v) {
@@ -655,7 +655,7 @@ Covered ({}): {}", covered.len(), if covered.is_empty() { "none".into() } else {
                     let what = rest.first().cloned().unwrap_or_else(|| usage());
                     let (address, mut from) = match libretifs::link::Link::parse(&what) {
                         Ok(link) => (
-                            link.ns_address().unwrap_or_else(|| fail(format!("a retifs:{} link isn't a namespace", link.kind))),
+                            link.ns_address().unwrap_or_else(|| fail(format!("a retifs:{} link isn't a library", link.kind))),
                             link.params_named("from").map(String::from).collect::<Vec<_>>(),
                         ),
                         Err(_) => (what, Vec::new()),
@@ -681,7 +681,7 @@ Covered ({}): {}", covered.len(), if covered.is_empty() { "none".into() } else {
             match client.call(req).await.unwrap_or_else(|e| fail(e)) {
                 libretifs::Response::Channel { address } => println!("{address}"),
                 libretifs::Response::Namespace(v) => {
-                    println!("namespace {}: {} record(s), {} peer node(s)", v.name, v.records, v.peers);
+                    println!("library {}: {} record(s), {} peer node(s)", v.name, v.records, v.peers);
                     println!("  address    {}", v.address);
                     println!("  my writer  {}", v.own_writer);
                     for (w, rights) in &v.writers {
@@ -864,7 +864,7 @@ Covered ({}): {}", covered.len(), if covered.is_empty() { "none".into() } else {
             }
         }
         "contact" => {
-            // Petnames (ADR-0020): records in this user's own namespace `me`,
+            // Petnames (ADR-0020): records in this user's own library `me`,
             // so every device of the user has the same address book.
             let sub = it.next().unwrap_or_else(|| usage());
             let rest: Vec<String> = it.collect();
@@ -949,8 +949,8 @@ Covered ({}): {}", covered.len(), if covered.is_empty() { "none".into() } else {
             }
         }
         "open" => {
-            // Opens a retifs: link (ADR-0020). A namespace link joins the
-            // namespace (reading) under the link's name or --as NAME.
+            // Opens a retifs: link (ADR-0020). A library link joins the
+            // library (reading) under the link's name or --as NAME.
             let text = it.next().unwrap_or_else(|| usage());
             let rest: Vec<String> = it.collect();
             let link = libretifs::link::Link::parse(&text).unwrap_or_else(|e| fail(e));
@@ -992,7 +992,7 @@ Covered ({}): {}", covered.len(), if covered.is_empty() { "none".into() } else {
                 return;
             }
             let Some(address) = link.ns_address() else {
-                println!("a retifs:{} link ({}); this version of retifs opens namespace links", link.kind, link.what);
+                println!("a retifs:{} link ({}); this version of retifs opens library links", link.kind, link.what);
                 for (k, v) in &link.params {
                     println!("  {k} = {v}");
                 }
@@ -1093,9 +1093,9 @@ Covered ({}): {}", covered.len(), if covered.is_empty() { "none".into() } else {
                 save_query(&mut client, &name, &ns, &terms).await;
                 return;
             }
-            // Several namespaces (NS1,NS2): each contributor writes its own,
+            // Several libraries (NS1,NS2): each contributor writes its own,
             // and a query combines them (instead of record filters in grants).
-            // `*`: every namespace here but `me`.
+            // `*`: every library here but `me`.
             let names = if ns == "*" { all_namespaces(&mut client).await } else { ns.split(',').map(str::trim).filter(|n| !n.is_empty()).map(String::from).collect() };
             run_query(&mut client, &names, &terms, at).await;
         }
@@ -1110,7 +1110,7 @@ Covered ({}): {}", covered.len(), if covered.is_empty() { "none".into() } else {
                     let by_writer = libretifs::saved::by_creator(&mut client).await.unwrap_or_else(|e| fail(e));
                     for q in &saved {
                         let scope = if q.scope.is_empty() {
-                            "every namespace".to_string()
+                            "every library".to_string()
                         } else {
                             q.scope.iter().map(|w| by_writer.get(w).cloned().unwrap_or_else(|| format!("({}… not here)", &w[..8.min(w.len())]))).collect::<Vec<_>>().join(", ")
                         };
@@ -1122,13 +1122,13 @@ Covered ({}): {}", covered.len(), if covered.is_empty() { "none".into() } else {
                     let q = find(rest.first().unwrap_or_else(|| usage()));
                     let (names, missing) = libretifs::saved::resolve(&mut client, q).await.unwrap_or_else(|e| fail(e));
                     for w in &missing {
-                        eprintln!("(a namespace of this query isn't on this device: {}…)", &w[..8.min(w.len())]);
+                        eprintln!("(a library of this query isn't on this device: {}…)", &w[..8.min(w.len())]);
                     }
                     let terms = q.terms();
                     run_query(&mut client, &names, &terms, None).await;
                     if rest.iter().any(|a| a == "--watch") {
                         // Live: run again whenever its answer in one of its
-                        // namespaces changes (LiveQuery: not on every write).
+                        // libraries changes (LiveQuery: not on every write).
                         let mut since: HashMap<String, String> = HashMap::new();
                         loop {
                             let mut changed = false;
@@ -1169,7 +1169,7 @@ Covered ({}): {}", covered.len(), if covered.is_empty() { "none".into() } else {
             print_status(&s);
         }
         "read" => {
-            // Part of a file, fetched on demand from a namespace's peers if it isn't here.
+            // Part of a file, fetched on demand from a library's peers if it isn't here.
             let cap = it.next().unwrap_or_else(|| usage());
             let rest: Vec<String> = it.collect();
             let opt = |name: &str| rest.windows(2).find(|w| w[0] == name).map(|w| w[1].clone());
@@ -1296,12 +1296,12 @@ async fn write_file(client: &mut libretifs::Client, ns: &str, id: &str, path: &s
     }
 }
 
-/// Every namespace on this device but `me`.
+/// Every library on this device but `me`.
 async fn all_namespaces(client: &mut libretifs::Client) -> Vec<String> {
     libretifs::saved::namespaces(client).await.unwrap_or_else(|e| fail(e))
 }
 
-/// Saves (or replaces) query `name`: `terms` over namespaces `ns`
+/// Saves (or replaces) query `name`: `terms` over libraries `ns`
 /// (comma-separated, or `*` for all).
 async fn save_query(client: &mut libretifs::Client, name: &str, ns: &str, terms: &[String]) {
     let scope: Vec<String> = if ns == "*" { Vec::new() } else { ns.split(',').map(str::trim).filter(|n| !n.is_empty()).map(String::from).collect() };
@@ -1326,7 +1326,7 @@ async fn run_query(client: &mut libretifs::Client, names: &[String], terms: &[St
     println!("{total} record(s)");
 }
 
-/// The user's own namespace: contacts, saved queries, settings (ADR-0020).
+/// The user's own library: contacts, saved queries, settings (ADR-0020).
 const ME: &str = "me";
 
 /// A node address as fingerprint words, to read aloud when it matters.
@@ -1480,7 +1480,7 @@ fn print_channels(own: &[libretifs::ChannelInfo], follows: &[libretifs::FollowIn
                 "follows {short}… version {}{}{}: {cap}",
                 f.seq,
                 if f.complete { " (complete)" } else { " (fetching)" },
-                f.namespace.as_ref().map(|n| format!(", namespace {n}")).unwrap_or_default()
+                f.namespace.as_ref().map(|n| format!(", library {n}")).unwrap_or_default()
             ),
             None => println!("follows {short}… (no version yet)"),
         }

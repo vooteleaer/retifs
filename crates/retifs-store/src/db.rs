@@ -1,4 +1,4 @@
-//! The local record database (phase 2, ADR-0016): records per namespace and an
+//! The local record database (phase 2, ADR-0016): records per library and an
 //! order-preserving index of their attribute values, for BeFS-style queries.
 //!
 //! ```text
@@ -8,7 +8,7 @@
 //! ```
 //! Sort keys order values within a type: ints and floats numerically, strings
 //! and bytes bytewise. A list value is indexed once per element (`tags`).
-//! Namespace names and attribute keys may not contain NUL.
+//! Library names and attribute keys may not contain NUL.
 
 use std::collections::{BTreeMap, BTreeSet};
 
@@ -176,7 +176,7 @@ impl SlabStore {
         Ok(())
     }
 
-    /// Removes namespace `ns` and every record and index entry of it (leaving
+    /// Removes library `ns` and every record and index entry of it (leaving
     /// it, `leave_namespace`).
     pub(crate) fn remove_records_of(&self, ns: &str) -> Result<(), StoreError> {
         let start = ns_prefix(ns);
@@ -199,7 +199,7 @@ impl SlabStore {
         Ok(())
     }
 
-    /// The namespaces here: those with records, and those joined that have
+    /// The libraries here: those with records, and those joined that have
     /// none yet (a lazy join before anything is fetched).
     pub fn namespaces(&self) -> Result<Vec<String>, StoreError> {
         let r = self.db.begin_read()?;
@@ -302,7 +302,7 @@ impl SlabStore {
         Ok(found)
     }
 
-    /// All records of a namespace, by ID.
+    /// All records of a library, by ID.
     pub fn records(&self, ns: &str) -> Result<Vec<Record>, StoreError> {
         let r = self.db.begin_read()?;
         let t = r.open_table(RECORDS)?;
@@ -313,7 +313,7 @@ impl SlabStore {
             .collect()
     }
 
-    /// How many records a namespace has, none of them decoded.
+    /// How many records a library has, none of them decoded.
     pub fn record_count(&self, ns: &str) -> Result<usize, StoreError> {
         let r = self.db.begin_read()?;
         let t = r.open_table(RECORDS)?;
@@ -401,9 +401,9 @@ impl SlabStore {
         Ok(out)
     }
 
-    /// Replaces a namespace's records with a snapshot's (a followed channel's new version).
+    /// Replaces a library's records with a snapshot's (a followed channel's new version).
     pub fn replace_namespace(&self, ns: &str, records: &[Record]) -> Result<(), StoreError> {
-        // One transaction for the whole namespace (a rebuild of 100,000
+        // One transaction for the whole library (a rebuild of 100,000
         // records wrote and synced each one on its own).
         let keep: BTreeMap<RecordId, &Record> = records.iter().map(|r| (r.id, r)).collect();
         let mut changes: Vec<(RecordId, Option<Record>)> =

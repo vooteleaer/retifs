@@ -212,7 +212,7 @@ impl SlabStore {
         Ok(())
     }
 
-    /// The latest head this node knows for a namespace (its own, or followed).
+    /// The latest head this node knows for a library (its own, or followed).
     pub fn head_for(&self, id: &NsId) -> Result<Option<Vec<u8>>, StoreError> {
         if let Some(f) = self.followed(id)?
             && !f.head.is_empty()

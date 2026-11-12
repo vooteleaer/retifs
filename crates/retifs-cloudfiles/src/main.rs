@@ -1,6 +1,6 @@
 //! `retifs-cloudfiles --all [FOLDER]`: every library as a folder of one Cloud
 //! Files sync root in Explorer (ADR-0002), `%USERPROFILE%\retifs` unless
-//! told; `retifs-cloudfiles NS FOLDER`: one namespace as a sync root of its
+//! told; `retifs-cloudfiles NS FOLDER`: one library as a sync root of its
 //! own. Through `retifsd`'s local API. Windows only.
 
 #[cfg_attr(not(windows), allow(dead_code))]
@@ -18,7 +18,7 @@ fn usage() -> ! {
     eprintln!("retifs-cloudfiles [--store DIR] --share PATH");
     eprintln!("retifs-cloudfiles [--store DIR] --share-in NS ROOT PATH   (what Explorer's Share with retifs runs)");
     eprintln!("  --wait: how long opening a file waits for content that isn't here yet (default 30)");
-    eprintln!("  --via: the namespace is on another of your nodes (ADR-0019), not this one");
+    eprintln!("  --via: the library is on another of your nodes (ADR-0019), not this one");
     std::process::exit(2)
 }
 

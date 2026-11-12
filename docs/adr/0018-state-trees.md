@@ -1,11 +1,11 @@
-# ADR-0018: Namespace state as a Prolly tree, and checkpoints
+# ADR-0018: Library state as a Prolly tree, and checkpoints
 
 - **Status:** proposed
 - **Date:** 2026-10-19
 - **Irreversible:** yes. Stamped records, tree nodes and checkpoint files are stored as chunks, and checkpoints will be named in signed chains (decision 2: canonical serialization; decision 8: commit content). Vectors in `crates/retifs-core/test-vectors/prolly-v1.json`, verified with RNS's umsgpack and RNS primitives.
 
 ## Context
-[ADR-0017](0017-multi-writer-namespaces.md) merges namespaces by replaying every writer's operations. The merge is now a CRDT state (per-field stamps), so a node only applies new commits. But a node that restarts, or a member that joins, still has to fetch and replay every chain from the beginning. That costs time and, over slow links, transfer: the history of a busy namespace grows without bound while its current state doesn't.
+[ADR-0017](0017-multi-writer-namespaces.md) merges libraries by replaying every writer's operations. The merge is now a CRDT state (per-field stamps), so a node only applies new commits. But a node that restarts, or a member that joins, still has to fetch and replay every chain from the beginning. That costs time and, over slow links, transfer: the history of a busy library grows without bound while its current state doesn't.
 
 What's needed is the state itself as content-addressed data:
 - a member can fetch it instead of the history;
@@ -46,10 +46,10 @@ internal = { "children": [ [ first id (bin 16), cid (bin 33), seed (bin 32) ], �
 - **Boundaries:** a node at level L ends after the entry (or child) with key k if `u32_be(SHA-256("retifs/v1/prolly" ‖ L ‖ k)[0..4]) < 2^32 / 32`, giving 32 entries per node on average.
   - A node also ends once its entries reach 64 KiB, counting each entry as its value's length plus 16 and each child as 81. This keeps a node within one chunk however large the values are.
 - **Levels:** leaves are split into nodes, then the list of (first key, node) is split again with the next level's boundary, until one node remains. That node is the root. An empty map has no root.
-- **Sealing:** every node is one chunk, sealed with ADR-0008 under one convergence secret per tree. For a namespace that secret is `ConvergenceSecret::for_record(read key, "retifs/v1/state")`, i.e. `HKDF(salt "retifs/v1/record", ikm read key, info "retifs/v1/state")`.
+- **Sealing:** every node is one chunk, sealed with ADR-0008 under one convergence secret per tree. For a library that secret is `ConvergenceSecret::for_record(read key, "retifs/v1/state")`, i.e. `HKDF(salt "retifs/v1/record", ikm read key, info "retifs/v1/state")`.
   - Unchanged nodes keep their CIDs across versions and are stored once.
   - Every member holding the read key builds the same tree from the same state, so two members can compare states by root CID.
-  - A different namespace or a rotated key gives different CIDs, so holders can't correlate.
+  - A different library or a rotated key gives different CIDs, so holders can't correlate.
 - **Reading:** lookup descends by first key. A diff collects both trees' leaves and reads only the leaves the other tree doesn't share.
 
 ### Checkpoints
@@ -68,7 +68,7 @@ checkpoint = { "control":  [ [ stamp, op ], … ],              every control op
   - If it is below `high`, the state is rebuilt from the whole chains: the history before the checkpoint is read again. The history is kept and placed (ADR-0017), so this is a slow path, not data loss.
   - Control operations are few, so the checkpoint carries all of them, and the rights timeline is re-evaluated whole.
 - **Misdated commits** (dated before their predecessor, or more than a day ahead when the checkpoint was made) are settled as ignored once a frontier passes them.
-- **Local checkpoints:** a node writes one after every 64 new commits it applies, plus on the first rebuild of an existing namespace. The previous checkpoint's chunks that the new one doesn't share become evictable.
+- **Local checkpoints:** a node writes one after every 64 new commits it applies, plus on the first rebuild of an existing library. The previous checkpoint's chunks that the new one doesn't share become evictable.
 
 ### Checkpoints for new members
 - **In the chain:** a writer holding `grant` names its latest checkpoint with the operation `[ "checkpoint", [cid, seed, size] ]` (ADR-0017 operations file). The operation changes no state; the merge skips it. The checkpoint file is then needed and placed like the history, and its state tree goes with it: a checkpoint file's chunks are its manifest's plus every tree node.
@@ -85,21 +85,21 @@ checkpoint = { "control":  [ [ stamp, op ], … ],              every control op
   - A peer that relays a chain without holding its checkpoint file is skipped, and the next peer is tried.
 - **Verifying:** `retifs ns verify NS` fetches the whole history and replays each chain up to the checkpoint's frontier. It checks that every frontier commit is the one the chain has there. It then compares the replayed control operations, highest stamp and every stamped record with the checkpoint, exactly (`Checkpoint::check`).
   - The same check runs whenever a node fetches the history for a rebuild.
-  - A checkpoint that doesn't match is dropped, and the namespace is rebuilt from the history; the node then writes checkpoints of its own.
+  - A checkpoint that doesn't match is dropped, and the library is rebuilt from the history; the node then writes checkpoints of its own.
 - **History on demand:** if a control operation arrives that is older than data already applied, the node needs the history before its checkpoint. Until sync has fetched every chain whole, it stays at its previous state; it then rebuilds.
 - **Not covered until verified:** a grant holder whose grant was revoked in a chain this node hasn't fetched could hand a joiner a false checkpoint. The joiner uses it until it verifies, by `ns verify` or when a rebuild fetches the history. Verifying by default costs exactly the transfer that checkpoints save, so it stays a choice: worth it on good links, not over LoRa.
 
 ## Impact on the threat model
 See the [threat model](../04-threat-model.md).
-- Holders see sealed chunks of size classes, as before. The number of nodes and how they change between versions reveal roughly how many records a namespace has and how many change: about one leaf and its path per change. Snapshot files revealed the size too.
-- Equal keys give equal shapes only under one secret. Across namespaces, CIDs differ.
+- Holders see sealed chunks of size classes, as before. The number of nodes and how they change between versions reveal roughly how many records a library has and how many change: about one leaf and its path per change. Snapshot files revealed the size too.
+- Equal keys give equal shapes only under one secret. Across libraries, CIDs differ.
 
 ## Consequences
 - **Easier:**
-  - A namespace version is a single (CID, seed).
+  - A library version is a single (CID, seed).
   - A member fetches the state instead of the history.
   - Versions share nodes, and comparing them is cheap.
-  - It is the base for signed checkpoints (next) and for fetching only part of a namespace later.
+  - It is the base for signed checkpoints (next) and for fetching only part of a library later.
 - **Harder:**
   - Tombstones are stored forever, as in every state CRDT. Pruning needs agreement that no older write can still arrive (a checkpoint every writer has passed).
   - The format is fixed by the vectors.
@@ -135,11 +135,11 @@ See the [threat model](../04-threat-model.md).
   - Writers that haven't written since their grant keep tombstones: they could still send older operations. So does a revoked writer whose chain stops before its revoke (its offline writes from while it held rights still count, see the removal race in the open questions).
   - The rule depends only on the state and the frontier, so `Checkpoint::save` and `Checkpoint::check` (`ns verify`) apply it the same way, and every member builds the same tree for the same frontier. A later operation stamped above the delete revives a pruned record as before.
   - In the vectors one of three records is pruned; `verify_prolly_rns.py` applies the rule on its own and reaches the same state root (19/19).
-- **Lazy members (2026-10-20):** `retifs ns join NAME ADDRESS --from NODE --lazy` holds only the part of a namespace it needs. Merging is per record, so one record's state is its checkpoint entry merged with the operations on it since. A lazy member therefore keeps the checkpoint file (control timeline, frontier), the chains since the checkpoint and only the state-tree leaves it fetched:
+- **Lazy members (2026-10-20):** `retifs ns join NAME ADDRESS --from NODE --lazy` holds only the part of a library it needs. Merging is per record, so one record's state is its checkpoint entry merged with the operations on it since. A lazy member therefore keeps the checkpoint file (control timeline, frontier), the chains since the checkpoint and only the state-tree leaves it fetched:
   - on sync, the paths to every record changed since the checkpoint, so those merge exactly;
   - on demand, the path to a record asked for (`rec get`) or matched through a search node (ADR-0019).
   - Its view and queries cover the records held. It makes no checkpoints, builds no blind index and has nothing whole to `ns verify`. A rebuild after a late control operation still fetches the whole history, which gives the whole state.
-  - Live, two daemons, 300 records, checkpoint, then two changed, one deleted and one added: the lazy member fetched 2–5 state nodes and held 138–164 records. The changed records matched the creator's, the deleted one was gone, and the new one was there. A record it didn't hold was fetched on `rec get` (one more leaf of 45–83 records). With so few records the tree is a few large leaves. A namespace of thousands holds the same few leaves.
+  - Live, two daemons, 300 records, checkpoint, then two changed, one deleted and one added: the lazy member fetched 2–5 state nodes and held 138–164 records. The changed records matched the creator's, the deleted one was gone, and the new one was there. A record it didn't hold was fetched on `rec get` (one more leaf of 45–83 records). With so few records the tree is a few large leaves. A library of thousands holds the same few leaves.
 - **In memory too:** when a node makes a checkpoint, its live state drops the same tombstones (`ns notes: pruned 2 tombstone(s)`), so it doesn't wait for a restart.
 - **What a lazy member keeps:** the paths to records changed since its checkpoint are pinned (their merge needs them, also where a path was first fetched to read). Records fetched only to be read go to the cache tier: evicted under disk pressure like any cache, fetched again when asked for, and never served to others (holder privacy rule 2). Live: an on-demand `rec get` added 2 KiB to the cache and nothing to the pinned tier.
 - **A lazy member moves on to newer checkpoints (2026-11-05):**

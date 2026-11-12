@@ -43,7 +43,7 @@ pub mod types {
     }
 }
 
-/// A namespace's own placement setting (ADR-0014): a record of this type
+/// A library's own placement setting (ADR-0014): a record of this type
 /// with `copies = N` (copies of each of its files, the writer's own
 /// included). Every member's node follows it, so the club decides.
 pub const PLACEMENT_TYPE: &str = "retifs.placement";
@@ -91,7 +91,7 @@ pub enum Request {
         #[serde(default)]
         keys: Vec<String>,
     },
-    /// Builds and publishes the namespace's blind index now, if it declares
+    /// Builds and publishes the library's blind index now, if it declares
     /// searchable keys; answers with the search capability (ADR-0019).
     NsSearch { ns: String },
     /// Queries a search node's blind index of `ns` (exact `key=value` terms
@@ -159,7 +159,7 @@ pub enum Request {
     /// What of `cap` is held locally.
     Status { cap: String },
     /// Bytes `offset..offset + len` of `cap` (clamped to the file). Chunks the
-    /// range needs that aren't here are fetched from the peers of namespace
+    /// range needs that aren't here are fetched from the peers of library
     /// `ns` and the file's known holders, for at most `wait_ms`; then it fails
     /// rather than hang (offline semantics, ADR-0002).
     ReadRange {
@@ -199,16 +199,16 @@ pub enum Request {
         #[serde(default)]
         compress: bool,
     },
-    /// Publishes a snapshot of namespace `ns` as the channel's next version
-    /// (ADR-0016): followers rebuild the namespace and fetch its content.
+    /// Publishes a snapshot of library `ns` as the channel's next version
+    /// (ADR-0016): followers rebuild the library and fetch its content.
     ChannelPublishNs { name: String, ns: String },
     /// Follows a channel: keeps its latest version here, asking these nodes for updates.
     Follow { address: String, from: Vec<String> },
     /// Channels written and followed here.
     Channels,
-    /// The namespaces with records here (own, joined and followed).
+    /// The libraries with records here (own, joined and followed).
     Namespaces,
-    /// Creates a record in namespace `ns` (ADR-0016); `data` becomes its content block.
+    /// Creates a record in library `ns` (ADR-0016); `data` becomes its content block.
     RecordCreate {
         ns: String,
         attrs: Vec<(String, AttrValue)>,
@@ -227,7 +227,7 @@ pub enum Request {
     },
     RecordGet { ns: String, id: String },
     RecordDelete { ns: String, id: String },
-    /// Waits until namespace `ns` changes (a local write, or other members'
+    /// Waits until library `ns` changes (a local write, or other members'
     /// writes merged in), for at most `timeout_ms`. `since` is the change
     /// count from the previous answer (0 at first: answers at once). The
     /// answer is the current count; equal to `since` means nothing changed.
@@ -261,7 +261,7 @@ pub enum Request {
     /// them or none. Returns the created and changed records, in step order.
     Transaction { ns: String, steps: Vec<TxStep> },
     /// Records matching every term (`key=value`, `key>n`, `key^=prefix`, `has:key`, …),
-    /// now or as of version `at` of the namespace.
+    /// now or as of version `at` of the library.
     Query {
         ns: String,
         terms: Vec<String>,
@@ -270,7 +270,7 @@ pub enum Request {
     },
     /// Every version of a record, newest first (ADR-0006: every modification is a version).
     RecordHistory { ns: String, id: String },
-    /// The namespace's address: lets others read it, and join it if granted (ADR-0017).
+    /// The library's address: lets others read it, and join it if granted (ADR-0017).
     NsAddress { ns: String },
     /// Announces public library `ns` on the network, or stops (ADR-0029):
     /// `name` and `about` as others will see them (the name defaults to `ns`).
@@ -299,7 +299,7 @@ pub enum Request {
     /// it from one who held `grant`, hides the library, lets its content go
     /// and leaves it after a while. Only a member holding `grant`.
     NsDelete { ns: String },
-    /// Joins another's namespace under local name `ns`, with a new writer key
+    /// Joins another's library under local name `ns`, with a new writer key
     /// (returned; the creator grants it). `from`: other members' nodes.
     /// `lazy`: hold only the records needed (those changed since the
     /// checkpoint, those asked for), fetched on demand (ADR-0018).
@@ -326,21 +326,21 @@ pub enum Request {
     },
     NsRevoke { ns: String, writer: String },
     NsInfo { ns: String },
-    /// What this node keeps of the namespace's content (ADR-0005): `all`, or
+    /// What this node keeps of the library's content (ADR-0005): `all`, or
     /// `rules` (records tagged `keep`/`keep:<device>` or matched by a keep rule).
     NsKeep { ns: String, mode: String },
-    /// Writes a checkpoint of the namespace now and, if this node holds
+    /// Writes a checkpoint of the library now and, if this node holds
     /// `grant`, names it in its chain for new members (ADR-0018).
     NsCheckpoint { ns: String },
-    /// Fetches the namespace's whole history and checks the checkpoint this
+    /// Fetches the library's whole history and checks the checkpoint this
     /// node started from against it (ADR-0018).
     NsVerify { ns: String },
-    /// Makes a new namespace `name` a share of `source` (ADR-0021): the
+    /// Makes a new library `name` a share of `source` (ADR-0021): the
     /// records matching `terms` (or the records `ids`), without the
     /// attributes `omit` names (`exif:gps*` for a prefix), kept up to date by
     /// the owner's nodes that hold both. The definition is a
     /// `type = retifs.share` record in `source`; members of the share don't
-    /// see it. Answers with the share namespace.
+    /// see it. Answers with the share library.
     ShareCreate {
         source: String,
         name: String,
@@ -381,7 +381,7 @@ pub enum Request {
     InviteList { ns: String },
     /// Withdraws a pending invitation.
     InviteCancel { ns: String, id: String },
-    /// Accepts an invitation link: joins its namespace as `ns` (reading at
+    /// Accepts an invitation link: joins its library as `ns` (reading at
     /// once) and redeems it with the creator's node, now or, if that node
     /// isn't reachable, on later syncs until it expires.
     InviteAccept { ns: String, link: String },
@@ -512,7 +512,7 @@ pub enum TxStep {
     },
 }
 
-/// A multi-writer namespace as this node sees it.
+/// A multi-writer library as this node sees it.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub struct NsView {
     pub name: String,
@@ -585,7 +585,7 @@ pub struct InviteInfo {
     pub spent: bool,
 }
 
-/// One version of a namespace as seen by one record.
+/// One version of a library as seen by one record.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub struct HistoryEntry {
     pub version: u64,
@@ -659,7 +659,7 @@ pub enum Response {
         data: Vec<u8>,
     },
     Changed {
-        /// The namespace's change count on this node.
+        /// The library's change count on this node.
         count: u64,
     },
     Session {
@@ -743,7 +743,7 @@ pub struct FollowInfo {
     pub current: Option<String>,
     /// That version is completely local.
     pub complete: bool,
-    /// The local namespace a snapshot version is rebuilt into.
+    /// The local library a snapshot version is rebuilt into.
     #[serde(default)]
     pub namespace: Option<String>,
 }

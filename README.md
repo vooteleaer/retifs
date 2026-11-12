@@ -99,7 +99,7 @@ flowchart BT
 
 1. **Encrypted chunks.** Content-defined chunking, and each chunk is encrypted on its own. The CID is computed over the ciphertext, so storage nodes can verify integrity without ever seeing the content.
 2. **Prolly-tree database.** Signed key-value attributes on records, held in content-addressed indexes. A folder is a query, and sync transfers only the branches that differ.
-3. **Signed chain of roots.** Every writer signs its own chain of commits; members merge them as a CRDT. A library (namespace) is identified by its creator's key; read = key, write = a grant from a member who holds `grant`.
+3. **Signed chain of roots.** Every writer signs its own chain of commits; members merge them as a CRDT. A library (library) is identified by its creator's key; read = key, write = a grant from a member who holds `grant`.
 
 ### Principles
 

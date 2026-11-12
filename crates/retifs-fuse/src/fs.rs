@@ -24,7 +24,7 @@ use crate::tree::{self, Node, Tree, QUERY_DIR};
 /// tree is re-read from the daemon (other members' writes show up after this).
 const TTL: Duration = Duration::from_secs(1);
 const XATTR_PREFIX: &str = "user.retifs.";
-/// Without a change notice, the namespace is re-read at least this often.
+/// Without a change notice, the library is re-read at least this often.
 const RESYNC: Duration = Duration::from_secs(30);
 /// `user.retifs.local`: computed, whether a file's content is on this device.
 const LOCAL_XATTR: &str = "local";
@@ -64,11 +64,11 @@ pub struct RetifsFs {
     started: SystemTime,
     /// How long a read may wait for content that isn't here yet.
     wait: Duration,
-    /// Set by the watcher thread when the namespace changed.
+    /// Set by the watcher thread when the library changed.
     changed: Arc<AtomicBool>,
 }
 
-/// `via`: the namespace is on another of the user's nodes; every request
+/// `via`: the library is on another of the user's nodes; every request
 /// goes there over a Link (ADR-0019).
 pub fn mount(store: &Path, ns: &str, mountpoint: &Path, wait: Duration, via: Option<String>) -> Result<(), String> {
     let rt = tokio::runtime::Builder::new_current_thread().enable_all().build().map_err(|e| e.to_string())?;
@@ -95,7 +95,7 @@ pub fn mount(store: &Path, ns: &str, mountpoint: &Path, wait: Duration, via: Opt
     fuser::mount2(fs, mountpoint, &opts).map_err(|e| e.to_string())
 }
 
-/// Watches namespace `ns` on a thread of its own (a long poll on the local
+/// Watches library `ns` on a thread of its own (a long poll on the local
 /// API) and raises the flag on every change, so the mount re-reads it only
 /// when something changed: a local write, or another member's merged in.
 fn watch(store: &Path, ns: &str, via: Option<String>) -> Arc<AtomicBool> {
@@ -150,8 +150,8 @@ impl RetifsFs {
         }
     }
 
-    /// Re-reads the namespace if the tree is older than the TTL (or `force`).
-    /// Re-reads the namespace if it changed (the watcher says so), if `force`,
+    /// Re-reads the library if the tree is older than the TTL (or `force`).
+    /// Re-reads the library if it changed (the watcher says so), if `force`,
     /// or at the latest every RESYNC in case the watcher missed something.
     fn refresh(&mut self, force: bool) {
         let changed = self.changed.swap(false, Ordering::AcqRel);

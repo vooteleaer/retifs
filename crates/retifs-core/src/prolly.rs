@@ -1,5 +1,5 @@
 //! Prolly trees (ADR-0018): a sorted map from fixed-length keys (record IDs
-//! for namespace state; token ‖ entry for the blind index, ADR-0019) to
+//! for library state; token ‖ entry for the blind index, ADR-0019) to
 //! canonical bytes, stored as sealed chunks, whose shape depends only on the keys.
 //!
 //! ```text
@@ -9,7 +9,7 @@
 //!     u32_be(SHA-256("retifs/v1/prolly" ‖ L ‖ k)[0..4]) < 2^32 / FANOUT,
 //! or once it holds MAX_NODE bytes of entries
 //! ```
-//! - Equal key sets give equal shapes, so two versions of a namespace share
+//! - Equal key sets give equal shapes, so two versions of a library share
 //!   every subtree that didn't change, and a diff skips those by CID.
 //! - Nodes are sealed like any chunk (ADR-0008) under the caller's
 //!   convergence secret, so holders stay blind.

@@ -69,7 +69,7 @@ pub fn search_secret(read_key: &[u8; 32]) -> ConvergenceSecret {
     ConvergenceSecret::personal(hkdf(read_key, SEARCH_SALT, b""))
 }
 
-/// The index channel of the namespace with this read key: every member
+/// The index channel of the library with this read key: every member
 /// derives the same one; its address is the search capability.
 pub fn channel_key(read_key: &[u8; 32]) -> ChannelKey {
     ChannelKey::from_secrets(hkdf(read_key, WRITER_SALT, b""), *search_secret(read_key).as_bytes())
@@ -154,7 +154,7 @@ fn hkdf(ikm: &[u8], salt: &[u8], info: &[u8]) -> [u8; 32] {
     out
 }
 
-/// A member's keys for one namespace's index (from its read key).
+/// A member's keys for one library's index (from its read key).
 #[derive(Clone)]
 pub struct IndexKeys {
     token_key: [u8; 32],
@@ -221,7 +221,7 @@ pub fn declared(key: &str, patterns: &[String]) -> bool {
     })
 }
 
-/// The declared keys from a namespace's settings records (their `keys` lists, merged).
+/// The declared keys from a library's settings records (their `keys` lists, merged).
 pub fn declared_keys<'a>(records: impl IntoIterator<Item = &'a [(String, Value)]>) -> Vec<String> {
     let mut out: Vec<String> = Vec::new();
     for attrs in records {
@@ -334,7 +334,7 @@ mod tests {
         assert_ne!(k.entry(&a, &id), k.entry(&b, &id));
         // Values are typed: Int 5 and Str "5" differ.
         assert_ne!(k.token("n", &Value::Int(5)), k.token("n", &s("5")));
-        // Another namespace (read key) gives other tokens.
+        // Another library (read key) gives other tokens.
         assert_ne!(IndexKeys::derive(&[8; 32]).token("album", &s("Prangli")), a);
     }
 

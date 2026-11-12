@@ -8,7 +8,7 @@
 //!                          salt = SHA-256(recipient public)[0..16], info = "", L = 64)
 //! Token      = iv (16) ‖ AES-256-CBC(PKCS7) ‖ HMAC-SHA256(key[0..32], iv ‖ ciphertext);  AES key = key[32..64]
 //! ```
-//! Used to hand a namespace's new read key to its remaining members when one
+//! Used to hand a library's new read key to its remaining members when one
 //! is revoked (ADR-0017).
 
 use aes::Aes256;

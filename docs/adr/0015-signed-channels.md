@@ -8,7 +8,7 @@
 Several uses need the same thing: a publisher updates something, and everyone who follows it gets the new version automatically.
 - **Sites** (NomadNet pages, HTML): readers should see the latest version, served from wherever copies are, even when the author is offline.
 - **An app store** in the spirit of Haiku's hpkg: when the author publishes, every machine using the app updates.
-- **Namespaces** in general ([ADR-0006](0006-versioning-and-sharing.md)): every modification is a version in a per-writer chain.
+- **Libraries** in general ([ADR-0006](0006-versioning-and-sharing.md)): every modification is a version in a per-writer chain.
 
 A channel is the single-writer case of ADR-0006's per-writer chains, so its formats must already work for several writers.
 
@@ -35,11 +35,11 @@ head     = 0x01 ‖ ns_id ‖ writer ‖ seq (u64) ‖ time (u64, unix s) ‖ co
            ‖ RNS Token(HKDF(read key, "retifs/v1/head-seed", 64), commit seed)   (96)
            ‖ Ed25519(writer, "retifs/v1/head" ‖ all before)                     258 B in total
 ```
-- **Holders and relays stay blind:** a commit is a chunk like any other. A head shows the namespace, the writer key, the sequence number, a time and a commit CID; the commit's seed is encrypted to readers.
+- **Holders and relays stay blind:** a commit is a chunk like any other. A head shows the library, the writer key, the sequence number, a time and a commit CID; the commit's seed is encrypted to readers.
 - **Rollback protection (decision 5):** anyone can verify a head and keep the highest `seq` per writer, without the read key; a follower never goes back.
 - **Freeze protection:** `time` lets a follower distrust a head that hasn't moved for longer than a channel promises (policy, later).
 - **History:** each commit links the previous one (CID and seed), so a follower can walk back through every version ([ADR-0006](0006-versioning-and-sharing.md): every modification is a version).
-- **Several writers later:** commits and heads already name their writer and carry its own `seq`. A namespace with several writers keeps one chain per writer and merges them (ADR-0006); its `ns_id` then comes from the namespace's creation, and writers are admitted by capabilities (decision 4, open). Here one writer = one channel.
+- **Several writers later:** commits and heads already name their writer and carry its own `seq`. A library with several writers keeps one chain per writer and merges them (ADR-0006); its `ns_id` then comes from the library's creation, and writers are admitted by capabilities (decision 4, open). Here one writer = one channel.
 
 ### Behaviour
 - **Publishing:** the writer stores the new tree (one record per channel, so versions dedup), seals a commit with `seq + 1` linking the last one, and signs a head. Its own data is placed like any other needed file ([ADR-0014](0014-placement-follows-need.md)).
@@ -48,7 +48,7 @@ head     = 0x01 ‖ ns_id ‖ writer ‖ seq (u64) ‖ time (u64, unix s) ‖ co
 
 ## Impact on the threat model
 See the [threat model](../04-threat-model.md).
-- **Head requests reveal interest** in a namespace to the node asked. Asking only hints (by default the publisher and own nodes) limits it, as for seeking.
+- **Head requests reveal interest** in a library to the node asked. Asking only hints (by default the publisher and own nodes) limits it, as for seeking.
 - **A stolen writer key** can publish anything to every follower. Mitigations later: key rotation via a signed successor, thresholds (k of n writers), and follower policy (install automatically, notify only, or pin), as in TUF.
 - **Withholding (freeze):** a node can serve an old but valid head. Followers keep asking other hints; `time` allows a staleness policy.
 
@@ -63,5 +63,5 @@ See the [threat model](../04-threat-model.md).
 - **CLI:** `retifs channel create NAME`, `retifs channel publish NAME FILE`, `retifs follow ADDRESS --from NODE`, `retifs channels`.
 - **Followers serve:** once a version is complete, a follower pins it and serves it (and the commit, and the head) to anyone proving the chunks' seeds, i.e. other readers. Following a channel thus mirrors it. The trade-off: other readers can see that this node follows the channel; that is the same exposure as holding published data.
 - **Live, three daemons:** P created a channel and published a 300 KB version; F1 followed it (hint P) and had it 32 s later. P published version 2 (one byte changed); F1 updated by itself within a minute and forgot version 1 (its chunks shared with version 2 stayed). With P offline, F2 followed with **only F1** as hint and got head, commit and content from F1 (hash matched version 2).
-- **Not yet:** announce-driven updates (polling every 30 s for now), staleness policy from `time`, walking history (`versions`), writer key rotation and thresholds. (Since done: multi-writer namespaces, [ADR-0017](0017-multi-writer-namespaces.md); trees beyond snapshots, [ADR-0018](0018-state-trees.md). A channel's version is still one file, or a namespace snapshot with content blocks, [ADR-0016](0016-records-and-snapshots.md).)
+- **Not yet:** announce-driven updates (polling every 30 s for now), staleness policy from `time`, walking history (`versions`), writer key rotation and thresholds. (Since done: multi-writer libraries, [ADR-0017](0017-multi-writer-namespaces.md); trees beyond snapshots, [ADR-0018](0018-state-trees.md). A channel's version is still one file, or a library snapshot with content blocks, [ADR-0016](0016-records-and-snapshots.md).)
 

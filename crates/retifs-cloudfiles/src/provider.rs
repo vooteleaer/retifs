@@ -1,4 +1,4 @@
-//! The Cloud Files provider (ADR-0002): a namespace as a sync root. Records
+//! The Cloud Files provider (ADR-0002): a library as a sync root. Records
 //! are placeholders; opening one reads its content from the daemon
 //! (`ReadRange`). Files added or changed in the folder are written back as
 //! records and versions, deletes and renames as record deletes and path
@@ -41,7 +41,7 @@ const PIECE: u64 = 4 << 20;
 /// Through another node (`--via`): a request or answer is one RNS Resource,
 /// at most 1 MiB with its envelope, so content moves in half that.
 const PIECE_VIA: u64 = 512 << 10;
-/// Without a change notice, the namespace is re-read at least this often.
+/// Without a change notice, the library is re-read at least this often.
 const RESYNC: Duration = Duration::from_secs(60);
 /// How long a read waits for content that keeps arriving (one wait each
 /// time; it gives up sooner once nothing more comes).
@@ -58,7 +58,7 @@ const GENERIC_READ_WRITE: u32 = 0x8000_0000 | 0x4000_0000;
 /// A blocking client of the local API that reconnects after errors.
 struct Daemon {
     store: PathBuf,
-    /// Another of the user's nodes that holds the namespace (ADR-0019).
+    /// Another of the user's nodes that holds the library (ADR-0019).
     via: Option<String>,
     rt: tokio::runtime::Runtime,
     client: Option<Client>,
@@ -105,9 +105,9 @@ impl Daemon {
     /// yet (a new, empty folder to fill).
     fn device(&mut self, ns: &str) -> Result<String, String> {
         let info = match self.call(Request::NsInfo { ns: ns.to_string() }) {
-            Err(e) if e.starts_with("no namespace") => {
+            Err(e) if e.starts_with("no library") || e.starts_with("no namespace") => {
                 self.call(Request::NsAddress { ns: ns.to_string() })?;
-                eprintln!("retifs-cloudfiles: made a new namespace {ns}");
+                eprintln!("retifs-cloudfiles: made a new library {ns}");
                 self.call(Request::NsInfo { ns: ns.to_string() })?
             }
             r => r?,
@@ -211,7 +211,7 @@ impl Shared {
 /// it. Windows ignores a folder's read-only attribute, and a file's is one
 /// click away; the ACE holds in Explorer and every program. Cloud Files
 /// itself still makes, updates and removes placeholders under it, so the
-/// folder keeps following the namespace. Deleting and renaming are refused
+/// folder keeps following the library. Deleting and renaming are refused
 /// in the callbacks.
 fn set_read_only(root: &Path, read_only: bool) -> Result<(), String> {
     use std::os::windows::process::CommandExt;
@@ -284,7 +284,7 @@ fn place(path: &str, name: &str) -> Vec<(String, AttrValue)> {
     if tree::is_virtual(path) { vec![name] } else { vec![("path".to_string(), AttrValue::Str(path.to_string())), name] }
 }
 
-/// The libraries a sync root holds: one (a namespace's own root), or every
+/// The libraries a sync root holds: one (a library's own root), or every
 /// library of this node's, each a folder of the root (`--all`).
 struct Libraries {
     root: PathBuf,
@@ -684,14 +684,14 @@ fn register(id: &SyncRootId, display_name: &str, folder: &Path) -> Result<(), St
     id.register(info).map_err(|e| format!("registering the sync root: {e}"))
 }
 
-/// Unregisters namespace `ns`'s sync root. Its placeholders stay as they
+/// Unregisters library `ns`'s sync root. Its placeholders stay as they
 /// are (Windows leaves them); hydrated files keep their content.
 pub fn unregister(ns: &str) -> Result<(), String> {
     // Not `is_registered` first: it says no once the folder is gone, though
     // the registration is still there.
     crate::share_menu::unregister(ns);
-    root_id(ns)?.unregister().map_err(|e| format!("no sync root for namespace {ns}? {e}"))?;
-    eprintln!("retifs-cloudfiles: unregistered namespace {ns}");
+    root_id(ns)?.unregister().map_err(|e| format!("no sync root for library {ns}? {e}"))?;
+    eprintln!("retifs-cloudfiles: unregistered library {ns}");
     Ok(())
 }
 
@@ -718,7 +718,7 @@ fn root_folder(folder: &Path) -> Result<PathBuf, String> {
     Ok(PathBuf::from(folder.to_string_lossy().trim_start_matches(r"\\?\")))
 }
 
-/// `NS FOLDER`: one namespace as a sync root of its own.
+/// `NS FOLDER`: one library as a sync root of its own.
 pub fn run(store: &Path, ns: &str, folder: &Path, wait: Duration, via: Option<String>) -> Result<(), String> {
     let folder = root_folder(folder)?;
     let lib = Library::open(store, ns, &folder, via.clone())?;
@@ -727,14 +727,14 @@ pub fn run(store: &Path, ns: &str, folder: &Path, wait: Duration, via: Option<St
     let filter = Filter { libraries, wait, daemon: Mutex::new(Daemon::new(store, via.clone())?) };
     let _connection = Session::new().connect(&folder, filter).map_err(|e| format!("connecting the sync root: {e}"))?;
     let on = via.as_deref().map(|v| format!(" on node {v}")).unwrap_or_default();
-    eprintln!("retifs-cloudfiles: namespace {ns}{on} in {} (device {}; Ctrl+C stops it, --unregister removes it)", folder.display(), lib.shared.device);
+    eprintln!("retifs-cloudfiles: library {ns}{on} in {} (device {}; Ctrl+C stops it, --unregister removes it)", folder.display(), lib.shared.device);
     let (wake_tx, wake) = mpsc::channel();
     serve(lib, store, via, Arc::new(AtomicBool::new(false)), wake_tx, wake);
     Ok(())
 }
 
 /// The account name of the sync root that holds every library (`--all`),
-/// apart from a namespace's own (`@` keeps it from being a library's name).
+/// apart from a library's own (`@` keeps it from being a library's name).
 pub const ALL: &str = "@libraries";
 /// How often the libraries are asked for (the local API has no watch of them).
 const LIBRARIES_EVERY: Duration = Duration::from_secs(5);
@@ -869,7 +869,7 @@ fn remove_library_folder(dir: &Path) {
     }
 }
 
-/// A namespace's folder made to match it, a round at a time (`serve`).
+/// A library's folder made to match it, a round at a time (`serve`).
 struct Library {
     shared: Arc<Shared>,
     sync: Sync,
@@ -955,7 +955,7 @@ impl Library {
     }
 }
 
-/// Runs a library's rounds until `stop`: on every change to the namespace
+/// Runs a library's rounds until `stop`: on every change to the library
 /// or the folder (`wake`), and at least every `RESYNC`.
 fn serve(mut lib: Library, store: &Path, via: Option<String>, stop: Arc<AtomicBool>, wake_tx: mpsc::Sender<()>, wake: mpsc::Receiver<()>) {
     watch(store, &lib.shared.ns, via, wake_tx.clone(), stop.clone());
@@ -974,7 +974,7 @@ fn is_kept(r: &RecordView, device: &str) -> bool {
     r.attrs.iter().any(|(k, v)| *k == own && *v == AttrValue::Bool(true))
 }
 
-/// Watches namespace `ns` on a thread of its own (a long poll on the local
+/// Watches library `ns` on a thread of its own (a long poll on the local
 /// API) and wakes the sync loop on every change.
 fn watch(store: &Path, ns: &str, via: Option<String>, wake: mpsc::Sender<()>, stop: Arc<AtomicBool>) {
     let (store, ns) = (store.to_path_buf(), ns.to_string());

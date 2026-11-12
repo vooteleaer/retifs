@@ -1,14 +1,14 @@
-//! Shares (ADR-0021): a selection of a source namespace's records, copied
-//! into a namespace of its own and kept up to date by the owner's nodes.
+//! Shares (ADR-0021): a selection of a source library's records, copied
+//! into a library of its own and kept up to date by the owner's nodes.
 //!
 //! A copy's record ID is derived from the source record's ID and the share
-//! namespace, so every owner node that keeps the share writes the same
+//! library, so every owner node that keeps the share writes the same
 //! records (equal writes merge to one state), and a member can't tell the
 //! source ID from it:
 //!
 //! ```text
 //! share_id = HKDF-SHA256(ikm = source record ID, salt = "retifs/v1/share-record",
-//!                        info = the share namespace's ns_id)[0..16]
+//!                        info = the share library's ns_id)[0..16]
 //! ```
 //!
 //! Two shares of one source have unrelated IDs for the same record.
@@ -23,23 +23,23 @@ use crate::{channel::NsId, record::RecordId, record::Value};
 const SHARE_RECORD_SALT: &[u8] = b"retifs/v1/share-record";
 const WRITEBACK_SALT: &[u8] = b"retifs/v1/share-writeback";
 
-/// The `type` of a share's definition record, kept in the source namespace.
+/// The `type` of a share's definition record, kept in the source library.
 pub const DEFINITION_TYPE: &str = "retifs.share";
 
-/// The ID of `source`'s copy in the share namespace `share`.
+/// The ID of `source`'s copy in the share library `share`.
 pub fn record_id(source: &RecordId, share: &NsId) -> RecordId {
     let mut out = [0u8; 16];
     Hkdf::<Sha256>::new(Some(SHARE_RECORD_SALT), source).expand(share, &mut out).expect("16 bytes is a valid HKDF output length");
     out
 }
 
-/// The ID in the source namespace of a record a member added to the share
+/// The ID in the source library of a record a member added to the share
 /// `share` (write-back, ADR-0021): derived, so every owner node that keeps
 /// the share writes the addition as the same record (equal writes merge).
 ///
 /// ```text
 /// source_id = HKDF-SHA256(ikm = the member's record ID, salt = "retifs/v1/share-writeback",
-///                         info = the share namespace's ns_id)[0..16]
+///                         info = the share library's ns_id)[0..16]
 /// ```
 pub fn writeback_id(member_record: &RecordId, share: &NsId) -> RecordId {
     let mut out = [0u8; 16];

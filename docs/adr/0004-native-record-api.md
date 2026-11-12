@@ -35,7 +35,7 @@ Option 3.
   | `status(record)` | "only here" vs "N copies on the network" |
 
 - `path` is an optional attribute that only legacy software sets.
-- **Per-app capabilities.** The daemon identifies the connecting process (`SO_PEERCRED`) and gives each application a narrowed capability, e.g. "read/write `type=image` in namespace `photos`". These are the same UCAN-style chains used between people.
+- **Per-app capabilities.** The daemon identifies the connecting process (`SO_PEERCRED`) and gives each application a narrowed capability, e.g. "read/write `type=image` in library `photos`". These are the same UCAN-style chains used between people.
 - **One protocol, two transports.** Local API messages are the same requests as the remote protocol (`/get`, `/query`, live query over a Link). Locally they travel over the Unix socket. Remotely they travel over an RNS Link, so a thin client can use a daemon on another machine through the same library.
 - **Bulk data** is passed as file descriptors (memfd/pipe) over the socket, not copied through messages.
 - **FUSE is a client of this API.** The FUSE frontend from ADR-0002 is built on `libretifs`, not beside it.
@@ -74,12 +74,12 @@ The first slice exists: `crates/libretifs` (client, no Reticulum dependency) and
   - `retifs app list` shows each app's scope and pinned executable.
   - `retifs app remove NAME` revokes the token at once.
 - **Scope:**
-  - Reads (get, query, history, info, watch, range reads naming the namespace) in the app's namespaces.
-  - Writes (record changes, transactions, write sessions, each session tied to its namespace) there, if it may write.
-  - Nothing else: no grants or revokes, keys, loose files, placement, channels or app management. The namespace list shows only the app's own namespaces.
+  - Reads (get, query, history, info, watch, range reads naming the library) in the app's libraries.
+  - Writes (record changes, transactions, write sessions, each session tied to its library) there, if it may write.
+  - Nothing else: no grants or revokes, keys, loose files, placement, channels or app management. The library list shows only the app's own libraries.
 - **Bound to a program (Linux):** the first use pins a token to the connecting process's executable (`SO_PEERCRED` → `/proc/<pid>/exe`). Another program presenting it is refused, so a leaked token isn't enough on its own.
 - **Live:**
-  - Windows: a read-only token read its namespace, and was refused another namespace and writing. A read-write token wrote its namespace, and was refused another, grants, loose files and adding apps. An unknown token and a removed one were refused.
+  - Windows: a read-only token read its library, and was refused another library and writing. A read-write token wrote its library, and was refused another, grants, loose files and adding apps. An unknown token and a removed one were refused.
   - Linux: an identical copy of the CLI at another path was refused with the original's token, while the original still worked.
 - **Not yet:**
   - narrower app scopes (record filters, keys) as capability chains, the same as between people;

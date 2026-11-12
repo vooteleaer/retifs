@@ -49,7 +49,7 @@ fn create(path: &str) -> windows::core::Result<HKEY> {
     Ok(key)
 }
 
-/// Adds the verb for files and folders under `root` (namespace `ns`).
+/// Adds the verb for files and folders under `root` (library `ns`).
 pub fn register(ns: &str, root: &Path, via: Option<&str>) -> Result<(), String> {
     let exe = std::env::current_exe().map_err(|e| e.to_string())?;
     let exe = exe.to_string_lossy().trim_start_matches(r"\\?\").to_string();
@@ -70,7 +70,7 @@ pub fn register(ns: &str, root: &Path, via: Option<&str>) -> Result<(), String> 
     Ok(())
 }
 
-/// Removes the verb for namespace `ns`.
+/// Removes the verb for library `ns`.
 pub fn unregister(ns: &str) {
     for path in verb_keys(ns) {
         let r = unsafe { RegDeleteTreeW(HKEY_CURRENT_USER, &HSTRING::from(path.as_str())) };
@@ -80,7 +80,7 @@ pub fn unregister(ns: &str) {
     }
 }
 
-/// The retifs sync root `path` is in: (namespace, root). (Asked of the
+/// The retifs sync root `path` is in: (library, root). (Asked of the
 /// folder: `GetCurrentSyncRoots` lists only the calling package's roots, and
 /// this program has no package.)
 fn sync_root_of(path: &Path) -> Option<(String, PathBuf)> {
@@ -97,7 +97,7 @@ fn sync_root_of(path: &Path) -> Option<(String, PathBuf)> {
 /// Shares the file or folder at `path`: what "Share with retifs…" runs.
 /// Shows the outcome in a message box (or prints it, with
 /// `RETIFS_NO_DIALOG` set).
-/// `within`: the namespace and sync root, as the verb passes them; None
+/// `within`: the library and sync root, as the verb passes them; None
 /// asks the folder (which fails for folders Windows' storage API won't
 /// open, e.g. under the hidden AppData).
 pub fn share(store: &Path, path: &Path, within: Option<(String, PathBuf)>, via: Option<String>) -> Result<(), String> {
