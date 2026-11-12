@@ -70,6 +70,8 @@ retifs app add extract --ns photos,music --write \
 systemctl --user enable --now retifs-extractd
 ```
 
+An app in a container of its own (Music Assistant, say) needs only the app socket, not the store: `retifsd --app-socket /srv/retifs-apps/apps.sock` (or `app_socket` under `[node]` in `retifs.toml`) opens a second one there, and that folder alone is mounted into the container. The store's own `apps.sock` stays as it was.
+
 One of your nodes running it is enough ([ADR-0023](adr/0023-attribute-extraction.md)).
 
 ## Sharing

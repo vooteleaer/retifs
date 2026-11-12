@@ -615,6 +615,10 @@ struct Args {
     store_given: bool,
     /// `--no-mounts`: no library as a folder in ~/retifs (Linux).
     no_mounts: bool,
+    /// `--app-socket PATH`: another app socket, besides the store's (Unix):
+    /// e.g. in a folder shared with an app's container, which then sees
+    /// nothing of the store.
+    app_socket: Option<PathBuf>,
 }
 
 /// The machine's name, lower case: the default device name for keep tags.
@@ -695,6 +699,7 @@ fn args() -> Args {
         default_libraries: None,
         store_given: false,
         no_mounts: false,
+        app_socket: None,
     };
     // The store's settings file first, then the command line: a flag given
     // there overrides the file (the last value of a flag counts).
@@ -717,6 +722,7 @@ fn args() -> Args {
                 a.store_given = true;
             }
             "--no-mounts" => a.no_mounts = true,
+            "--app-socket" => a.app_socket = Some(it.next().expect("--app-socket PATH").into()),
             "--put" => a.put.push(it.next().expect("--put FILE").into()),
             "--public" => a.public = true,
             "--max-store" => a.budget.max_store = Some(size(&it.next().expect("--max-store SIZE"))),
@@ -746,7 +752,7 @@ fn args() -> Args {
                     "retifsd [--store DIR] [--max-store SIZE] [--min-free SIZE] [--cache-max SIZE] [--private-requests] [--spare]
                              [--hold-for-others SIZE] [--db-cache SIZE] [--lease-term DURATION] [--loss-target P] [--min-copies N] [--compact] [--no-storage] [--site NAME] [--slow-link-budget DURATION]\n        \
                      [--stamp-cost BITS] [--max-stamp-cost BITS] [--announce-every DURATION]\n        \
-                     [--nomadnet LIBRARY [--nomadnet-name NAME]] [--device NAME] [--default-libraries FILE] [--no-mounts] [--public] [--put FILE]..."
+                     [--nomadnet LIBRARY [--nomadnet-name NAME]] [--device NAME] [--default-libraries FILE] [--no-mounts] [--app-socket PATH] [--public] [--put FILE]..."
                 );
                 std::process::exit(0);
             }
@@ -2256,6 +2262,12 @@ async fn serve(store: Arc<SlabStore>, identity: node::IdentitySecret, endpoint: 
     let daemon_for_nn = daemon.clone();
     tokio::spawn(local_api(endpoint, daemon.clone(), false, Some(args.store.clone())));
     tokio::spawn(local_api(libretifs::app_endpoint(&args.store), daemon.clone(), true, None));
+    if let Some(p) = &args.app_socket {
+        if let Some(dir) = p.parent() {
+            let _ = std::fs::create_dir_all(dir);
+        }
+        tokio::spawn(local_api(p.to_string_lossy().into_owned(), daemon.clone(), true, None));
+    }
     worker("remote API", api_server(daemon.clone(), handle.clone(), api_rx));
     worker("invitations", invite_server(daemon.clone(), handle.clone(), invite_rx));
     worker("lease puller", lease_puller(daemon.clone(), shared.clone()));

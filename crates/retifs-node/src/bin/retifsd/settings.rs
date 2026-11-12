@@ -24,6 +24,7 @@ const SETTINGS: &[(&str, &str, &str, Kind)] = &[
     ("node", "device", "--device", Kind::Value),
     ("node", "announce_every", "--announce-every", Kind::Value),
     ("node", "private_requests", "--private-requests", Kind::Switch),
+    ("node", "app_socket", "--app-socket", Kind::Value),
     ("placement", "hold_for_others", "--hold-for-others", Kind::Value),
     ("placement", "lease_term", "--lease-term", Kind::Value),
     ("placement", "loss_target", "--loss-target", Kind::Value),
@@ -55,6 +56,7 @@ const TEMPLATE: &str = r#"# retifs node settings. Flags given to retifsd overrid
 # announce_every = "10m"     # how often to announce retifs.node (the announces say so)
 # private_requests = false   # one item per have/get request when seeking: slower, less to correlate
 # site = "..."               # where this node is (e.g. "prangli-home"): one copy of its files is kept at another site
+# app_socket = "..."         # another socket for apps, besides the store's (e.g. in a folder shared with an app's container)
 
 [placement]
 # hold_for_others = "..."    # hold others' encrypted copies up to this (default: up to the store limit; 0 opts out)
