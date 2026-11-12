@@ -250,6 +250,14 @@ fn media<R: Read + Seek>(r: &mut R, out: &mut Extracted, tags: bool) {
     if let Some(v) = tag.album() {
         out.text("audio.album", v);
     }
+    // The album's own artist: a compilation's tracks have each their own
+    // artist but one album artist, and keep together as one album by it.
+    if let Some(v) = tag.get_string(&ItemKey::AlbumArtist) {
+        out.text("audio.albumartist", v);
+    }
+    if let Some(n) = tag.disk() {
+        out.set("audio.disc", AttrValue::Int(n as i64));
+    }
     if let Some(v) = tag.genre() {
         out.text("audio.genre", v);
     }
