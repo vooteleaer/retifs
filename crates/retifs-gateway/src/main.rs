@@ -370,7 +370,8 @@ fn serve(gw: &mut Gateway, req: tiny_http::Request, port: &str) -> std::io::Resu
     // The first piece is read before answering, so a file that can't be
     // fetched gets a 504; the rest streams a piece at a time, so a large file
     // is never held whole (here or in the daemon).
-    let len = if head { 0 } else { span.end - span.start };
+    // HEAD: the length it would be (tiny_http sends no body for HEAD).
+    let len = span.end - span.start;
     let first = if head {
         Vec::new()
     } else {
@@ -389,8 +390,12 @@ fn serve(gw: &mut Gateway, req: tiny_http::Request, port: &str) -> std::io::Resu
         }
     };
     let pos = span.start + first.len() as u64;
-    let body = Pieces { gw, ns: ns.clone(), cap, pos, end: span.start + len, buf: first, at: 0 };
+    let end = if head { pos } else { span.start + len };
+    let body = Pieces { gw, ns: ns.clone(), cap, pos, end, buf: first, at: 0 };
+    // Content-Length always (tiny_http goes chunked above 32 KiB): a player
+    // knows the file's size, and HEAD says it.
     let mut resp = HttpResponse::new(tiny_http::StatusCode(status), Vec::new(), body, Some(len as usize), None)
+        .with_chunked_threshold(usize::MAX)
         .with_header(header("Content-Type", ctype))
         .with_header(header("Accept-Ranges", "bytes"));
     if let Some(r) = &range {
