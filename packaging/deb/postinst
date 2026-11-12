@@ -5,6 +5,21 @@ if [ "$1" = configure ] && command -v systemctl >/dev/null; then
     # Older packages brought a prnsd of their own, enabled for everyone.
     rm -f /etc/systemd/user/default.target.wants/retifs-prnsd.service
     systemctl --global enable retifsd.service >/dev/null 2>&1 || true
+    # An upgrade: the user services already running are restarted on the new
+    # programs (a gateway or mount left on the old one talks to the new
+    # retifsd in the old way). Only those running: try-restart.
+    if [ -n "$2" ] && command -v loginctl >/dev/null; then
+        for u in $(loginctl list-users --no-legend 2>/dev/null | awk '{print $2}'); do
+            systemctl --user --machine="$u@.host" daemon-reload >/dev/null 2>&1 || continue
+            # One by one: a unit not there (one never set up) fails the whole call.
+            for s in retifsd.service retifs-gateway.service retifs-extractd.service 'retifs-mount@*.service'; do
+                systemctl --user --machine="$u@.host" try-restart "$s" >/dev/null 2>&1 || true
+            done
+            if systemctl --user --machine="$u@.host" is-active --quiet retifsd.service 2>/dev/null; then
+                echo "retifs: $u's running retifs services restarted on the new version"
+            fi
+        done
+    fi
     cat <<MSG
 retifs is installed. It starts with your next login; to start it now, as yourself:
     systemctl --user daemon-reload
