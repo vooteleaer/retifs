@@ -1243,7 +1243,10 @@ fn attr(arg: &str) -> (String, libretifs::AttrValue) {
                 .unwrap_or_else(|_| libretifs::AttrValue::Str(v.to_string())),
         }
     };
-    let value = if v.contains(',') && !v.starts_with('"') {
+    // One comma is part of the text ("Lily, Rosemary and the Jack of Hearts"):
+    // a list needs a trailing comma or more than one.
+    let is_list = !v.starts_with('"') && (v.ends_with(',') || v.matches(',').count() > 1);
+    let value = if is_list {
         libretifs::AttrValue::List(v.split(',').filter(|s| !s.is_empty()).map(scalar).collect())
     } else {
         scalar(v)
@@ -1513,6 +1516,16 @@ fn fail(e: impl std::fmt::Display) -> ! {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn attr_lists_need_two_commas_or_a_trailing_one() {
+        use libretifs::AttrValue::{Int, List, Str};
+        let s = |v: &str| Str(v.into());
+        assert_eq!(super::attr("path=/Dylan/07 - Lily, Rosemary.mp3").1, s("/Dylan/07 - Lily, Rosemary.mp3"));
+        assert_eq!(super::attr("tags=a,").1, List(vec![s("a")]));
+        assert_eq!(super::attr("n=1,2,3").1, List(vec![Int(1), Int(2), Int(3)]));
+        assert_eq!(super::attr("q=\"a,b,c\"").1, s("a,b,c"));
+    }
+
     #[test]
     fn until_times() {
         for (s, ms) in [("1970-01-01", 0), ("2000-02-29", 951_782_400_000), ("2026-10-20", 1_792_454_400_000), ("2026-12-31", 1_798_675_200_000), ("2100-03-01", 4_107_542_400_000)] {
