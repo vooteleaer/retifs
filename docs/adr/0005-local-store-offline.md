@@ -49,8 +49,10 @@ Ciphertext at rest means a stolen device without its key reveals only chunk coun
 - **Device name:** `retifsd --device NAME`, by default the host name in lower case.
 - **Keep tags:** a record is kept on this device if its `keep` or `keep:<device>` attribute is `true`.
 - **Keep rules:** records with `type = "keep-rule"`, a `query` of comma-separated terms (the syntax `retifs query` takes, e.g. `album=Prangli 2026, type=photo`), and an optional `device`. Without `device` the rule applies to every device. A rule that doesn't parse is ignored.
-- **Keep mode per library on each node:** `retifs ns keep NS all|rules`.
-  - `all` is the default and today's behaviour: a member pulls all content. A lazy join (`ns join … --lazy`, [ADR-0018](0018-state-trees.md)) starts in `rules`.
+- **Keep mode per library on each node:** `retifs library keep LIB all|rules`.
+  - A library made on the node is in `all`: it pulls all content.
+  - A library joined starts in `rules` (since 0.5.0, the user's call on 2026-11-13: joining shouldn't copy everything to the device). It keeps the records, and fetches content as it's read, keeping it by tags and rules. A lazy join (`library join … --lazy`, [ADR-0018](0018-state-trees.md)) also holds only part of the state.
+  - `retifs library keep LIB all` keeps one library whole. The node setting `keep_joined = "all"` keeps every library joined from then on whole, for a node meant to hold everything (a NAS, a backup node). Libraries joined before 0.5.0 keep their mode.
   - `rules` pulls only tagged and matching records, for devices that can't hold everything.
   - `ns info` shows the mode, the device name and how many files were pulled because they're kept.
 - **After every sync and every local write:**

@@ -21,10 +21,12 @@ const SETTINGS: &[(&str, &str, &str, Kind)] = &[
     ("store", "db_cache", "--db-cache", Kind::Value),
     ("store", "no_storage", "--no-storage", Kind::Switch),
     ("store", "spare", "--spare", Kind::Switch),
+    ("store", "keep_joined", "--keep-joined", Kind::Value),
     ("node", "device", "--device", Kind::Value),
     ("node", "announce_every", "--announce-every", Kind::Value),
     ("node", "private_requests", "--private-requests", Kind::Switch),
     ("node", "app_socket", "--app-socket", Kind::Value),
+    ("node", "crash_library", "--crash-library", Kind::Value),
     ("placement", "hold_for_others", "--hold-for-others", Kind::Value),
     ("placement", "lease_term", "--lease-term", Kind::Value),
     ("placement", "loss_target", "--loss-target", Kind::Value),
@@ -50,6 +52,7 @@ const TEMPLATE: &str = r#"# retifs node settings. Flags given to retifsd overrid
 # db_cache = "64M"           # the index's page cache in RAM
 # no_storage = false         # keep nothing of its own on this device, only a keyring (ADR-0031)
 # spare = false              # fill free space with spare copies of libraries read here, rarest first (ADR-0012)
+# keep_joined = "rules"      # libraries joined here: "rules" keeps what's read and tagged, "all" keeps everything (a NAS)
 
 [node]
 # device = "..."             # this device's name for keep tags and rules (default: the hostname)
@@ -57,6 +60,7 @@ const TEMPLATE: &str = r#"# retifs node settings. Flags given to retifsd overrid
 # private_requests = false   # one item per have/get request when seeking: slower, less to correlate
 # site = "..."               # where this node is (e.g. "prangli-home"): one copy of its files is kept at another site
 # app_socket = "..."         # another socket for apps, besides the store's (e.g. in a folder shared with an app's container)
+# crash_library = "retifs-crashlogs"  # crash and trouble reports go here once this node has joined it ("": kept here only)
 
 [placement]
 # hold_for_others = "..."    # hold others' encrypted copies up to this (default: up to the store limit; 0 opts out)

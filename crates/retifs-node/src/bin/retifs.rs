@@ -12,29 +12,29 @@
 //!     retifs [--store DIR] forget READ-CAP
 //!     retifs [--store DIR] channel create NAME
 //!     retifs [--store DIR] channel publish NAME FILE [--compress]
-//!     retifs [--store DIR] channel publish-ns NAME NS
+//!     retifs [--store DIR] channel publish-ns NAME LIB
 //!     retifs [--store DIR] follow ADDRESS [--from NODE]...
 //!     retifs [--store DIR] channels
 //!
-//!     retifs [--store DIR] rec add NS [KEY=VALUE]... [--file PATH]
-//!     retifs [--store DIR] rec set NS ID [KEY=VALUE]... [--unset KEY]... [--file PATH]
-//!     retifs [--store DIR] rec get NS ID | rec rm NS ID
-//!     retifs [--store DIR] rec import NS < LINES   (one record per line of KEY=VALUE, 500 per transaction)
-//!     retifs [--store DIR] rec history NS ID
-//!     retifs [--store DIR] query NS [--at VERSION] [TERM]...
-//!     retifs [--store DIR] query NS KEY=VALUE... --search NODE   (through a search node's blind index)
-//!     retifs [--store DIR] ns search NS   (publish the blind index; prints the search capability)
+//!     retifs [--store DIR] rec add LIB [KEY=VALUE]... [--file PATH]
+//!     retifs [--store DIR] rec set LIB ID [KEY=VALUE]... [--unset KEY]... [--file PATH]
+//!     retifs [--store DIR] rec get LIB ID | rec rm LIB ID
+//!     retifs [--store DIR] rec import LIB < LINES   (one record per line of KEY=VALUE, 500 per transaction)
+//!     retifs [--store DIR] rec history LIB ID
+//!     retifs [--store DIR] query LIB [--at VERSION] [TERM]...
+//!     retifs [--store DIR] query LIB KEY=VALUE... --search NODE   (through a search node's blind index)
+//!     retifs [--store DIR] library search LIB   (publish the blind index; prints the search capability)
 //!
-//!     retifs [--store DIR] ns address NS | ns info NS
-//!     retifs [--store DIR] ns join NAME ADDRESS [--from NODE]... [--lazy]
-//!     retifs [--store DIR] ns grant NS WRITER [--grant] [--keys K1,K2,@content,@delete] [--until YYYY-MM-DD|+30d] [--from NODE]... | ns revoke NS WRITER
-//!     retifs [--store DIR] share create NAME --from NS [TERM]... [--id ID]... [--omit KEY]... [--keep KEY]... [--qr] | share list NS | share rm NS ID
+//!     retifs [--store DIR] library address LIB | library info LIB | library paths LIB
+//!     retifs [--store DIR] library join NAME ADDRESS [--from NODE]... [--lazy]
+//!     retifs [--store DIR] library grant LIB WRITER [--grant] [--keys K1,K2,@content,@delete] [--until YYYY-MM-DD|+30d] [--from NODE]... | library revoke LIB WRITER
+//!     retifs [--store DIR] share create NAME --from LIB [TERM]... [--id ID]... [--omit KEY]... [--keep KEY]... [--qr] | share list LIB | share rm LIB ID
 //!     retifs [--store DIR] share path PATH... [--omit KEY]... [--keep KEY]...
-//!     retifs [--store DIR] ns link NS [--name LABEL] [--q TERMS] [--qr] | open LINK [--as NAME]
-//!     retifs [--store DIR] query NS[,NS]|'*' TERM... --save NAME | saved [list] | saved run NAME [--watch] | saved rm NAME
-//!     retifs [--store DIR] mount [NS [DIR] [--foreground] [--via NODE] | --all] | unmount NS [--forget]
+//!     retifs [--store DIR] library link LIB [--name LABEL] [--q TERMS] [--qr] | open LINK [--as NAME]
+//!     retifs [--store DIR] query LIB[,LIB]|'*' TERM... --save NAME | saved [list] | saved run NAME [--watch] | saved rm NAME
+//!     retifs [--store DIR] mount [LIB [DIR] [--foreground] [--via NODE] | --all] | unmount LIB [--forget]
 //!     retifs [--store DIR] me | me link [--name LABEL] [--qr] | contact add NAME NODE|LINK | contact list | contact rm NAME
-//!     retifs [--store DIR] invite create NS [--read | --grant] [--keys K1,K2] [--until DATE] [--expires 1d] [--q TERMS] [--name LABEL] [--qr] | invite list NS | invite cancel NS ID
+//!     retifs [--store DIR] invite create LIB [--read | --grant] [--keys K1,K2] [--until DATE] [--expires 1d] [--q TERMS] [--name LABEL] [--qr] | invite list LIB | invite cancel LIB ID
 //!
 //! Several writers per library (ADR-0017): a member joins with the address
 //! and shows its writer key; the creator grants it; members sync each other.
@@ -60,31 +60,31 @@ use libretifs::{default_store_dir, Client};
 
 fn usage() -> ! {
     eprintln!(
-        "retifs [--store DIR] ping | nodes | stop | nomadnet NODE [PATH] [--var K=V]... | recovery create | recovery restore\n\
+        "retifs [--store DIR] ping | nodes | stop | report [TEXT] | nomadnet NODE [PATH] [--var K=V]... | recovery create | recovery restore\n\
          retifs [--store DIR] put FILE [--public] [--compress] [--publish] [--record NAME | --one-off] [--hint]\n\
          retifs [--store DIR] get READ-CAP [--from NODE]... [-o OUT] [--links N] [--batch N]\n\
          retifs [--store DIR] status READ-CAP\n\
-         retifs [--store DIR] read READ-CAP [--offset N] [--len N] [--ns NS] [--wait SECONDS]\n\
-         retifs [--store DIR] app add NAME --ns NS[,NS] [--write] [--keys K[,K]] [--device NODE] | app list | app remove NAME\n\
+         retifs [--store DIR] read READ-CAP [--offset N] [--len N] [--library LIB] [--wait SECONDS]\n\
+         retifs [--store DIR] app add NAME --library LIB[,LIB] [--write] [--keys K[,K]] [--device NODE] | app list | app remove NAME\n\
          retifs [--store DIR] --app TOKEN ...   (as an application: only what its token allows)\n\
          retifs [--store DIR] --via NODE ...    (ask own node NODE over a Link; it must have added this node with --device)\n\
          retifs [--store DIR] want READ-CAP [--from NODE]...
          retifs [--store DIR] replicate READ-CAP --to NODE...\n\
          retifs [--store DIR] forget READ-CAP\n\
-         retifs [--store DIR] channel create NAME | channel publish NAME FILE [--compress] | channel publish-ns NAME NS\n\
+         retifs [--store DIR] channel create NAME | channel publish NAME FILE [--compress] | channel publish-ns NAME LIB\n\
          retifs [--store DIR] follow ADDRESS [--from NODE]... | channels\n\
-         retifs [--store DIR] rec add NS [KEY=VALUE]... [--file PATH] | rec set NS ID [KEY=VALUE]... [--unset KEY]... [--file PATH]\n\
-         retifs [--store DIR] rec get NS ID | rec rm NS ID | rec history NS ID | rec import NS < LINES | query NS[,NS]... [--at VERSION] [TERM]... [--search NODE]\n\
-         retifs [--store DIR] ns address NS | ns info NS | ns checkpoint NS | ns search NS | ns verify NS | ns keep NS all|rules | ns copies NS [N] | ns join NAME ADDRESS [--from NODE]... [--lazy]\n\
-         retifs [--store DIR] ns announce NS [off] [--name LABEL] [--about TEXT] | heard | ns leave NS [--mine] | ns delete NS --yes\n\
-         retifs [--store DIR] ns grant NS WRITER [--grant] [--from NODE]... | ns revoke NS WRITER\n\
-         retifs [--store DIR] share create NAME --from NS [TERM]... [--id ID]... [--omit KEY]... [--keep KEY]... [--qr] | share list NS | share rm NS ID\n\
+         retifs [--store DIR] rec add LIB [KEY=VALUE]... [--file PATH] | rec set LIB ID [KEY=VALUE]... [--unset KEY]... [--file PATH]\n\
+         retifs [--store DIR] rec get LIB ID | rec rm LIB ID | rec history LIB ID | rec import LIB < LINES | query LIB[,LIB]... [--at VERSION] [TERM]... [--search NODE]\n\
+         retifs [--store DIR] library address LIB | library info LIB | library paths LIB | library checkpoint LIB | library search LIB | library verify LIB | library keep LIB all|rules | library copies LIB [N] | library join NAME ADDRESS [--from NODE]... [--lazy]\n\
+         retifs [--store DIR] library announce LIB [off] [--name LABEL] [--about TEXT] | heard | library leave LIB [--mine] | library delete LIB --yes\n\
+         retifs [--store DIR] library grant LIB WRITER [--grant] [--from NODE]... | library revoke LIB WRITER\n\
+         retifs [--store DIR] share create NAME --from LIB [TERM]... [--id ID]... [--omit KEY]... [--keep KEY]... [--qr] | share list LIB | share rm LIB ID\n\
          retifs [--store DIR] share path PATH... [--omit KEY]... [--keep KEY]...\n\
-         retifs [--store DIR] ns link NS [--name LABEL] [--q TERMS] [--qr] | open LINK [--as NAME] | ns join NAME LINK\n\
-         retifs [--store DIR] query NS[,NS]|'*' TERM... --save NAME | saved [list] | saved run NAME [--watch] | saved rm NAME\n\
-         retifs [--store DIR] mount [NS [DIR] [--foreground] [--via NODE] | --all] | unmount NS [--forget]\n\
+         retifs [--store DIR] library link LIB [--name LABEL] [--q TERMS] [--qr] | open LINK [--as NAME] | library join NAME LINK\n\
+         retifs [--store DIR] query LIB[,LIB]|'*' TERM... --save NAME | saved [list] | saved run NAME [--watch] | saved rm NAME\n\
+         retifs [--store DIR] mount [LIB [DIR] [--foreground] [--via NODE] | --all] | unmount LIB [--forget]\n\
          retifs [--store DIR] me | me link [--name LABEL] [--qr] | contact add NAME NODE|LINK | contact list | contact rm NAME\n\
-         retifs [--store DIR] invite create NS [--read | --grant] [--keys K1,K2] [--until DATE] [--expires 1d] [--q TERMS] [--name LABEL] [--qr] | invite list NS | invite cancel NS ID"
+         retifs [--store DIR] invite create LIB [--read | --grant] [--keys K1,K2] [--until DATE] [--expires 1d] [--q TERMS] [--name LABEL] [--qr] | invite list LIB | invite cancel LIB ID"
     );
     std::process::exit(2);
 }
@@ -203,7 +203,7 @@ Covered ({}): {}", covered.len(), if covered.is_empty() { "none".into() } else {
                 match client.call(libretifs::Request::RecoveryRestore { words }).await.unwrap_or_else(|e| fail(e)) {
                     libretifs::Response::RecoveryRestored { libraries } => {
                         println!("Back on this node ({}): {}", libraries.len(), libraries.join(", "));
-                        println!("Their content arrives in the background. Revoke the devices you lost in each library: retifs ns info NS, then retifs ns revoke NS WRITER.");
+                        println!("Their content arrives in the background. Revoke the devices you lost in each library: retifs library info LIB, then retifs library revoke LIB WRITER.");
                     }
                     libretifs::Response::Error { message } => fail(message),
                     _ => fail("unexpected response"),
@@ -238,6 +238,17 @@ Covered ({}): {}", covered.len(), if covered.is_empty() { "none".into() } else {
         "stop" => {
             client.stop().await.unwrap_or_else(|e| fail(e));
             println!("retifsd is stopping");
+        }
+        // A report of trouble (ADR-0036): the text, with retifsd's last
+        // output, into the crash library (retifs-crashlogs).
+        "report" => {
+            let text: Vec<String> = it.collect();
+            let text = if text.is_empty() { "Reported by the user.".to_string() } else { text.join(" ") };
+            match client.call(libretifs::Request::CrashReport { kind: "user".into(), source: "cli".into(), text }).await.unwrap_or_else(|e| fail(e)) {
+                libretifs::Response::Done => println!("report kept; it goes into the crash library once this node is in it"),
+                libretifs::Response::Error { message } => fail(message),
+                _ => fail("unexpected response"),
+            }
         }
         "ping" => {
             let (node, chunks, usage) = client.ping().await.unwrap_or_else(|e| fail(e));
@@ -413,7 +424,7 @@ Covered ({}): {}", covered.len(), if covered.is_empty() { "none".into() } else {
                 if let Some(b) = l.bounds {
                     println!("  area {:.3},{:.3} – {:.3},{:.3}", b[0], b[1], b[2], b[3]);
                 }
-                println!("  join: retifs ns join NAME {} --lazy", l.address);
+                println!("  join: retifs library join NAME {} --lazy", l.address);
             }
         }
         "rec" => {
@@ -550,13 +561,32 @@ Covered ({}): {}", covered.len(), if covered.is_empty() { "none".into() } else {
                 print_record(&r);
             }
         }
-        "ns" => {
+        // `ns` is its name before 0.5.0, kept so scripts go on working.
+        "library" | "ns" => {
             let sub = it.next().unwrap_or_else(|| usage());
             let ns = it.next().unwrap_or_else(|| usage());
             let rest = resolve_froms(&mut client, it.collect()).await;
             let froms = |rest: &[String]| -> Vec<String> {
                 rest.windows(2).filter(|w| w[0] == "--from").map(|w| w[1].clone()).collect()
             };
+            // The Reticulum paths to its nodes, as this node sees them now.
+            if sub == "paths" {
+                let paths = match client.call(libretifs::Request::NsPaths { ns }).await.unwrap_or_else(|e| fail(e)) {
+                    libretifs::Response::Paths { paths } => paths,
+                    libretifs::Response::Error { message } => fail(message),
+                    _ => fail("unexpected response"),
+                };
+                let now = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map(|d| d.as_millis() as u64).unwrap_or(0);
+                for p in &paths {
+                    let hops = p.hops.map_or("no path".to_string(), |h| format!("{h} hop(s)"));
+                    let link = if p.rtt_ms == 0 { String::new() } else { format!("  rtt {} ms{}", p.rtt_ms, if p.rate_bps > 0 { format!(", {} B/s", p.rate_bps) } else { String::new() }) };
+                    let heard = if p.last_heard_ms == 0 { String::new() } else { format!("  heard {} ago", duration(now.saturating_sub(p.last_heard_ms) / 1000)) };
+                    let who = if p.writer.is_some() { "member" } else { "peer" };
+                    println!("{}  {who}  {hops}{link}{}{}{heard}", p.node, if p.slow { " (slow)" } else { "" }, if p.linked { "  linked" } else { "" });
+                }
+                println!("{} node(s)", paths.len());
+                return;
+            }
             let req = match sub.as_str() {
                 "address" => libretifs::Request::NsAddress { ns },
                 "info" => libretifs::Request::NsInfo { ns },
@@ -1017,7 +1047,7 @@ Covered ({}): {}", covered.len(), if covered.is_empty() { "none".into() } else {
                     name: rest.first().cloned().unwrap_or_else(|| usage()),
                     namespaces: rest
                         .windows(2)
-                        .find(|w| w[0] == "--ns")
+                        .find(|w| w[0] == "--library" || w[0] == "--ns")
                         .map(|w| w[1].split(',').map(|n| n.trim().to_string()).filter(|n| !n.is_empty()).collect())
                         .unwrap_or_else(|| usage()),
                     write: rest.iter().any(|a| a == "--write"),
@@ -1179,7 +1209,7 @@ Covered ({}): {}", covered.len(), if covered.is_empty() { "none".into() } else {
             let piece: u64 = if via_set { 512 << 10 } else { 4 << 20 };
             let mut offset = num("--offset", 0);
             let mut left = num("--len", u64::MAX);
-            let ns = opt("--ns");
+            let ns = opt("--library").or_else(|| opt("--ns"));
             let wait_ms = num("--wait", 30) * 1000;
             use std::io::Write;
             let mut stdout = std::io::stdout().lock();

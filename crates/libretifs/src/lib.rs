@@ -405,6 +405,37 @@ pub enum Request {
         #[serde(default)]
         fields: Vec<(String, String)>,
     },
+    /// A crash or trouble report (ADR-0036), from an app or the user: kept
+    /// on this node until it goes into its crash library (`retifs-crashlogs`
+    /// by default), with the daemon's own last output added. `kind`:
+    /// `app_crash`, `user`, …; `source`: who reports (an app's name);
+    /// `text`: what happened (at most 256 KiB). Any app may send one.
+    CrashReport { kind: String, source: String, text: String },
+    /// The Reticulum paths to library `ns`'s nodes (its members' and the
+    /// other nodes it syncs with), as this node sees them now: from its own
+    /// Reticulum client, whatever implementation the shared instance is.
+    NsPaths { ns: String },
+}
+
+/// The Reticulum path to one of a library's nodes (`NsPaths`).
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct PathInfo {
+    /// Its `retifs.node` address (32 hex digits).
+    pub node: String,
+    /// The writer key it's a member's device for, if it is one.
+    pub writer: Option<String>,
+    /// Hops now; `None`: no path known.
+    pub hops: Option<u8>,
+    /// Last link setup round trip (0: never linked).
+    pub rtt_ms: u32,
+    /// Measured throughput, bytes per second (0: none yet).
+    pub rate_bps: u32,
+    /// Counted as behind a slow link (LoRa).
+    pub slow: bool,
+    /// When its last announce was heard (0: never).
+    pub last_heard_ms: u64,
+    /// Linked now.
+    pub linked: bool,
 }
 
 /// An attribute value (ADR-0016).
@@ -611,6 +642,8 @@ pub enum Response {
     RecoveryKit { words: Vec<String>, covered: Vec<String>, not_covered: Vec<String> },
     /// The libraries a recovery brought back.
     RecoveryRestored { libraries: Vec<String> },
+    /// The paths to a library's nodes (`NsPaths`).
+    Paths { paths: Vec<PathInfo> },
     /// A live query's answer: `records` when it changed, else none.
     LiveRecords { digest: String, records: Option<Vec<RecordView>> },
     /// A NomadNet page or file (NomadNetPage).

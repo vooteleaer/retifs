@@ -9,18 +9,17 @@ What runs
 - retifsd, as a systemd user service in every user's session
   (`systemctl --user status retifsd`). Its store is ~/.local/share/retifs.
 - Reticulum: retifsd joins a shared instance on the machine, which this
-  package doesn't bring: install Prns (prnsd), or run any other Reticulum
-  shared instance (rnsd). retifsd waits for it at start. Its connections
-  are Reticulum's own, in its configuration file (~/.reticulum/config,
-  read by every implementation), e.g. a TCP connection to a node you trust;
-  the retifs-desktop utility adds them there, or use your implementation's
-  tools (prnsd interfaces add, rnstatus, ...).
+  package doesn't bring: install any Reticulum implementation and run its
+  shared instance. retifsd waits for it at start. Its connections are
+  Reticulum's own, in its configuration file (~/.reticulum/config, read by
+  every implementation), e.g. a TCP connection to a node you trust; the
+  retifs-desktop utility adds them there, or use your Reticulum's own tools.
 
 First steps
 -----------
     retifs ping                 the daemon and this node's address
     retifs heard                public libraries announced on the network
-    retifs ns join NAME ADDRESS --lazy
+    retifs library join NAME ADDRESS --lazy
     retifs nodes                storage nodes heard
     (every library is a folder in ~/retifs/NAME: retifsd mounts them itself)
     retifs unmount NAME         takes one down until retifsd starts again

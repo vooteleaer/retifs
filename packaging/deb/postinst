@@ -24,8 +24,8 @@ if [ "$1" = configure ] && command -v systemctl >/dev/null; then
 retifs is installed. It starts with your next login; to start it now, as yourself:
     systemctl --user daemon-reload
     systemctl --user start retifsd
-retifs needs a Reticulum shared instance on this machine: any implementation will do (Prns's prnsd, Python's rnsd, …).
-Then: retifs ping, retifs heard, retifs ns join ... (see /usr/share/doc/retifs/README.Debian).
+retifs needs a Reticulum shared instance on this machine: any Reticulum implementation will do.
+Then: retifs ping, retifs heard, retifs library join ... (see /usr/share/doc/retifs/README.Debian).
 On a machine without a desktop session: sudo loginctl enable-linger USER.
 MSG
 fi

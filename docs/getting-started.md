@@ -6,12 +6,11 @@ You'll need two devices: a computer (Windows or Linux) and a phone (Android), or
 
 ## 1. Reticulum first
 
-retifs runs on [Reticulum](https://reticulum.network) and joins the device's Reticulum *shared instance*; it never brings its own. Start one on each device:
+retifs runs on [Reticulum](https://reticulum.network) and joins the device's Reticulum *shared instance*; it never brings its own. Any Reticulum implementation with a shared instance will do; start one on each device. Ones that have been used with retifs:
 
-- **Debian, Ubuntu, Raspberry Pi OS:** `sudo apt install ./prns_*.deb` from the [Prns packages for retifs](https://github.com/vooteleaer/Prns/releases) (a fork's build of upstream Prns, until Prns publishes packages): it starts `prnsd` in your session.
-- **Windows, macOS:** Prns's own `prnsd` from the [Prns 0.3.8 release](https://github.com/KenAKAFrosty/Prns/releases/tag/v0.3.8): unpack it and run `prnsd`. On first start it writes a configuration with the automatic interfaces on; on a desktop it sits in the tray. Python's `rnsd` (`pip install rns`) works anywhere too.
-- **Android:** install `personal-hopspot-*.apk` from the [Prns packages for retifs](https://github.com/vooteleaer/Prns/releases): Prns's Android app (a development build). Open it and start the node. Sideband or Columba may also work as the phone's shared instance, but haven't been tried.
-- **Haiku:** install the `prns` package from the release; it starts `prnsd` at login.
+- **Linux, Windows, macOS:** the reference implementation's `rnsd` (`pip install rns`), or `prnsd` from [Prns](https://github.com/KenAKAFrosty/Prns/releases/tag/v0.3.8) (Debian packages: [Prns packages for retifs](https://github.com/vooteleaer/Prns/releases), a fork's build until Prns publishes its own).
+- **Android:** a Reticulum app that runs a shared instance, e.g. Prns's Android app (`personal-hopspot-*.apk` from the [Prns packages for retifs](https://github.com/vooteleaer/Prns/releases), a development build). Sideband or Columba may also work, but haven't been tried.
+- **Haiku:** the `prns` package from the same release; it starts at login.
 
 The two devices must reach each other over Reticulum: on the same network they find each other by themselves (AutoInterface); otherwise give both the same TCP interface to a hub in their Reticulum config.
 
@@ -72,5 +71,5 @@ On Linux (`retifs-contacts`, `retifs-calendar` packages): an address book in you
 ## When something goes wrong
 
 - Logs: Windows `%LOCALAPPDATA%\retifs\logs\`; Linux `journalctl --user -u retifsd`; Android `adb logcat | grep -i retifs`.
-- `retifs nodes` shows the other nodes this one knows; `retifs ns info <library>` what a library has and who's in it.
+- `retifs nodes` shows the other nodes this one knows; `retifs library info <library>` what a library has and who's in it.
 - Please report issues at <https://github.com/vooteleaer/retifs/issues>, with what you did, what you expected and what happened.

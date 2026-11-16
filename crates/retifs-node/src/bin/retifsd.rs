@@ -596,6 +596,9 @@ struct Args {
     min_copies: usize,
     /// No data of its own kept on the device (ADR-0031).
     no_storage: bool,
+    /// Libraries joined here keep all their content (`--keep-joined all`), not
+    /// only what's read and tagged (the default since 0.5.0).
+    keep_joined_all: bool,
     /// Compact the index file before starting (gives freed space back).
     compact: bool,
     site: Option<String>,
@@ -619,6 +622,9 @@ struct Args {
     /// e.g. in a folder shared with an app's container, which then sees
     /// nothing of the store.
     app_socket: Option<PathBuf>,
+    /// The library this node's crash and trouble reports go to, once it has
+    /// joined it (ADR-0036); empty: kept here only.
+    crash_library: String,
 }
 
 /// The machine's name, lower case: the default device name for keep tags.
@@ -665,6 +671,12 @@ fn size(s: &str) -> u64 {
 
 #[path = "retifsd/settings.rs"]
 mod settings;
+#[path = "retifsd/crashlog.rs"]
+mod crashlog;
+
+/// Where crash and trouble reports go by default (ADR-0036): used once this
+/// node has joined a library of this name.
+const CRASH_LIBRARY: &str = "retifs-crashlogs";
 #[cfg(target_os = "haiku")]
 #[path = "retifsd/haiku_mounts.rs"]
 mod haiku_mounts;
@@ -687,6 +699,7 @@ fn args() -> Args {
         loss_target: 1e-3,
         min_copies: 3,
         no_storage: false,
+        keep_joined_all: false,
         compact: false,
         site: None,
         slow_budget: 600,
@@ -700,6 +713,7 @@ fn args() -> Args {
         store_given: false,
         no_mounts: false,
         app_socket: None,
+        crash_library: CRASH_LIBRARY.into(),
     };
     // The store's settings file first, then the command line: a flag given
     // there overrides the file (the last value of a flag counts).
@@ -742,17 +756,25 @@ fn args() -> Args {
             "--site" => a.site = Some(it.next().filter(|s| !s.trim().is_empty()).expect("--site NAME")),
             "--compact" => a.compact = true,
             "--no-storage" => a.no_storage = true,
+            "--keep-joined" => {
+                a.keep_joined_all = match it.next().as_deref() {
+                    Some("all") => true,
+                    Some("rules") => false,
+                    _ => panic!("--keep-joined all|rules"),
+                }
+            }
             "--min-copies" => a.min_copies = it.next().and_then(|v| v.parse().ok()).filter(|n| *n >= 1).expect("--min-copies N (1 or more)"),
             "--lease-term" => a.lease_term = duration_secs(&it.next().expect("--lease-term DURATION")).max(60),
             "--device" => a.device = it.next().expect("--device NAME").to_lowercase(),
+            "--crash-library" => a.crash_library = it.next().expect("--crash-library LIBRARY (\"\": none)").trim().to_string(),
             "--default-libraries" => a.default_libraries = Some(it.next().expect("--default-libraries FILE").into()),
             "--announce-every" => a.announce_s = (duration_secs(&it.next().expect("--announce-every DURATION")) as u32).max(60),
             "-h" | "--help" => {
                 println!(
                     "retifsd [--store DIR] [--max-store SIZE] [--min-free SIZE] [--cache-max SIZE] [--private-requests] [--spare]
-                             [--hold-for-others SIZE] [--db-cache SIZE] [--lease-term DURATION] [--loss-target P] [--min-copies N] [--compact] [--no-storage] [--site NAME] [--slow-link-budget DURATION]\n        \
+                             [--hold-for-others SIZE] [--db-cache SIZE] [--lease-term DURATION] [--loss-target P] [--min-copies N] [--compact] [--no-storage] [--keep-joined all|rules] [--site NAME] [--slow-link-budget DURATION]\n        \
                      [--stamp-cost BITS] [--max-stamp-cost BITS] [--announce-every DURATION]\n        \
-                     [--nomadnet LIBRARY [--nomadnet-name NAME]] [--device NAME] [--default-libraries FILE] [--no-mounts] [--app-socket PATH] [--public] [--put FILE]..."
+                     [--nomadnet LIBRARY [--nomadnet-name NAME]] [--device NAME] [--crash-library LIBRARY] [--default-libraries FILE] [--no-mounts] [--app-socket PATH] [--public] [--put FILE]..."
                 );
                 std::process::exit(0);
             }
@@ -877,6 +899,9 @@ fn main() {
         }
         Err(e) => panic!("open slab store {}: {e}", args.store.display()),
     };
+    // Only once the store is this daemon's (not another retifsd's still
+    // running): the output kept, panics reported, an unclean last run too.
+    crashlog::install(&args.store, &args.device);
     for path in &args.put {
         let data = std::fs::read(path).unwrap_or_else(|e| panic!("{}: {e}", path.display()));
         let record = std::path::absolute(path).unwrap_or_else(|_| path.clone()).to_string_lossy().into_owned();
@@ -1022,6 +1047,7 @@ fn close_store(mut store: Arc<SlabStore>) {
             Ok(s) => {
                 drop(s);
                 println!("stopped: the store closed cleanly");
+                crashlog::stopped_cleanly();
                 return;
             }
             Err(still) => {
@@ -1065,6 +1091,8 @@ struct Daemon {
     /// Keeps no data of its own (ADR-0031): its own copies don't count, and
     /// stay only as cache once enough copies are elsewhere.
     no_storage: bool,
+    /// Joined libraries keep all their content (see `Args::keep_joined_all`).
+    keep_joined_all: bool,
     /// A storage-less node's keyring on disk (its store is in memory): the
     /// libraries and their keys, written as they change.
     keyring: Option<std::path::PathBuf>,
@@ -1622,7 +1650,7 @@ async fn holders_keeper(d: Arc<Daemon>) {
             let known = d.store.ns_peers(&ns).unwrap_or_default();
             let new: Vec<PeerId> = ns_listed(&d, &ns, "readers").into_iter().filter(|p| *p != d.node_id && !known.contains(p)).collect();
             if !new.is_empty() && d.store.add_ns_peers(&ns, &new).is_ok() {
-                eprintln!("ns {ns}: {} reader node(s) keeping some of it to sync with", new.len());
+                eprintln!("library {ns}: {} reader node(s) keeping some of it to sync with", new.len());
             }
         }
         tokio::time::sleep(HOLDERS_EVERY).await;
@@ -1957,7 +1985,11 @@ impl Daemon {
                 t.refresh_path(dest).await.map_err(|p| format!("{e}; {p}"))?;
                 attempt(&t).await?
             }
-            Err(e) => return Err(format!("{}; {e}", path.unwrap_err())),
+            // A path was had but the node is stopping (NodeStopped): the error alone.
+            Err(e) => return Err(match path {
+                Err(p) => format!("{p}; {e}"),
+                Ok(_) => e,
+            }),
         };
         let _ = self.store.record_rtt(peer, rtt);
         let hops = self.transport.hops(dest).await;
@@ -2112,6 +2144,7 @@ async fn serve(store: Arc<SlabStore>, identity: node::IdentitySecret, endpoint: 
         loss_target: args.loss_target,
         min_copies: args.min_copies,
         no_storage: args.no_storage,
+        keep_joined_all: args.keep_joined_all,
         keyring: args.no_storage.then(|| args.store.join("keyring")),
         site: args.site.as_deref().map(retifs_core::announce::site_tag),
         slow_budget: args.slow_budget,
@@ -2252,14 +2285,30 @@ async fn serve(store: Arc<SlabStore>, identity: node::IdentitySecret, endpoint: 
     let watch_handle = handle.clone();
     worker("shared instance watch", async move {
         use personal_rns::interfaces::ConnectionState;
+        // Gone since, and whether that was reported (ADR-0036).
+        let mut gone: Option<(Instant, bool)> = None;
         loop {
             tokio::time::sleep(Duration::from_secs(5)).await;
             let up = watch_handle.interfaces().iter().any(|i| !matches!(i.connection, ConnectionState::Disconnected | ConnectionState::Failed));
             if up {
+                gone = None;
                 continue;
             }
+            let (since, reported) = gone.get_or_insert((Instant::now(), false));
+            if !*reported && since.elapsed() >= NO_NETWORK_REPORT_AFTER {
+                *reported = true;
+                eprintln!("the shared instance has been unreachable for {} minutes", NO_NETWORK_REPORT_AFTER.as_secs() / 60);
+                crashlog::write_pending(
+                    "no_network",
+                    "retifsd",
+                    "The Reticulum shared instance has been unreachable for 5 minutes: this node is off the network until it's back.",
+                    true,
+                );
+                CRASH_WAKE.notify_one();
+            }
             let Ok(of) = attach(&watch_handle).await else { continue };
-            println!("shared instance went away; joined it again ({of})");
+            let away = gone.take().map(|(t, _)| t.elapsed().as_secs()).unwrap_or(0);
+            println!("shared instance went away; joined it again after {away} s ({of})");
             watcher.links.lock().unwrap().clear();
             let _ = watch_handle.issue(PrnsCommand::AnnounceNow(AnnounceNow { destination: dest_hash, target: AnnounceTarget::AllInterfaces, app_data: AnnounceAppData::Registered }));
             watcher.lib_wake.notify_one();
@@ -2283,6 +2332,7 @@ async fn serve(store: Arc<SlabStore>, identity: node::IdentitySecret, endpoint: 
     worker("library sync", ns_sync(daemon.clone()));
     worker("shares", share_keeper(daemon.clone()));
     worker("leaver", leaver(daemon.clone()));
+    worker("crash reports", crash_reports(daemon.clone(), args.crash_library.clone()));
     #[cfg(target_os = "haiku")]
     worker("mounts", haiku_mounts::keeper(daemon.clone(), args.store.clone()));
     // The user's own store only (no --store: a test node's isn't anyone's files).
@@ -2670,6 +2720,8 @@ fn authorize(d: &Daemon, s: &AppScope, req: &Request) -> Result<(), String> {
             Ok(())
         }
         Request::Ping | Request::Namespaces | Request::HeardLibraries => Ok(()),
+        // An app's crash (ADR-0036): kept, to go where its owner reads them.
+        Request::CrashReport { .. } => Ok(()),
         Request::RecordGet { ns, .. }
         | Request::Query { ns, .. }
         | Request::SearchQuery { ns, .. }
@@ -2961,6 +3013,56 @@ async fn handle(d: &Daemon, req: Request) -> Result<Response, String> {
 
         Request::Stop => {
             STOP.notify_one();
+            Ok(Response::Done)
+        }
+
+        Request::NsPaths { ns } => {
+            let view = ns_view_now(d, &ns)?;
+            let writers: HashMap<String, String> = view.nodes.iter().map(|(w, n)| (n.clone(), w.clone())).collect();
+            let mut peers: Vec<PeerId> = d.store.ns_peers(&ns).map_err(|e| e.to_string())?;
+            for n in writers.keys() {
+                if let Some(p) = parse_destination(n).map(|d| *d.as_bytes()) {
+                    if !peers.contains(&p) {
+                        peers.push(p);
+                    }
+                }
+            }
+            peers.retain(|p| *p != d.node_id);
+            let heard: HashMap<PeerId, u64> = d.store.storage_nodes().map_err(|e| e.to_string())?.into_iter().map(|n| (n.peer, n.last_heard_ms)).collect();
+            let linked: std::collections::HashSet<PeerId> = d.links.lock().unwrap().keys().copied().collect();
+            let mut paths = Vec::new();
+            for p in peers {
+                let node = hex(&p);
+                let hops = match parse_destination(&node) {
+                    Some(dest) => d.transport.hops(dest).await,
+                    None => None,
+                };
+                let q = d.store.link_quality(&p).unwrap_or_default();
+                paths.push(libretifs::PathInfo {
+                    writer: writers.get(&node).cloned(),
+                    hops,
+                    rtt_ms: q.rtt_ms,
+                    rate_bps: q.rate_bps,
+                    slow: q.rtt_ms > 0 && q.slow(),
+                    last_heard_ms: heard.get(&p).copied().unwrap_or(0),
+                    linked: linked.contains(&p),
+                    node,
+                });
+            }
+            // Members first, then the nearest.
+            paths.sort_by_key(|p| (p.writer.is_none(), p.hops.unwrap_or(u8::MAX)));
+            Ok(Response::Paths { paths })
+        }
+
+        Request::CrashReport { kind, source, text } => {
+            let said = format!("{kind} report from {source}");
+            let name = tokio::task::spawn_blocking(move || crashlog::write_pending(&kind, &source, &text, true))
+                .await
+                .ok()
+                .flatten()
+                .ok_or("the report couldn't be written")?;
+            println!("{said}: {name}");
+            CRASH_WAKE.notify_one();
             Ok(Response::Done)
         }
 
@@ -3389,6 +3491,12 @@ async fn handle(d: &Daemon, req: Request) -> Result<Response, String> {
                 // Lazy means content too: kept by rules (tags, what's read),
                 // not all of it pulled (a map's 95,000 tiles).
                 d.store.set_ns_keep_by_rules(&ns, true).map_err(|e| e.to_string())?;
+            } else if !d.keep_joined_all && ns != KEYRING {
+                // Joined: its records here, its content fetched as it's read
+                // and kept by tags and rules, not all of it copied to this
+                // device (`retifs library keep NS all` keeps everything; a node
+                // meant to hold everything: `keep_joined = "all"`).
+                d.store.set_ns_keep_by_rules(&ns, true).map_err(|e| e.to_string())?;
             }
             write_ops(d, &ns, vec![Op::Identity(keywrap::public(&identity))]).await?;
             d.ns_seeking.lock().unwrap().insert(ns.clone());
@@ -3439,7 +3547,7 @@ async fn handle(d: &Daemon, req: Request) -> Result<Response, String> {
             let n = entries.len();
             write_ops(d, &ns, vec![Op::Revoke(revoked), Op::Rekey(epoch, entries)]).await?;
             use_key(d, &ns, &new_key)?;
-            println!("ns {ns}: revoked {}…, read key rotated to epoch {epoch} for {n} writer(s){}", &writer[..12.min(writer.len())],
+            println!("library {ns}: revoked {}…, read key rotated to epoch {epoch} for {n} writer(s){}", &writer[..12.min(writer.len())],
                 if unreachable > 0 { format!(", {unreachable} without a known identity left out") } else { String::new() });
             Ok(Response::Namespace(ns_view(d, &ns)?))
         }
@@ -3623,7 +3731,7 @@ async fn handle(d: &Daemon, req: Request) -> Result<Response, String> {
                     // The grant is in the creator's chain: fetched now, so the
                     // answer can say this node may write.
                     if let Err(e) = sync_ns(d, &ns).await {
-                        eprintln!("ns {ns}: {e}");
+                        eprintln!("library {ns}: {e}");
                     }
                 }
                 Err(e) if e.starts_with("the invitation was refused") => return Err(e),
@@ -4014,48 +4122,103 @@ fn ns_view_made(d: &Daemon, ns: &str) -> Result<NsView, String> {
 /// asks each peer for each known writer's head, fetches the commits and
 /// operations files missing here (pinned and served on, so members can sync
 /// from each other), merges, and seeks record content not held yet.
+/// Libraries with a sync round running, each with whether another round was
+/// asked for meanwhile.
+type NsRunning = Arc<Mutex<HashMap<String, bool>>>;
+
 async fn ns_sync(d: Arc<Daemon>) {
     let mut tick = tokio::time::interval(Duration::from_secs(30));
     // What syncing and answering freed goes back to the system now and then
     // (an allocator keeps freed memory otherwise).
     let mut trimmed = Instant::now();
+    // Each library syncs on its own: one with a long merge (95 000 records
+    // newly kept took half an hour on a NAS), or peers that time out one
+    // after another, no longer holds every other library back. A wake while
+    // a library's round runs asks it for one more round when that one ends.
+    let running: NsRunning = Arc::new(Mutex::new(HashMap::new()));
     loop {
         tokio::select! {
             _ = d.ns_wake.notified() => {}
             _ = tick.tick() => {}
         }
         if trimmed.elapsed() > Duration::from_secs(300) {
-            park_idle(&d);
+            let busy: std::collections::HashSet<String> = running.lock().unwrap().keys().cloned().collect();
+            park_idle(&d, &busy);
             trim_memory();
             trimmed = Instant::now();
         }
         for ns in d.store.ns_names().unwrap_or_default() {
-            // A storage-less node's own chain after a restart: back from the
-            // nodes holding its files first. Until then, nothing is merged
-            // (or checkpointed) from the part of it that is here.
-            if own_chain_missing(&d, &ns) {
-                let due = d.own_tried.lock().unwrap().get(&ns).is_none_or(|t| t.elapsed() > Duration::from_secs(600));
-                if due && let Err(e) = restore_own(&d, &ns).await {
-                    d.own_tried.lock().unwrap().insert(ns.clone(), Instant::now());
-                    eprintln!("ns {ns}: own chain: {e}");
-                }
-                if own_chain_missing(&d, &ns) && d.store.ns_peers(&ns).unwrap_or_default().is_empty() {
+            {
+                let mut r = running.lock().unwrap();
+                if let Some(again) = r.get_mut(&ns) {
+                    *again = true;
                     continue;
                 }
+                r.insert(ns.clone(), false);
             }
-            if let Err(e) = publish_checkpoint(&d, &ns).await {
-                eprintln!("ns {ns}: checkpoint: {e}");
-            }
-            if let Err(e) = publish_index(&d, &ns, false).await {
-                eprintln!("ns {ns}: index: {e}");
-            }
-            if let Err(e) = sync_ns(&d, &ns).await {
-                eprintln!("ns {ns}: {e}");
-            }
-            if let Err(e) = member_nodes(&d, &ns).await {
-                eprintln!("ns {ns}: member nodes: {e}");
+            tokio::spawn(ns_sync_one(d.clone(), running.clone(), ns));
+        }
+    }
+}
+
+/// Library `ns`'s sync rounds, until no further round was asked for.
+async fn ns_sync_one(d: Arc<Daemon>, running: NsRunning, ns: String) {
+    // A panic in a round still frees the library for the next one.
+    struct Done(NsRunning, String);
+    impl Drop for Done {
+        fn drop(&mut self) {
+            if let Ok(mut r) = self.0.lock() {
+                r.remove(&self.1);
             }
         }
+    }
+    let done = Done(running, ns.clone());
+    loop {
+        // A round on a thread of its own: a merge's store work (minutes of
+        // disk writes on a big library) blocks this thread, not a worker the
+        // network and the API run on.
+        tokio::task::block_in_place(|| tokio::runtime::Handle::current().block_on(ns_round(&d, &ns)));
+        let again = {
+            let mut r = done.0.lock().unwrap();
+            match r.get_mut(&ns) {
+                Some(a) if *a => {
+                    *a = false;
+                    true
+                }
+                _ => false,
+            }
+        };
+        if !again {
+            break; // `done` frees the library
+        }
+    }
+}
+
+async fn ns_round(d: &Daemon, ns: &str) {
+    // A storage-less node's own chain after a restart: back from the
+    // nodes holding its files first. Until then, nothing is merged
+    // (or checkpointed) from the part of it that is here.
+    if own_chain_missing(d, ns) {
+        let due = d.own_tried.lock().unwrap().get(ns).is_none_or(|t| t.elapsed() > Duration::from_secs(600));
+        if due && let Err(e) = restore_own(d, ns).await {
+            d.own_tried.lock().unwrap().insert(ns.to_string(), Instant::now());
+            eprintln!("library {ns}: own chain: {e}");
+        }
+        if own_chain_missing(d, ns) && d.store.ns_peers(ns).unwrap_or_default().is_empty() {
+            return;
+        }
+    }
+    if let Err(e) = publish_checkpoint(d, ns).await {
+        eprintln!("library {ns}: checkpoint: {e}");
+    }
+    if let Err(e) = publish_index(d, ns, false).await {
+        eprintln!("library {ns}: index: {e}");
+    }
+    if let Err(e) = sync_ns(d, ns).await {
+        eprintln!("library {ns}: {e}");
+    }
+    if let Err(e) = member_nodes(d, ns).await {
+        eprintln!("library {ns}: member nodes: {e}");
     }
 }
 
@@ -4085,7 +4248,7 @@ async fn member_nodes(d: &Daemon, ns: &str) -> Result<(), String> {
         .collect();
     if !new.is_empty() {
         d.store.add_ns_peers(ns, &new).map_err(|e| e.to_string())?;
-        eprintln!("ns {ns}: {} more member node(s) to sync with", new.len());
+        eprintln!("library {ns}: {} more member node(s) to sync with", new.len());
     }
     Ok(())
 }
@@ -4116,7 +4279,7 @@ async fn sync_ns(d: &Daemon, ns: &str) -> Result<(), String> {
         let link = match d.link_to(&peer).await {
             Ok(l) => l,
             Err(e) => {
-                eprintln!("ns {ns}: <{}> unreachable: {e}", hex(&peer));
+                eprintln!("library {ns}: <{}> unreachable: {e}", hex(&peer));
                 continue;
             }
         };
@@ -4139,7 +4302,7 @@ async fn sync_ns(d: &Daemon, ns: &str) -> Result<(), String> {
                 }
                 Err(e) => {
                     d.drop_link(&peer);
-                    eprintln!("ns {ns}: <{}>: {e}", hex(&peer));
+                    eprintln!("library {ns}: <{}>: {e}", hex(&peer));
                     break;
                 }
             };
@@ -4174,7 +4337,7 @@ async fn sync_ns(d: &Daemon, ns: &str) -> Result<(), String> {
                 }
             }
             let Some((seed, used_key)) = opened else {
-                eprintln!("ns {ns}: can't read writer {}…'s version {}: its read key wasn't given to this node (revoked?)", &hex(&w)[..12], head.seq);
+                eprintln!("library {ns}: can't read writer {}…'s version {}: its read key wasn't given to this node (revoked?)", &hex(&w)[..12], head.seq);
                 continue;
             };
             d.store.set_key_head(&ns_id, &w, &key_id(&used_key), &raw).map_err(|e| e.to_string())?;
@@ -4189,12 +4352,12 @@ async fn sync_ns(d: &Daemon, ns: &str) -> Result<(), String> {
             // then try the next writer, and this one again from the next peer.
             let held_to = if gaps.contains(&w) { None } else { known.as_ref().map(|k| k.commit.0) };
             if gaps.contains(&w) {
-                println!("ns {ns}: writer {}…'s chain here has a gap; fetching it again", &hex(&w)[..12]);
+                println!("library {ns}: writer {}…'s chain here has a gap; fetching it again", &hex(&w)[..12]);
             }
             let got = match fetch_chain(d, link, &addr, (head.commit, seed), &w, floors.get(&w).copied(), held_to, walk).await {
                 Ok(got) => got,
                 Err(e) => {
-                    eprintln!("ns {ns}: writer {}… from <{}>: {e}", &hex(&w)[..12], hex(&peer));
+                    eprintln!("library {ns}: writer {}… from <{}>: {e}", &hex(&w)[..12], hex(&peer));
                     continue;
                 }
             };
@@ -4203,12 +4366,12 @@ async fn sync_ns(d: &Daemon, ns: &str) -> Result<(), String> {
             }
             if let Some(cp) = got.checkpoint {
                 if let Err(e) = install_checkpoint(d, ns, link, &cp).await {
-                    eprintln!("ns {ns}: checkpoint {cp} from <{}>: {e}", hex(&peer));
+                    eprintln!("library {ns}: checkpoint {cp} from <{}>: {e}", hex(&peer));
                     searched.remove(&w);
                     continue;
                 }
                 let by = if w == addr.writer { "the creator".to_string() } else { format!("grant holder {}…", &hex(&w)[..12]) };
-                println!("ns {ns}: starting from the checkpoint of {by}: {cp}");
+                println!("library {ns}: starting from the checkpoint of {by}: {cp}");
                 seeking = false;
                 d.ns_seeking.lock().unwrap().remove(ns);
                 floors = checkpoint_floors(d, ns);
@@ -4218,7 +4381,7 @@ async fn sync_ns(d: &Daemon, ns: &str) -> Result<(), String> {
                 .set_writer_head(&ns_id, &retifs_store::WriterHead { writer: w, head: raw, commit: (head.commit, seed) })
                 .map_err(|e| e.to_string())?;
             println!(
-                "ns {ns}: writer {}… at version {} from <{}> ({} commit(s) fetched; walk ended {})",
+                "library {ns}: writer {}… at version {} from <{}> ({} commit(s) fetched; walk ended {})",
                 &hex(&w)[..12],
                 head.seq,
                 hex(&peer),
@@ -4230,13 +4393,13 @@ async fn sync_ns(d: &Daemon, ns: &str) -> Result<(), String> {
         if lazy && !seeking && !advanced {
             match advance_lazy(d, ns, link).await {
                 Ok(Some(file)) => {
-                    println!("ns {ns}: moved to a newer checkpoint, {file} (held lazily: none of its own)");
+                    println!("library {ns}: moved to a newer checkpoint, {file} (held lazily: none of its own)");
                     advanced = true;
                     changed = true;
                     floors = checkpoint_floors(d, ns);
                 }
                 Ok(None) => {}
-                Err(e) => eprintln!("ns {ns}: newer checkpoint from <{}>: {e}", hex(&peer)),
+                Err(e) => eprintln!("library {ns}: newer checkpoint from <{}>: {e}", hex(&peer)),
             }
         }
     }
@@ -4247,7 +4410,7 @@ async fn sync_ns(d: &Daemon, ns: &str) -> Result<(), String> {
         let holders: Vec<[u8; 32]> = merged.writers.iter().filter(|(_, r)| r.contains(&Right::Grant)).map(|(w, _)| *w).collect();
         if holders.iter().all(|w| searched.contains(w) || *w == own) && searched.contains(&addr.writer) {
             d.ns_seeking.lock().unwrap().remove(ns);
-            println!("ns {ns}: no grant holder has named a checkpoint; using the whole history");
+            println!("library {ns}: no grant holder has named a checkpoint; using the whole history");
         } else if !searched.is_empty() {
             d.ns_wake.notify_one(); // grant holders learned this round: search their chains next
         }
@@ -4258,8 +4421,8 @@ async fn sync_ns(d: &Daemon, ns: &str) -> Result<(), String> {
         // (`ns verify` checks on its own and reports the result.)
         if verify && d.store.ns_checkpoint(ns).map_err(|e| e.to_string())?.is_some() {
             match verify_checkpoint(d, ns) {
-                Ok((_, detail)) => println!("ns {ns}: {detail}"),
-                Err(e) => println!("ns {ns}: checkpoint not verified: {e}"),
+                Ok((_, detail)) => println!("library {ns}: {detail}"),
+                Err(e) => println!("library {ns}: checkpoint not verified: {e}"),
             }
         }
         if let Some(e) = ns_entry_get(d, ns) {
@@ -4274,7 +4437,7 @@ async fn sync_ns(d: &Daemon, ns: &str) -> Result<(), String> {
     if changed && d.store.ns_lazy(ns).map_err(|e| e.to_string())? {
         let n = fill_lazy(d, ns).await?;
         if n > 0 {
-            println!("ns {ns}: fetched {n} state node(s) for records changed since the checkpoint");
+            println!("library {ns}: fetched {n} state node(s) for records changed since the checkpoint");
         }
     }
     if changed {
@@ -4286,7 +4449,7 @@ async fn sync_ns(d: &Daemon, ns: &str) -> Result<(), String> {
         // Content kept on this device: pulled now, released when no longer kept.
         let records = d.store.records(ns).map_err(|e| e.to_string())?;
         apply_keep(d, ns, &records)?;
-        println!("ns {ns}: merged, {} record(s), {} writer(s)", records.len(), merged.writers.len());
+        println!("library {ns}: merged, {} record(s), {} writer(s)", records.len(), merged.writers.len());
     }
     Ok(())
 }
@@ -4315,7 +4478,7 @@ fn checkpoint_floors(d: &Daemon, ns: &str) -> HashMap<[u8; 32], Cid> {
 /// replays every chain up to the checkpoint's frontier and compares the
 /// result with the checkpoint, exactly. A checkpoint that doesn't match is
 /// dropped and the library rebuilt from the history. Needs the history
-/// up to the frontier here (`retifs ns verify` fetches it).
+/// up to the frontier here (`retifs library verify` fetches it).
 fn verify_checkpoint(d: &Daemon, ns: &str) -> Result<(bool, String), String> {
     let Some(file) = d.store.ns_checkpoint(ns).map_err(|e| e.to_string())? else {
         return Ok((true, "no checkpoint here: the state is replayed from the whole history".into()));
@@ -4624,7 +4787,7 @@ async fn publish_index(d: &Daemon, ns: &str, force: bool) -> Result<Option<Strin
     let desc = index::Descriptor { index: root, state: keys.seal_state(&checkpoint, iv), time_ms: now_ms() };
     publish_channel(d, &name, desc.encode(), false, 0).await?;
     d.indexed.lock().unwrap().insert(ns.to_string(), checkpoint.root);
-    println!("ns {ns}: blind index of {} key(s), {entries} entr(ies), published for search nodes", declared.len());
+    println!("library {ns}: blind index of {} key(s), {entries} entr(ies), published for search nodes", declared.len());
     Ok(Some(capability))
 }
 
@@ -4800,11 +4963,11 @@ async fn lazy_search(d: &Daemon, ns: &str, terms: &[String]) -> Option<Vec<Recor
             Ok(Err(e)) if e.starts_with("a search needs") => return None,
             Ok(Err(e)) => {
                 miss(&peer);
-                eprintln!("ns {ns}: searching at <{}>: {e}", hex(&peer));
+                eprintln!("library {ns}: searching at <{}>: {e}", hex(&peer));
             }
             Err(_) => {
                 miss(&peer);
-                eprintln!("ns {ns}: searching at <{}>: no answer in {} s", hex(&peer), LAZY_SEARCH_WAIT.as_secs());
+                eprintln!("library {ns}: searching at <{}>: no answer in {} s", hex(&peer), LAZY_SEARCH_WAIT.as_secs());
             }
         }
     }
@@ -4951,7 +5114,7 @@ async fn hold_whole(d: &Daemon, ns: &str) -> Result<(), String> {
         };
         match install_checkpoint(d, ns, link, &file).await {
             Ok(()) => {
-                println!("ns {ns}: held whole now (state from <{}>)", hex(&peer));
+                println!("library {ns}: held whole now (state from <{}>)", hex(&peer));
                 d.ns_wake.notify_one();
                 return Ok(());
             }
@@ -5020,9 +5183,9 @@ async fn restore_own(d: &Daemon, ns: &str) -> Result<(), String> {
             install_checkpoint(d, ns, link, &cp).await?;
             // Named by this node already: not named again.
             d.store.set_ns_checkpoint_published(ns, &cp.root).map_err(|e| e.to_string())?;
-            println!("ns {ns}: own chain back from <{}> ({} commit(s)), starting from its checkpoint {cp}", hex(&h), got.commits);
+            println!("library {ns}: own chain back from <{}> ({} commit(s)), starting from its checkpoint {cp}", hex(&h), got.commits);
         } else {
-            println!("ns {ns}: own chain back from <{}> ({} commit(s), {})", hex(&h), got.commits, got.stopped);
+            println!("library {ns}: own chain back from <{}> ({} commit(s), {})", hex(&h), got.commits, got.stopped);
         }
         d.ns_seeking.lock().unwrap().remove(ns);
         if let Some(e) = ns_entry_get(d, ns) {
@@ -5032,7 +5195,7 @@ async fn restore_own(d: &Daemon, ns: &str) -> Result<(), String> {
             e.gaps.remove(&own);
         }
         let merged = materialize(d, ns)?;
-        println!("ns {ns}: merged, {} record(s), {} writer(s)", d.store.records(ns).map_err(|e| e.to_string())?.len(), merged.writers.len());
+        println!("library {ns}: merged, {} record(s), {} writer(s)", d.store.records(ns).map_err(|e| e.to_string())?.len(), merged.writers.len());
         d.ns_wake.notify_one();
         return Ok(());
     }
@@ -5062,7 +5225,7 @@ async fn publish_checkpoint(d: &Daemon, ns: &str) -> Result<(), String> {
     d.store.need_file(&file).map_err(|e| e.to_string())?;
     d.store.set_ns_checkpoint_published(ns, &file.root).map_err(|e| e.to_string())?;
     write_ops(d, ns, vec![Op::Checkpoint(file)]).await?;
-    println!("ns {ns}: checkpoint {file} named in this node's chain");
+    println!("library {ns}: checkpoint {file} named in this node's chain");
     Ok(())
 }
 
@@ -5305,7 +5468,7 @@ fn keyring_destination_of(identity_hash: &[u8; 16]) -> PeerId {
 /// tag checks out with the words), joins the keyring through it, grants this
 /// node `write` and `grant` there as the recovery identity, then joins every
 /// library the keyring lists and grants itself the same in each. Lost
-/// devices are revoked afterwards, by the user (`retifs ns revoke`).
+/// devices are revoked afterwards, by the user (`retifs library revoke`).
 async fn recovery_restore(d: &Daemon, words: Vec<String>) -> Result<Response, String> {
     let refs: Vec<&str> = words.iter().map(String::as_str).collect();
     let seed = retifs_core::recovery::RecoverySeed::from_words(&refs).map_err(|e| e.to_string())?;
@@ -5653,6 +5816,91 @@ async fn fetch_spread(d: &Daemon, root: &Cid, missing: &[(Cid, retifs_core::Seed
     Ok(progressed)
 }
 
+/// Wakes `crash_reports` (a new report).
+static CRASH_WAKE: Notify = Notify::const_new();
+/// Each node's reports kept in the crash library, the newest.
+const CRASH_KEEP: usize = 50;
+/// The shared instance gone this long is reported.
+const NO_NETWORK_REPORT_AFTER: Duration = Duration::from_secs(300);
+
+/// Moves the crash and trouble reports waiting here (see `crashlog`) into
+/// library `lib` once this node has joined it (ADR-0036): never makes the
+/// library (a node not in it keeps its reports), and keeps only this node's
+/// newest `CRASH_KEEP` there.
+async fn crash_reports(d: Arc<Daemon>, lib: String) {
+    if lib.is_empty() {
+        return;
+    }
+    tokio::time::sleep(Duration::from_secs(30)).await;
+    let mut refused = false;
+    while !stopping() {
+        let joined = d.store.ns_info(&lib).ok().flatten().is_some();
+        let waiting = crashlog::pending();
+        if joined && !waiting.is_empty() {
+            let mut sent = 0;
+            for path in waiting {
+                let Some(name) = path.file_name().and_then(|n| n.to_str()).map(String::from) else { continue };
+                let Some((ms, kind, source)) = crashlog::parse_name(&name) else {
+                    let _ = std::fs::remove_file(&path);
+                    continue;
+                };
+                let Ok(data) = std::fs::read(&path) else { continue };
+                let attrs = vec![
+                    ("path".to_string(), AttrValue::Str(format!("/{}/{name}", d.device))),
+                    ("type".to_string(), AttrValue::Str("text/plain".into())),
+                    ("mtime".to_string(), AttrValue::Int(ms as i64)),
+                    ("kind".to_string(), AttrValue::Str(kind)),
+                    ("source".to_string(), AttrValue::Str(source)),
+                    ("device".to_string(), AttrValue::Str(d.device.clone())),
+                    ("node".to_string(), AttrValue::Str(d.node_hex.clone())),
+                    ("version".to_string(), AttrValue::Str(env!("CARGO_PKG_VERSION").into())),
+                ];
+                match transaction(&d, &lib, vec![TxStep::Create { attrs, data: Some(data) }]).await {
+                    Ok(_) => {
+                        let _ = std::fs::remove_file(&path);
+                        sent += 1;
+                        refused = false;
+                    }
+                    Err(e) => {
+                        if !refused {
+                            eprintln!("crash reports: kept here, library {lib} refused them: {e}");
+                            refused = true;
+                        }
+                        break;
+                    }
+                }
+            }
+            if sent > 0 {
+                println!("crash reports: {sent} written to library {lib}");
+                prune_crash_reports(&d, &lib).await;
+            }
+        }
+        tokio::select! {
+            _ = tokio::time::sleep(Duration::from_secs(600)) => {}
+            _ = CRASH_WAKE.notified() => {}
+        }
+    }
+}
+
+/// This node's reports in `lib` beyond the newest `CRASH_KEEP`, deleted.
+async fn prune_crash_reports(d: &Daemon, lib: &str) {
+    let Ok(Response::Records { records }) = Box::pin(handle(d, Request::Query { ns: lib.to_string(), terms: vec![format!("node={}", d.node_hex)], at: None })).await else {
+        return;
+    };
+    let time = |r: &RecordView| r.attrs.iter().find(|(k, _)| k == "mtime").and_then(|(_, v)| if let AttrValue::Int(t) = v { Some(*t) } else { None }).unwrap_or(0);
+    let mut mine: Vec<(i64, String)> = records.iter().map(|r| (time(r), r.id.clone())).collect();
+    if mine.len() <= CRASH_KEEP {
+        return;
+    }
+    mine.sort();
+    let old: Vec<TxStep> = mine[..mine.len() - CRASH_KEEP].iter().map(|(_, id)| TxStep::Delete { id: id.clone() }).collect();
+    let n = old.len();
+    match transaction(d, lib, old).await {
+        Ok(_) => println!("crash reports: {n} older one(s) of this node's removed from {lib}"),
+        Err(e) => eprintln!("crash reports: removing older ones from {lib}: {e}"),
+    }
+}
+
 /// Followed channels' libraries belong to their writer.
 fn writable(ns: &str) -> Result<(), String> {
     if ns.starts_with("ch-") {
@@ -5798,8 +6046,14 @@ async fn transaction(d: &Daemon, ns: &str, steps: Vec<TxStep>) -> Result<Vec<Rec
                 let id = parse_record_id(&id)?;
                 if !seen.contains(&id) {
                     let before = d.store.get_record(ns, &id).map_err(|e| e.to_string())?.ok_or_else(|| format!("no such record {}", hex(&id)))?;
-                    if data.is_some() || blocks.is_some() {
+                    if data.is_some() {
                         replaced.extend(before.blocks);
+                    } else if let Some(caps) = &blocks {
+                        // Blocks it keeps (its content, when thumbnails are
+                        // added) aren't replaced: counting them would read
+                        // every record of every library on each such write.
+                        let kept: std::collections::HashSet<Cid> = caps.iter().filter_map(|c| c.parse::<FileRef>().ok()).map(|f| f.root).collect();
+                        replaced.extend(before.blocks.into_iter().filter(|b| !kept.contains(&b.root)));
                     }
                 }
                 if let Some(caps) = blocks {
@@ -6272,7 +6526,7 @@ fn apply_keep(d: &Daemon, ns: &str, records: &[Record]) -> Result<(), String> {
     let released = dropped.len();
     if pulled > 0 || released > 0 {
         let how = if all { "everything".to_string() } else { format!("by tags and {} rule(s) for {}", rules.len(), d.device) };
-        println!("ns {ns}: keeping {how}: {pulled} file(s) newly kept, {released} no longer kept");
+        println!("library {ns}: keeping {how}: {pulled} file(s) newly kept, {released} no longer kept");
     }
     Ok(())
 }
@@ -6338,10 +6592,13 @@ fn heads_now(d: &Daemon, ns: &str) -> Result<Heads, String> {
 
 /// Parks the libraries whose state has been idle for `PARK_AFTER`, when it
 /// can come back as it was: the view built from it, nothing held back.
-fn park_idle(d: &Daemon) {
+fn park_idle(d: &Daemon, busy: &std::collections::HashSet<String>) {
     let entries: Vec<(String, Arc<Mutex<NsCache>>)> = d.ns_cache.lock().unwrap().iter().map(|(n, e)| (n.clone(), e.clone())).collect();
     let mut parked = Vec::new();
     for (ns, arc) in entries {
+        if busy.contains(&ns) {
+            continue; // its sync round is using it
+        }
         let Ok(heads) = heads_now(d, &ns) else { continue };
         let mut e = arc.lock().unwrap();
         let idle = e.changed_at.is_none_or(|t| t.elapsed() > PARK_AFTER);
@@ -6552,7 +6809,7 @@ fn resume(d: &Daemon, ns: &str) -> Result<(), String> {
     let (cp, state) = match loaded {
         Ok(x) => x,
         Err(e) => {
-            println!("ns {ns}: checkpoint unusable ({e}); replaying the chains");
+            println!("library {ns}: checkpoint unusable ({e}); replaying the chains");
             return Ok(());
         }
     };
@@ -6575,7 +6832,7 @@ fn resume(d: &Daemon, ns: &str) -> Result<(), String> {
     entry.since_checkpoint = 0;
     entry.ops_since_checkpoint = 0;
     let view = if entry.view_built { "view kept".to_string() } else { format!("view rewritten: {view_count} record(s) there, {state_count} in the state") };
-    println!("ns {ns}: resumed from checkpoint ({} writer(s)) in {:.1} s; {view}", cp.frontier.len(), began.elapsed().as_secs_f64());
+    println!("library {ns}: resumed from checkpoint ({} writer(s)) in {:.1} s; {view}", cp.frontier.len(), began.elapsed().as_secs_f64());
     drop(cache);
     trim_memory();
     Ok(())
@@ -6695,7 +6952,7 @@ fn materialize(d: &Daemon, ns: &str) -> Result<retifs_core::ops::Merged, String>
             entry.state = None;
             entry.needs_history = true;
             drop(cache);
-            println!("ns {ns}: a late grant or revoke needs the history before the checkpoint; fetching it");
+            println!("library {ns}: a late grant or revoke needs the history before the checkpoint; fetching it");
             resume(d, ns)?;
             d.ns_wake.notify_one();
             continue;
@@ -6755,7 +7012,7 @@ fn materialize(d: &Daemon, ns: &str) -> Result<retifs_core::ops::Merged, String>
             let gone = st.prunable(&reach);
             if !gone.is_empty() {
                 st.prune(&gone);
-                println!("ns {ns}: pruned {} tombstone(s)", gone.len());
+                println!("library {ns}: pruned {} tombstone(s)", gone.len());
             }
             checkpoint = Some((st.clone(), frontier));
             break st.merged_meta();
@@ -6769,7 +7026,7 @@ fn materialize(d: &Daemon, ns: &str) -> Result<retifs_core::ops::Merged, String>
         let reach: Vec<([u8; 32], u64, Cid)> = frontier.iter().map(|f| (f.writer, f.seq, f.commit)).collect();
         match save_checkpoint(d, ns, &state, frontier) {
             Ok(file) => {
-                println!("ns {ns}: checkpoint {file}");
+                println!("library {ns}: checkpoint {file}");
                 trim_memory();
                 // The commits it covers needn't stay in memory: chains are walked
                 // back only to it from now on, like after resuming from it, and
@@ -6784,7 +7041,7 @@ fn materialize(d: &Daemon, ns: &str) -> Result<retifs_core::ops::Merged, String>
                     }
                 }
             }
-            Err(e) => println!("ns {ns}: checkpoint failed: {e}"),
+            Err(e) => println!("library {ns}: checkpoint failed: {e}"),
         }
     }
     // Rotated read keys wrapped to this node: take them, newest last.
@@ -6795,7 +7052,7 @@ fn materialize(d: &Daemon, ns: &str) -> Result<retifs_core::ops::Merged, String>
             let Some((_, wrapped)) = ev.entries.iter().find(|(w, _)| *w == me) else { continue };
             let Some(key) = keywrap::unwrap(&identity, wrapped).and_then(|k| <[u8; 32]>::try_from(k).ok()) else { continue };
             if !known.contains(&key) {
-                println!("ns {ns}: new read key, epoch {}, from {}…", ev.epoch, &hex(&ev.by)[..12]);
+                println!("library {ns}: new read key, epoch {}, from {}…", ev.epoch, &hex(&ev.by)[..12]);
             }
             use_key(d, ns, &key)?;
         }

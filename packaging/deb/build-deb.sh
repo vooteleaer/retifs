@@ -98,8 +98,8 @@ Description: distributed, always-encrypted data over Reticulum (prototype)
  formats still change, keep no data in it you can't lose.
  .
  Includes retifsd, the retifs command, the FUSE mount, the local web
- gateway and the attribute extractor. Reticulum is not included: install
- Prns (prnsd), or run another Reticulum shared instance (rnsd).
+ gateway and the attribute extractor. Reticulum is not included: run a
+ Reticulum shared instance on the machine (any implementation).
 EOF
     install -m 0755 "$HERE/postinst" "$HERE/prerm" "$STAGE/DEBIAN/"
     DEB="$OUT/retifs_${DEBVER}_${ARCH}.deb"

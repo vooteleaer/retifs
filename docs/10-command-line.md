@@ -77,7 +77,7 @@ One of your nodes running it is enough ([ADR-0023](adr/0023-attribute-extraction
 ## Sharing
 
 **A whole library** with another device or person:
-1. `retifs ns link photos` prints a `retifs:ns/…` link (the address and your node). Whoever has it can read.
+1. `retifs library link photos` prints a `retifs:ns/…` link (the address and your node). Whoever has it can read.
 2. On their side, `retifs open <link>` joins it.
 3. To let them write too, give them an invitation instead: `retifs invite create photos` prints a one-use `retifs:invite/…` link; `retifs open <link>` joins and gets the grant in one step (or as soon as your node is reachable).
 
@@ -89,9 +89,17 @@ One of your nodes running it is enough ([ADR-0023](adr/0023-attribute-extraction
 
 ## Copies and devices
 
-Every file has three copies by default, yours and two on nearby nodes (encrypted). `retifs ns copies photos 4` sets a library's own number; `retifs nodes` shows the storage nodes this one knows. Give each node its site (`site = "prangli-home"` in `retifs.toml`) and one copy is always kept at another site. Each node keeps everything by default; for a small device, `retifs ns keep photos rules` and tag what it should keep: `keep:<device>=true`, or a keep-rule record.
+Every file has three copies by default, yours and two on nearby nodes (encrypted). `retifs library copies photos 4` sets a library's own number; `retifs nodes` shows the storage nodes this one knows. Give each node its site (`site = "prangli-home"` in `retifs.toml`) and one copy is always kept at another site. A node keeps everything of the libraries it made. Of a library it joined, it keeps the records, and fetches content as it's read, keeping it by tags and rules: tag what it should keep (`keep:<device>=true`, or a keep-rule record). `retifs library keep photos all` keeps all of one library, and `keep_joined = "all"` in `retifs.toml` all of every library joined (a NAS, a backup node).
+
+## When something goes wrong
+
+Each node keeps its last output in `<store>/crash/log`. It writes a report when it panics, when it finds that its last run didn't stop cleanly, and when Reticulum has been unreachable for five minutes. Join a library named `retifs-crashlogs` with a write grant on each of your devices, and the reports go there as `/<device>/<time>-<kind>-<source>.txt`, readable from any of them ([ADR-0036](adr/0036-crash-reports.md)). Crashes of the Android apps go there too.
+
+- `retifs report "Music stopped while playing"` adds your own report, with the daemon's last output.
+- `retifs query retifs-crashlogs device=tablet` lists one device's reports.
+- `crash_library = "..."` in `retifs.toml` names another library; `""` keeps reports on the device.
 
 ## Leaving and deleting
 
-- `retifs ns leave photos` removes a library from this device; others keep theirs. One made on this device needs `--mine`: if no other device has it, it's gone.
-- `retifs ns delete photos --yes` deletes it on every member's device ([ADR-0034](adr/0034-deleting-a-library.md)): only a member who may invite others can.
+- `retifs library leave photos` removes a library from this device; others keep theirs. One made on this device needs `--mine`: if no other device has it, it's gone.
+- `retifs library delete photos --yes` deletes it on every member's device ([ADR-0034](adr/0034-deleting-a-library.md)): only a member who may invite others can.
