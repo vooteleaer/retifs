@@ -64,7 +64,9 @@ $Version = (Select-String -Path "$Root\crates\retifs-node\Cargo.toml" -Pattern '
 # A release's name when this commit is tagged with the version, else a build
 # towards it, counted in commits (docs/versioning.md).
 $Count = (& git -C $Root rev-list --count HEAD)
-$Tag = (& git -C $Root describe --exact-match --tags HEAD 2>$null)
+# Untagged, git says so on stderr, which Windows PowerShell turns into a
+# terminating error under "Stop": tags are listed instead.
+$Tag = (& git -C $Root tag --points-at HEAD) | Where-Object { $_ -eq "v$Version" } | Select-Object -First 1
 $Name = if ($Tag -eq "v$Version") { $Version } else { "$Version-dev.$Count" }
 New-Item -ItemType Directory -Force $Out | Out-Null
 $Setup = Join-Path $Out "retifs-setup-$Name.exe"
