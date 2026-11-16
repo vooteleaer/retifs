@@ -121,19 +121,30 @@ fn attr<'a>(r: &'a RecordView, key: &str) -> Option<&'a AttrValue> {
     r.attrs.iter().find(|(k, _)| k == key).map(|(_, v)| v)
 }
 
-/// Brings one record's extracted attributes up to date. `Ok(false)`: they were.
-fn update(conn: &mut Conn, ns: &str, r: &RecordView) -> Result<bool, String> {
-    let Some(cap) = r.blocks.first() else { return Ok(false) };
+/// Records described per commit. One commit per record made each one a new
+/// version of the library, published to its nodes and answered by every live
+/// query (a music library's 17,000 files: a version every few seconds for a
+/// day, and Music Assistant re-reading the whole library after each).
+const BATCH: usize = 100;
+
+/// A batch is committed after this long even if it isn't full, so a few new
+/// files don't wait for the rest.
+const BATCH_TIME: Duration = Duration::from_secs(15);
+
+/// What brings one record's extracted attributes up to date, as a
+/// transaction step (thumbnails are stored already). `Ok(None)`: they were.
+fn update(conn: &mut Conn, ns: &str, r: &RecordView) -> Result<Option<TxStep>, String> {
+    let Some(cap) = r.blocks.first() else { return Ok(None) };
     let mark = marker(cap);
     // A video described before ffmpeg was here gets its thumbnails now.
     let is_video = matches!(attr(r, "type"), Some(AttrValue::Str(t)) if t.starts_with("video/"));
     let video_wants_thumbs = is_video && attr(r, "block:thumb").is_none() && retifs_extract::ffmpeg_available();
     if matches!(attr(r, MARKER), Some(AttrValue::Str(m)) if *m == mark) && !video_wants_thumbs {
-        return Ok(false);
+        return Ok(None);
     }
     let size = match attr(r, "size") {
         Some(AttrValue::Int(n)) if *n > 0 => *n as u64,
-        _ => return Ok(false),
+        _ => return Ok(None),
     };
     let (found, picture) = {
         let mut content = Content { conn, ns: ns.into(), cap: cap.clone(), size, pos: 0, piece: (0, Vec::new()) };
@@ -190,12 +201,36 @@ fn update(conn: &mut Conn, ns: &str, r: &RecordView) -> Result<bool, String> {
     let unset: Vec<String> = r.attrs.iter().map(|(k, _)| k).filter(|k| is_extracted_key(k) && !attrs.iter().any(|(a, _)| a == *k)).cloned().collect();
     // Only what changes: the same values again would be a new version.
     attrs.retain(|(k, v)| attr(r, k) != Some(v));
-    match blocks {
-        // Attributes and blocks in one commit.
-        Some(blocks) => conn.call(Request::Transaction { ns: ns.into(), steps: vec![TxStep::Set { id: r.id.clone(), attrs, unset, data: None, blocks: Some(blocks) }] })?,
-        None => conn.call(Request::RecordSet { ns: ns.into(), id: r.id.clone(), attrs, unset, data: None })?,
-    };
-    Ok(true)
+    if attrs.is_empty() && unset.is_empty() && blocks.is_none() {
+        return Ok(None);
+    }
+    // Attributes and blocks in one step.
+    Ok(Some(TxStep::Set { id: r.id.clone(), attrs, unset, data: None, blocks }))
+}
+
+fn name_of(r: &RecordView) -> String {
+    attr(r, "path").map(libretifs_text).unwrap_or_else(|| r.id.clone())
+}
+
+/// Commits a batch as one transaction. If it's refused (a record deleted
+/// meanwhile), each step goes on its own, so one doesn't hold up the rest.
+/// The number committed.
+fn commit(conn: &mut Conn, ns: &str, batch: &mut Vec<(String, TxStep)>) -> usize {
+    if batch.is_empty() {
+        return 0;
+    }
+    let steps: Vec<TxStep> = batch.iter().map(|(_, s)| s.clone()).collect();
+    if conn.call(Request::Transaction { ns: ns.into(), steps }).is_ok() {
+        return std::mem::take(batch).len();
+    }
+    let mut done = 0;
+    for (name, step) in std::mem::take(batch) {
+        match conn.call(Request::Transaction { ns: ns.into(), steps: vec![step] }) {
+            Ok(_) => done += 1,
+            Err(e) => eprintln!("{ns} {name}: {e}"),
+        }
+    }
+    done
 }
 
 fn scan(conn: &mut Conn, ns: &str) -> Result<(usize, usize), String> {
@@ -204,16 +239,33 @@ fn scan(conn: &mut Conn, ns: &str) -> Result<(usize, usize), String> {
         _ => return Ok((0, 0)),
     };
     let (mut done, mut failed) = (0, 0);
+    let mut batch: Vec<(String, TxStep)> = Vec::new();
+    let mut since = std::time::Instant::now();
     for r in &records {
         match update(conn, ns, r) {
-            Ok(true) => done += 1,
-            Ok(false) => {}
+            Ok(Some(step)) => {
+                if batch.is_empty() {
+                    since = std::time::Instant::now();
+                }
+                batch.push((name_of(r), step));
+            }
+            Ok(None) => {}
             Err(e) => {
                 failed += 1;
-                eprintln!("{ns} {}: {e}", attr(r, "path").map(libretifs_text).unwrap_or_else(|| r.id.clone()));
+                eprintln!("{ns} {}: {e}", name_of(r));
             }
         }
+        if batch.len() >= BATCH || (!batch.is_empty() && since.elapsed() >= BATCH_TIME) {
+            let n = batch.len();
+            let ok = commit(conn, ns, &mut batch);
+            done += ok;
+            failed += n - ok;
+        }
     }
+    let n = batch.len();
+    let ok = commit(conn, ns, &mut batch);
+    done += ok;
+    failed += n - ok;
     Ok((done, failed))
 }
 
