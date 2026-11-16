@@ -1167,6 +1167,17 @@ impl Sync {
                         self.sweep(&r, plan, d);
                     }
                 },
+                // The plan was made at the start of the round, which in a big
+                // library takes minutes: a file moved here since (Picard
+                // tags a file, then renames it) has its record here already.
+                // Taken for one deleted elsewhere, its new version became a
+                // second record at the same path (4,574 of them, 2026-11-16).
+                None if id.as_deref().is_some_and(|id| self.is_here(id, &abs, d)) => {
+                    empty = false;
+                    if state.as_ref().is_some_and(|i| !i.in_sync) && is_local(&abs) {
+                        self.upload(&abs, id.as_deref(), true, d);
+                    }
+                }
                 None => match state {
                     Some(i) if i.in_sync => {
                         self.changed.lock().unwrap().insert(dir.clone());
@@ -1189,6 +1200,16 @@ impl Sync {
             }
         }
         empty
+    }
+
+    /// Whether record `id` is at `abs` now, as the daemon has it (not as
+    /// the round's plan had it).
+    fn is_here(&self, id: &str, abs: &Path, d: &mut Daemon) -> bool {
+        let Some(path) = self.shared.tree_path(abs) else { return false };
+        match d.records_of(Request::RecordGet { ns: self.shared.ns.clone(), id: id.to_string() }) {
+            Ok(rs) => rs.first().and_then(|r| str_attr(r, "path")).is_some_and(|p| p == path),
+            Err(_) => false,
+        }
     }
 
     /// A file at a path a record has: the record may have changed, or the
