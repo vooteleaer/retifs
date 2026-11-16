@@ -1,6 +1,6 @@
 //! Merges files that have two records at one path into one:
 //!
-//!     cargo run -p libretifs --example merge_twins -- STORE LIB [--apply]
+//!     cargo run -p libretifs --example merge_twins -- STORE LIB [--apply] [--pairs N] [--limit N]
 //!
 //! Before 2026-11-16 the Windows sync could write a file that had just been
 //! changed and moved in the folder (MusicBrainz Picard: tags, then renames)
@@ -30,7 +30,11 @@ async fn main() {
     let mut args = std::env::args().skip(1);
     let store = std::path::PathBuf::from(args.next().expect("STORE"));
     let ns = args.next().expect("LIB");
-    let apply = args.any(|a| a == "--apply");
+    let rest: Vec<String> = args.collect();
+    let apply = rest.iter().any(|a| a == "--apply");
+    // --pairs N: at most N pairs per transaction (default 50); --limit N: only the first N pairs.
+    let num = |flag: &str, default: usize| rest.iter().position(|a| a == flag).and_then(|i| rest.get(i + 1)).and_then(|v| v.parse().ok()).unwrap_or(default);
+    let (per, limit) = (num("--pairs", 50), num("--limit", usize::MAX));
     let mut c = Client::connect(&store).await.expect("connect");
     let records = match c.call(Request::Query { ns: ns.clone(), terms: vec!["has:path".into()], at: None }).await.expect("query") {
         Response::Records { records } => records,
@@ -44,7 +48,7 @@ async fn main() {
     }
     let (mut same, mut newer, mut skipped) = (0, 0, 0);
     let mut steps = Vec::new();
-    for (path, mut rs) in by_path.into_iter().filter(|(_, rs)| rs.len() > 1) {
+    for (path, mut rs) in by_path.into_iter().filter(|(_, rs)| rs.len() > 1).take(limit) {
         if rs.iter().any(|r| r.blocks.is_empty()) {
             skipped += 1;
             println!("left alone (a folder, or no content): {path}");
@@ -74,9 +78,12 @@ async fn main() {
     }
     // A pair's steps stay together: Set, then its Deletes.
     let mut batch = Vec::new();
-    let mut done = 0;
+    let (mut done, mut pairs) = (0, 0);
     for step in steps {
-        if matches!(step, TxStep::Set { .. }) && batch.len() >= 200 {
+        if matches!(step, TxStep::Set { .. }) {
+            pairs += 1;
+        }
+        if matches!(step, TxStep::Set { .. }) && pairs > 1 && (pairs - 1) % per == 0 {
             done += send(&mut c, &ns, std::mem::take(&mut batch)).await;
         }
         batch.push(step);
@@ -87,9 +94,10 @@ async fn main() {
 
 async fn send(c: &mut Client, ns: &str, steps: Vec<TxStep>) -> usize {
     let n = steps.len();
+    let t = std::time::Instant::now();
     match c.call(Request::Transaction { ns: ns.to_string(), steps }).await {
         Ok(Response::Records { .. }) => {
-            println!("  {n} step(s)");
+            println!("  {n} step(s) in {} ms", t.elapsed().as_millis());
             n
         }
         r => {
